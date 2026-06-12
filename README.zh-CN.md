@@ -6,6 +6,47 @@
 向对方输入框打字(`tmux send-keys`)——对接的是你眼前那个**真实的交互会话**,
 而不是后台另起的子进程。
 
+## 一眼看懂
+
+可以把它想成:你在同一个 iTerm2 窗口里开了两个真实的工作台,Claude 和 Codex
+各坐一个 tab。`tmux` 负责把两个工作台固定住,`peer` 负责让它们在你允许时互相看屏幕、
+互相传话。
+
+```mermaid
+flowchart TB
+  You["你"] --> ITerm["iTerm2 一个窗口"]
+  ITerm --> ClaudeTab["tab: Claude Code"]
+  ITerm --> CodexTab["tab: Codex CLI"]
+
+  subgraph Tmux["tmux 会话: agents"]
+    ClaudeWin["tmux window: claude"]
+    CodexWin["tmux window: codex"]
+  end
+
+  ClaudeTab -.显示.-> ClaudeWin
+  CodexTab -.显示.-> CodexWin
+  ClaudeWin <-->|peer peek / tell / wait| CodexWin
+```
+
+一次典型协作看起来是这样:
+
+```mermaid
+sequenceDiagram
+  participant U as 你
+  participant C as Claude tab
+  participant P as peer
+  participant X as Codex tab
+
+  U->>C: 让 Codex 审查 internal/auth
+  C->>P: peer tell "请审查 internal/auth"
+  P->>X: 粘贴消息并回车
+  C->>P: peer wait
+  C->>P: peer peek 120
+  C->>U: 转述 Codex 的结论
+```
+
+如果要给别人演示,可以照着 [中文演示脚本](docs/DEMO.zh-CN.md) 走一遍。
+
 ## 文件
 
 ```

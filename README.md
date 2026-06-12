@@ -12,6 +12,45 @@
 
 Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / `claude -p`), `peer` talks to the **actual interactive session you are looking at** — full context preserved, nothing hidden.
 
+## See It At A Glance
+
+Think of `agent-duo` as two real workbenches in one iTerm2 window. Claude and Codex each get
+one tab. `tmux` keeps both workbenches alive, and `peer` lets them look at each other or pass a
+message only when you ask them to.
+
+```mermaid
+flowchart TB
+  You["You"] --> ITerm["one iTerm2 window"]
+  ITerm --> ClaudeTab["tab: Claude Code"]
+  ITerm --> CodexTab["tab: Codex CLI"]
+
+  subgraph Tmux["tmux session: agents"]
+    ClaudeWin["tmux window: claude"]
+    CodexWin["tmux window: codex"]
+  end
+
+  ClaudeTab -.renders.-> ClaudeWin
+  CodexTab -.renders.-> CodexWin
+  ClaudeWin <-->|peer peek / tell / wait| CodexWin
+```
+
+A typical delegation looks like this:
+
+```mermaid
+sequenceDiagram
+  participant U as You
+  participant C as Claude tab
+  participant P as peer
+  participant X as Codex tab
+
+  U->>C: Ask Codex to review internal/auth
+  C->>P: peer tell "Please review internal/auth"
+  P->>X: Paste message and press Enter
+  C->>P: peer wait
+  C->>P: peer peek 120
+  C->>U: Summarize Codex's conclusions
+```
+
 ## Quick start
 
 ```bash
