@@ -7,7 +7,9 @@
 #
 # 启动后在 iTerm2 里执行:
 #   tmux -CC attach -t agents
-# iTerm2 会把两个 tmux 窗口渲染成两个原生 tab,体验与平时无异。
+# iTerm2 可把两个 tmux 窗口渲染成两个原生 tab。若被打开成两个 macOS 窗口,
+# 到 iTerm2 Settings > General > tmux 将 "When attaching, restore windows as..."
+# 设为 "Tabs in the attaching window"。
 
 set -euo pipefail
 
@@ -44,6 +46,9 @@ cat <<EOF
 
 在 iTerm2 中附加(推荐,两个窗口会变成原生 tab):
     tmux -CC attach -t $SESSION
+
+如果被打开成两个 macOS 窗口:
+    iTerm2 Settings > General > tmux > When attaching, restore windows as... = Tabs in the attaching window
 
 或普通模式附加:
     tmux attach -t $SESSION

@@ -23,6 +23,10 @@ agent-duo-start                   # spawns tmux session "agents": window claude 
 tmux -CC attach -t agents         # iTerm2 renders the two windows as native tabs
 ```
 
+If iTerm2 opens the two tmux windows as separate macOS windows, change this iTerm2 setting:
+`Settings > General > tmux > When attaching, restore windows as... = Tabs in the attaching window`.
+iTerm2 owns that mapping; `agent-duo` creates tmux windows, and iTerm2 decides whether they become native tabs or separate windows.
+
 Append `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` (read by Claude Code) **and** `AGENTS.md` (read by Codex). Same snippet for both — `peer` resolves "self" and "the other side" automatically from `$AGENT_NAME`.
 
 Then just talk naturally:
@@ -65,6 +69,9 @@ The instruction snippet explicitly forbids unsupervised back-and-forth; every ro
 
 **More than two agents?**
 Not yet — see roadmap below.
+
+**Why did iTerm2 open two separate windows instead of tabs?**
+iTerm2 maps tmux windows according to `Settings > General > tmux > When attaching, restore windows as...`. Choose `Tabs in the attaching window`, then attach with `tmux -CC attach -t agents`. The other choices are `Native Windows` and `Native tabs in a new window`.
 
 ## Roadmap
 
