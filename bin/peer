@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# peer — 让同一 tmux 会话里的两个编码 agent(claude / codex)互相观察和发送指令
+#
+# 用法:
+#   peer peek [行数]        查看对方终端最近 N 行输出(默认 80)
+#   peer tell "消息"        发送单行消息到对方输入框并回车
+#   ... | peer tell        从 stdin 投递多行消息(经 tmux buffer + bracketed paste,引号换行安全)
+#   peer wait [超时秒]      等待对方屏幕输出稳定(认为它已完成当前任务),默认最长 300s
+#   peer status             显示自己/对方的身份与 pane 状态
+#   peer esc                向对方发送 Escape(打断它当前的生成)
+#
+# 依赖环境变量:
+#   AGENT_NAME     当前 agent 的身份: claude 或 codex(由 start.sh 注入)
+#   AGENT_SESSION  tmux 会话名,默认 agents
+
+set -euo pipefail
+
+SESSION="${AGENT_SESSION:-agents}"
+ME="${AGENT_NAME:-}"
+
+if [[ -z "$ME" ]]; then
+  echo "错误: 未设置 AGENT_NAME(应为 claude 或 codex)。请通过 start.sh 启动。" >&2
+  exit 1
+fi
+
+case "$ME" in
+  claude) OTHER="codex" ;;
+  codex)  OTHER="claude" ;;
+  *) echo "错误: AGENT_NAME 必须是 claude 或 codex,当前为 '$ME'" >&2; exit 1 ;;
+esac
+
+TARGET="${SESSION}:${OTHER}"
+
+ensure_target() {
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
+    exit 1
+  fi
+  if ! tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$OTHER"; then
+    echo "错误: 会话中找不到名为 '$OTHER' 的窗口。" >&2
+    exit 1
+  fi
+}
+
+capture() {
+  local lines="${1:-80}"
+  tmux capture-pane -p -J -t "$TARGET" -S "-$lines"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  peek)
+    ensure_target
+    echo "===== [$OTHER] 终端最近输出 ====="
+    capture "${1:-80}"
+    echo "===== 输出结束 ====="
+    ;;
+
+  tell)
+    ensure_target
+    # 两种输入方式:
+    #   peer tell "单行消息"
+    #   peer tell < 文件   /   cat <<'EOF' | peer tell   (多行、含引号反引号均安全)
+    buf="peer-${ME}2${OTHER}"
+    if [[ $# -gt 0 ]]; then
+      printf '%s' "$*" | tmux load-buffer -b "$buf" -
+    elif [[ ! -t 0 ]]; then
+      tmux load-buffer -b "$buf" -
+    else
+      echo "用法: peer tell \"消息\"  或  echo \"消息\" | peer tell" >&2
+      exit 1
+    fi
+    # -p: bracketed paste,TUI 将其识别为一次完整粘贴(多行不会被逐行提交)
+    # -d: 粘贴后删除缓冲区
+    tmux paste-buffer -b "$buf" -t "$TARGET" -d -p
+    # 给 TUI 一点处理粘贴的时间,立刻回车可能被吞掉
+    sleep 0.5
+    tmux send-keys -t "$TARGET" Enter
+    echo "已投递给 [$OTHER]。(提示: 用 'peer wait' 等它完成,再 'peer peek' 查看回复)"
+    ;;
+
+  wait)
+    ensure_target
+    timeout="${1:-300}"
+    interval=5
+    elapsed=0
+    prev="$(capture 40)"
+    # 先给对方一点启动时间,避免它还没开始输出就被判定为"稳定"
+    sleep "$interval"
+    while (( elapsed < timeout )); do
+      cur="$(capture 40)"
+      if [[ "$cur" == "$prev" ]]; then
+        echo "[$OTHER] 输出已稳定(约 ${interval}s 无变化),它可能已完成。"
+        exit 0
+      fi
+      prev="$cur"
+      sleep "$interval"
+      (( elapsed += interval ))
+    done
+    echo "等待超时(${timeout}s),[$OTHER] 仍在输出。可稍后再 peer peek。" >&2
+    exit 2
+    ;;
+
+  status)
+    echo "我是: $ME    对方: $OTHER    会话: $SESSION"
+    tmux list-windows -t "$SESSION" -F '窗口: #{window_name}  pane:#{pane_id}  尺寸:#{pane_width}x#{pane_height}' 2>/dev/null \
+      || echo "会话 '$SESSION' 不存在"
+    ;;
+
+  esc)
+    ensure_target
+    tmux send-keys -t "$TARGET" Escape
+    echo "已向 [$OTHER] 发送 Escape。"
+    ;;
+
+  help|*)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac
