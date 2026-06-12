@@ -4,19 +4,32 @@
 
 [简体中文](README.zh-CN.md)
 
-`agent-duo` runs two interactive coding agents (Claude Code and OpenAI Codex CLI) in one tmux session. With iTerm2's native tmux integration (`tmux -CC`), they still look like two ordinary tabs. Each agent gets a tiny `peer` command that lets it:
+You say one sentence; Claude delegates to Codex, waits, and reports back — and the whole exchange happens live, in two ordinary tabs, right before your eyes:
 
-- **read the other agent's live terminal** (`tmux capture-pane`)
-- **type into the other agent's input box** (tmux buffer + bracketed paste)
-- **wait** for the other agent to finish its current task
+```
+┌─ iTerm2 ───────────────────────────────────────────┐
+│  [ Claude Code ]         [ Codex CLI ]             │
+│ ┌──────────────────────┐  ┌──────────────────────┐ │
+│ │ > Ask Codex to review│  │                      │ │
+│ │   internal/auth      │  │                      │ │
+│ │                      │  │                      │ │
+│ │ $ peer tell "..." ───┼──┼──> Please review     │ │
+│ │                      │  │    internal/auth     │ │
+│ │ $ peer wait          │  │ * Reviewing...       │ │
+│ │ $ peer peek <────────┼──┼── Found 2 issues     │ │
+│ └──────────────────────┘  └──────────────────────┘ │
+└────────────────────────────────────────────────────┘
+```
+
+- 👀 **They see each other** — `peer peek` reads the other agent's live terminal
+- ⌨️ **They talk to each other** — `peer tell` types into the other agent's input box; `peer wait` waits for it to finish
+- 🧑‍⚖️ **You stay in charge** — every exchange starts from your instruction; no unsupervised agent-to-agent chatter
 
 Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / `claude -p`), `peer` talks to the **actual interactive session you are looking at** — full context preserved, nothing hidden.
 
-## See It At A Glance
+## How it works
 
-Think of `agent-duo` as two real workbenches in one iTerm2 window. Claude and Codex each get
-one tab. `tmux` keeps both workbenches alive, and `peer` lets them look at each other or pass a
-message only when you ask them to.
+One tmux session, two windows — `claude` and `codex`. iTerm2's native tmux integration (`tmux -CC`) renders them as two ordinary tabs, and the tiny `peer` command gives each agent eyes and a keyboard for the other side:
 
 ```mermaid
 flowchart TB
