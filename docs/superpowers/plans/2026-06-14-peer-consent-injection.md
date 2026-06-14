@@ -1,8 +1,10 @@
 # Consent-Gated Auto-Injection of peer Instructions — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps below are checked because the plan has been implemented.
 
 **Goal:** Make `agent-duo-start` inject the peer collaboration prompt into both agents after asking the user once — Claude via `--append-system-prompt` (no file touched), Codex via a marked, reversible block in the project `AGENTS.md`.
+
+**Status:** Implemented on 2026-06-14. This plan is retained as an implementation record; task checkboxes below reflect completed work.
 
 **Architecture:** Extract pure injection logic into a sourceable `lib/inject.sh` (marker detection, block building, idempotent file write, launch-command building, and a pure plan/decision function). `start.sh` sources it and wires real TTY/stdin/env into the decision. Logic is unit-tested with a zero-dependency bash test harness; the `start.sh` wiring gets one integration test using tmux/claude/codex stubs.
 
@@ -38,7 +40,7 @@ Function interface defined in `lib/inject.sh` (names are fixed — later tasks d
 - Create: `test/assert.sh`
 - Create: `test/run.sh`
 
-- [ ] **Step 1: Write the assert helpers**
+- [x] **Step 1: Write the assert helpers**
 
 Create `test/assert.sh`:
 
@@ -75,7 +77,7 @@ assert_not_ok() { # <name> <cmd...>  (expects non-zero exit)
 }
 ```
 
-- [ ] **Step 2: Write the runner**
+- [x] **Step 2: Write the runner**
 
 Create `test/run.sh`:
 
@@ -95,12 +97,12 @@ echo "==============="
 exit "$rc"
 ```
 
-- [ ] **Step 3: Make runner executable and verify it runs with no test files yet**
+- [x] **Step 3: Make runner executable and verify it runs with no test files yet**
 
 Run: `chmod +x test/run.sh && bash test/run.sh`
 Expected: with `nullglob`, zero test files means the loop body is skipped; prints `===============` then `ALL TESTS PASSED`, exit 0.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add test/assert.sh test/run.sh
@@ -115,7 +117,7 @@ git commit -m "test: add zero-dependency bash assert harness and runner"
 - Create: `lib/inject.sh`
 - Create: `test/inject.test.sh`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `test/inject.test.sh`:
 
@@ -145,12 +147,12 @@ assert_ok "has_block: marker present" adk_has_block "$withblock"
 exit "$ADK_FAIL"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/inject.test.sh`
 Expected: FAIL — `adk_has_block` / `lib/inject.sh` not found (source error or "command not found").
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `lib/inject.sh`:
 
@@ -171,12 +173,12 @@ adk_has_block() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash test/inject.test.sh`
 Expected: three `ok` lines, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/inject.sh test/inject.test.sh
@@ -191,7 +193,7 @@ git commit -m "feat: add adk_has_block marker detection"
 - Modify: `lib/inject.sh`
 - Modify: `test/inject.test.sh`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/inject.test.sh` BEFORE the final `exit "$ADK_FAIL"` line:
 
@@ -206,12 +208,12 @@ assert_contains "block: has body line A"  "$block" 'LINE-A'
 assert_contains "block: has body line B"  "$block" 'LINE-B'
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/inject.test.sh`
 Expected: FAIL — `adk_block: command not found`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Append to `lib/inject.sh`:
 
@@ -226,12 +228,12 @@ adk_block() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash test/inject.test.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/inject.sh test/inject.test.sh
@@ -246,7 +248,7 @@ git commit -m "feat: add adk_block to build the marked AGENTS.md block"
 - Modify: `lib/inject.sh`
 - Modify: `test/inject.test.sh`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/inject.test.sh` before the final `exit`:
 
@@ -271,12 +273,12 @@ assert_contains "inject: keeps user content" "$body" 'USER CONTENT'
 assert_contains "inject: adds block"         "$body" '<!-- agent-duo:start -->'
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/inject.test.sh`
 Expected: FAIL — `adk_inject_codex: command not found`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Append to `lib/inject.sh`:
 
@@ -297,12 +299,12 @@ adk_inject_codex() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash test/inject.test.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/inject.sh test/inject.test.sh
@@ -324,7 +326,7 @@ time — that keeps the multi-line instructions out of `tmux send-keys` (which w
 submit on newlines) and out of `start.sh`'s shell. `printf` with a single-quoted
 format string preserves it literally; `%q` safely quotes the path.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/inject.test.sh` before the final `exit`:
 
@@ -339,12 +341,12 @@ assert_contains "claude_cmd: has cat sub" "$cmd_yes" '"$(cat'
 assert_contains "claude_cmd: has path"   "$cmd_yes" "$instr"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/inject.test.sh`
 Expected: FAIL — `adk_claude_cmd: command not found`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Append to `lib/inject.sh`:
 
@@ -362,12 +364,12 @@ adk_claude_cmd() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash test/inject.test.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/inject.sh test/inject.test.sh
@@ -382,7 +384,7 @@ git commit -m "feat: add adk_claude_cmd launch-command builder"
 - Modify: `lib/inject.sh`
 - Modify: `test/inject.test.sh`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/inject.test.sh` before the final `exit`:
 
@@ -403,12 +405,12 @@ assert_not_ok "yes: empty" adk_answer_yes ""
 assert_not_ok "yes: junk"  adk_answer_yes "maybe"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/inject.test.sh`
 Expected: FAIL — `adk_plan: command not found`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Append to `lib/inject.sh`:
 
@@ -436,12 +438,12 @@ adk_answer_yes() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash test/inject.test.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/inject.sh test/inject.test.sh
@@ -460,7 +462,7 @@ The leading HTML comment ("将本段追加到...") is obsolete now that injectio
 automated. Remove it so the body is pure instructions usable verbatim as both the
 Claude system-prompt append and the Codex block.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/inject.test.sh` before the final `exit`:
 
@@ -474,12 +476,12 @@ assert_contains "instr: keeps collaboration heading" "$allbody" '与另一个编
 assert_contains "instr: keeps peer tell"             "$allbody" 'peer tell'
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/inject.test.sh`
 Expected: FAIL on "no leading HTML comment" (current line 1 starts with `<!--`).
 
-- [ ] **Step 3: Edit the file**
+- [x] **Step 3: Edit the file**
 
 Remove lines 1–3 of `docs/AGENT-INSTRUCTIONS.md` — the two-line HTML comment and the blank line after it — so the file now starts directly with:
 
@@ -489,12 +491,12 @@ Remove lines 1–3 of `docs/AGENT-INSTRUCTIONS.md` — the two-line HTML comment
 
 (Use the Edit tool: delete the `<!-- ... -->` comment block and the following blank line; leave the rest unchanged.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash test/inject.test.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/AGENT-INSTRUCTIONS.md test/inject.test.sh
@@ -509,7 +511,7 @@ git commit -m "docs: drop obsolete manual-append comment from AGENT-INSTRUCTIONS
 - Modify: `start.sh`
 - Create: `test/start.test.sh`
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 Create `test/start.test.sh`:
 
@@ -579,12 +581,12 @@ teardown
 exit "$ADK_FAIL"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash test/start.test.sh`
 Expected: FAIL — current `start.sh` neither writes the block nor adds the flag (scenarios A/B fail).
 
-- [ ] **Step 3: Edit `start.sh` — parse flags and source the lib**
+- [x] **Step 3: Edit `start.sh` — parse flags and source the lib**
 
 In `start.sh`, replace the current lines:
 
@@ -613,7 +615,7 @@ set -- ${_args[@]+"${_args[@]}"}
 WORKDIR="$(cd "${1:-$PWD}" && pwd)"
 ```
 
-- [ ] **Step 4: Edit `start.sh` — source lib after computing `SCRIPT_DIR`/`BIN_DIR`**
+- [x] **Step 4: Edit `start.sh` — source lib after computing `SCRIPT_DIR`/`BIN_DIR`**
 
 Find the existing block:
 
@@ -631,7 +633,7 @@ INSTR="$SCRIPT_DIR/docs/AGENT-INSTRUCTIONS.md"
 source "$LIB_DIR/inject.sh"
 ```
 
-- [ ] **Step 5: Edit `start.sh` — run the consent flow before creating windows**
+- [x] **Step 5: Edit `start.sh` — run the consent flow before creating windows**
 
 Immediately before the `# 窗口 1: claude` comment, insert:
 
@@ -684,7 +686,7 @@ esac
 CLAUDE_LAUNCH="$(adk_claude_cmd "$do_inject" "$INSTR")"
 ```
 
-- [ ] **Step 6: Edit `start.sh` — use the computed claude command**
+- [x] **Step 6: Edit `start.sh` — use the computed claude command**
 
 Replace the claude window launch:
 
@@ -702,17 +704,17 @@ tmux send-keys -t "$SESSION:claude" \
 
 (Leave the codex window launch unchanged — it reads `AGENTS.md` itself.)
 
-- [ ] **Step 7: Run the integration test to verify it passes**
+- [x] **Step 7: Run the integration test to verify it passes**
 
 Run: `bash test/start.test.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 8: Run the full suite**
+- [x] **Step 8: Run the full suite**
 
 Run: `bash test/run.sh`
 Expected: both files pass, `ALL TESTS PASSED`, exit 0.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add start.sh test/start.test.sh
@@ -729,7 +731,7 @@ git commit -m "feat: consent-gated injection of peer instructions in start.sh"
 
 No automated test (docs). Verify by reading.
 
-- [ ] **Step 1: Update `README.md` Quick start**
+- [x] **Step 1: Update `README.md` Quick start**
 
 In `README.md`, find the Quick start block that currently reads:
 
@@ -751,16 +753,16 @@ Answer `y` once and it won't ask again (the marker block records your consent); 
 - Prefer to wire it up by hand? Append the body of `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` and `AGENTS.md` yourself. Same snippet for both — `peer` resolves "self" and "the other side" automatically from `$AGENT_NAME`.
 ```
 
-- [ ] **Step 2: Update `README.zh-CN.md`**
+- [x] **Step 2: Update `README.zh-CN.md`**
 
 Make the equivalent edit in `README.zh-CN.md`'s corresponding section: describe that the first run asks for consent, Claude uses `--append-system-prompt` (no file touched), Codex gets a marked reversible block in `AGENTS.md`, `CLAUDE.md` is untouched, consent is remembered (later runs just remind), declining launches without injection, and `-y` / `AGENT_DUO_AUTO_INJECT=1` covers non-interactive use; manual append remains as fallback. Match the surrounding Chinese tone and formatting of that file.
 
-- [ ] **Step 3: Verify wording**
+- [x] **Step 3: Verify wording**
 
 Run: `grep -n "AGENT_DUO_AUTO_INJECT" README.md README.zh-CN.md`
 Expected: at least one hit in each file.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md README.zh-CN.md
@@ -771,12 +773,12 @@ git commit -m "docs: document consent-gated auto-injection in Quick start"
 
 ## Final verification
 
-- [ ] **Run the full test suite**
+- [x] **Run the full test suite**
 
 Run: `bash test/run.sh`
 Expected: `ALL TESTS PASSED`, exit 0.
 
-- [ ] **Manual smoke (matches spec verification)**
+- [x] **Manual smoke (matches spec verification)**
 
 ```bash
 # 新项目目录、交互式:应出现授权提示

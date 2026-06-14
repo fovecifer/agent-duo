@@ -102,7 +102,7 @@ Claude will run `peer tell` → `peer wait` → `peer peek` and report back. The
 | `peer peek [lines]` | Show the other agent's recent terminal output (default 80 lines) |
 | `peer tell "message"` | Send a one-line message into the other agent's input box and press Enter |
 | `... \| peer tell` | Deliver a **multi-line** message from stdin (tmux buffer + bracketed paste — quotes, backticks and newlines arrive verbatim, no escaping) |
-| `peer wait [seconds]` | Block until the other agent's screen stops changing (default timeout 300s) |
+| `peer wait [seconds] [interval] [stable-samples]` | Block until the other agent's screen is unchanged for repeated samples (defaults: timeout 300s, interval 5s, stable samples 2) |
 | `peer esc` | Send Escape to interrupt the other agent's current generation |
 | `peer status` | Show identities and window state |
 
