@@ -39,6 +39,10 @@ if [[ ! -f "$LIB_DIR/inject.sh" ]]; then
   echo "错误: 找不到 $LIB_DIR/inject.sh,请确认 agent-duo 安装完整。" >&2
   exit 1
 fi
+if [[ ! -f "$INSTR" ]]; then
+  echo "错误: 找不到 $INSTR,请确认 agent-duo 安装完整。" >&2
+  exit 1
+fi
 # shellcheck source=lib/inject.sh
 source "$LIB_DIR/inject.sh"
 
