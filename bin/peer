@@ -3,15 +3,21 @@
 #
 # 用法:
 #   peer peek [行数]        查看对方终端最近 N 行输出(默认 80)
-#   peer tell "消息"        发送单行消息到对方输入框并回车
+#   peer tell [--force] "消息"
+#                           发送单行消息到对方输入框并回车
 #   ... | peer tell        从 stdin 投递多行消息(经 tmux buffer + bracketed paste,引号换行安全)
-#   peer wait [超时秒]      等待对方屏幕输出稳定(认为它已完成当前任务),默认最长 300s
+#   peer wait [超时秒] [采样间隔秒] [连续稳定次数]
+#                           等待对方屏幕输出稳定(认为它已完成当前任务),默认最长 300s
 #   peer status             显示自己/对方的身份与 pane 状态
-#   peer esc                向对方发送 Escape(打断它当前的生成)
+#   peer esc [--force]      向对方发送 Escape(打断它当前的生成)
+#   peer --force tell/esc   跳过权限弹窗检测并强制发送
 #
 # 依赖环境变量:
 #   AGENT_NAME     当前 agent 的身份: claude 或 codex(由 start.sh 注入)
 #   AGENT_SESSION  tmux 会话名,默认 agents
+#   AGENT_CLAUDE_PANE / AGENT_CODEX_PANE
+#                 start.sh 捕获的 pane ID;存在时优先用于定位,避免窗口重命名后错路由
+#   PEER_FORCE=1   跳过 tell/esc 的权限弹窗检测
 
 set -euo pipefail
 
@@ -24,17 +30,33 @@ if [[ -z "$ME" ]]; then
 fi
 
 case "$ME" in
-  claude) OTHER="codex" ;;
-  codex)  OTHER="claude" ;;
+  claude) OTHER="codex"; OTHER_PANE="${AGENT_CODEX_PANE:-}" ;;
+  codex)  OTHER="claude"; OTHER_PANE="${AGENT_CLAUDE_PANE:-}" ;;
   *) echo "错误: AGENT_NAME 必须是 claude 或 codex,当前为 '$ME'" >&2; exit 1 ;;
 esac
 
-TARGET="${SESSION}:${OTHER}"
+TARGET="${OTHER_PANE:-${SESSION}:${OTHER}}"
+
+is_positive_int() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
 
 ensure_target() {
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
     exit 1
+  fi
+  if [[ -n "$OTHER_PANE" ]]; then
+    local pane_session
+    if ! pane_session="$(tmux display-message -p -t "$OTHER_PANE" '#{session_name}' 2>/dev/null)"; then
+      echo "错误: 找不到对方 pane '$OTHER_PANE'。" >&2
+      exit 1
+    fi
+    if [[ "$pane_session" != "$SESSION" ]]; then
+      echo "错误: 对方 pane '$OTHER_PANE' 不属于 tmux 会话 '$SESSION'。" >&2
+      exit 1
+    fi
+    return 0
   fi
   if ! tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$OTHER"; then
     echo "错误: 会话中找不到名为 '$OTHER' 的窗口。" >&2
@@ -47,19 +69,94 @@ capture() {
   tmux capture-pane -p -J -t "$TARGET" -S "-$lines"
 }
 
+matches_screen() {
+  local screen="$1" pattern="$2"
+  printf '%s\n' "$screen" | grep -Eiq "$pattern"
+}
+
+looks_like_prompt() {
+  local screen="$1"
+
+  # Claude/Codex option menus: a selector cursor plus explicit Yes/No choices.
+  if matches_screen "$screen" '^[[:space:]]*(❯|›)[[:space:]]' &&
+     matches_screen "$screen" '^[[:space:]]*[12]\.[[:space:]]*(yes|no)([[:space:]]|$)|^[[:space:]]*(yes|no)[[:space:]]*/[[:space:]]*(no|yes)([[:space:]]|$)|^[[:space:]]*(❯|›)[[:space:]]*([12]\.[[:space:]]*)?(yes|no)([[:space:]]|$)'; then
+    return 0
+  fi
+
+  local pattern
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" || "${pattern:0:1}" == "#" ]] && continue
+    if matches_screen "$screen" "$pattern"; then
+      return 0
+    fi
+  done <<'PATTERNS'
+# Claude/Codex natural-language proceed prompts.
+do you want to proceed
+# Permission approval wording; avoid matching "approved" history.
+(^|[^[:alpha:]])approve([^[:alpha:]]|$)
+# Command permission prompt wording.
+allow command
+# Compact y/n prompts.
+\([[:space:]]*y[[:space:]]*/[[:space:]]*n[[:space:]]*\)
+# Bracketed y/n prompts.
+\[[[:space:]]*y[[:space:]]*/[[:space:]]*n[[:space:]]*\]
+# Confirmation UIs that ask Enter to accept/continue.
+press enter to
+# Chinese permission/confirmation wording.
+是否|允许|确认|继续吗
+PATTERNS
+  return 1
+}
+
+check_safe_to_send_keys() {
+  if [[ "$FORCE_SEND" == "1" || "${PEER_FORCE:-0}" == "1" ]]; then
+    echo "提示: 已跳过对方权限弹窗检测(--force / PEER_FORCE=1)。" >&2
+    return 0
+  fi
+
+  local lines="${PEER_PROMPT_CHECK_LINES:-80}"
+  if ! is_positive_int "$lines"; then
+    echo "错误: PEER_PROMPT_CHECK_LINES 必须是正整数。" >&2
+    exit 1
+  fi
+
+  local screen
+  screen="$(capture "$lines")"
+  if looks_like_prompt "$screen"; then
+    echo "错误: 对方 [$OTHER] 疑似正在等待权限确认/弹窗,peer 未发送按键。请人工查看并处理;如确认要强制发送,使用 --force 或 PEER_FORCE=1。" >&2
+    exit 3
+  fi
+}
+
+FORCE_SEND=0
+if [[ "${1:-}" == "--force" ]]; then
+  FORCE_SEND=1
+  shift
+fi
+
 cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
   peek)
     ensure_target
+    lines="${1:-80}"
+    if ! is_positive_int "$lines"; then
+      echo "错误: peer peek 的行数必须是正整数。" >&2
+      exit 1
+    fi
     echo "===== [$OTHER] 终端最近输出 ====="
-    capture "${1:-80}"
+    capture "$lines"
     echo "===== 输出结束 ====="
     ;;
 
   tell)
     ensure_target
+    if [[ "${1:-}" == "--force" ]]; then
+      FORCE_SEND=1
+      shift
+    fi
+    check_safe_to_send_keys
     # 两种输入方式:
     #   peer tell "单行消息"
     #   peer tell < 文件   /   cat <<'EOF' | peer tell   (多行、含引号反引号均安全)
@@ -83,21 +180,48 @@ case "$cmd" in
 
   wait)
     ensure_target
-    timeout="${1:-300}"
-    interval=5
+    if [[ $# -gt 3 ]]; then
+      echo "用法: peer wait [超时秒] [采样间隔秒] [连续稳定次数]" >&2
+      exit 1
+    fi
+    timeout="${1:-${PEER_WAIT_TIMEOUT:-300}}"
+    interval="${2:-${PEER_WAIT_INTERVAL:-5}}"
+    stable_needed="${3:-${PEER_WAIT_STABLE_SAMPLES:-2}}"
+    lines="${PEER_WAIT_LINES:-40}"
+    if ! is_positive_int "$timeout"; then
+      echo "错误: peer wait 的超时秒数必须是正整数。" >&2
+      exit 1
+    fi
+    if ! is_positive_int "$interval"; then
+      echo "错误: peer wait 的采样间隔秒必须是正整数。" >&2
+      exit 1
+    fi
+    if ! is_positive_int "$stable_needed"; then
+      echo "错误: peer wait 的连续稳定次数必须是正整数。" >&2
+      exit 1
+    fi
+    if ! is_positive_int "$lines"; then
+      echo "错误: PEER_WAIT_LINES 必须是正整数。" >&2
+      exit 1
+    fi
     elapsed=0
-    prev="$(capture 40)"
-    # 先给对方一点启动时间,避免它还没开始输出就被判定为"稳定"
-    sleep "$interval"
+    stable_seen=0
+    prev="$(capture "$lines")"
     while (( elapsed < timeout )); do
-      cur="$(capture 40)"
-      if [[ "$cur" == "$prev" ]]; then
-        echo "[$OTHER] 输出已稳定(约 ${interval}s 无变化),它可能已完成。"
-        exit 0
-      fi
-      prev="$cur"
+      # 先给对方一点启动时间,避免它还没开始输出就被判定为"稳定"
       sleep "$interval"
       (( elapsed += interval ))
+      cur="$(capture "$lines")"
+      if [[ "$cur" == "$prev" ]]; then
+        (( stable_seen += 1 ))
+        if (( stable_seen >= stable_needed )); then
+          echo "[$OTHER] 输出已稳定(连续 ${stable_seen} 次采样一致),它可能已完成。"
+          exit 0
+        fi
+      else
+        stable_seen=0
+      fi
+      prev="$cur"
     done
     echo "等待超时(${timeout}s),[$OTHER] 仍在输出。可稍后再 peer peek。" >&2
     exit 2
@@ -105,12 +229,20 @@ case "$cmd" in
 
   status)
     echo "我是: $ME    对方: $OTHER    会话: $SESSION"
-    tmux list-windows -t "$SESSION" -F '窗口: #{window_name}  pane:#{pane_id}  尺寸:#{pane_width}x#{pane_height}' 2>/dev/null \
-      || echo "会话 '$SESSION' 不存在"
+    echo "目标: $TARGET"
+    if ! tmux list-windows -t "$SESSION" -F '窗口: #{window_name}  pane:#{pane_id}  尺寸:#{pane_width}x#{pane_height}' 2>/dev/null; then
+      echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
+      exit 1
+    fi
     ;;
 
   esc)
     ensure_target
+    if [[ "${1:-}" == "--force" ]]; then
+      FORCE_SEND=1
+      shift
+    fi
+    check_safe_to_send_keys
     tmux send-keys -t "$TARGET" Escape
     echo "已向 [$OTHER] 发送 Escape。"
     ;;

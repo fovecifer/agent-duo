@@ -56,6 +56,17 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+missing_cmd=0
+for agent_cmd in claude codex; do
+  if ! command -v "$agent_cmd" >/dev/null; then
+    echo "错误: 找不到 $agent_cmd,请先安装并确保它在 PATH 上。" >&2
+    missing_cmd=1
+  fi
+done
+if (( missing_cmd != 0 )); then
+  exit 1
+fi
+
 # ---- 注入 peer 协作提示词(方案 B:Claude 走启动参数,Codex 写 AGENTS.md 块)----
 AGENTS_MD="$WORKDIR/AGENTS.md"
 has_block=0; adk_has_block "$AGENTS_MD" && has_block=1
@@ -111,15 +122,24 @@ EOF
 esac
 CLAUDE_LAUNCH="$(adk_claude_cmd "$do_inject" "$INSTR")"
 
-# 窗口 1: claude
-tmux new-session -d -s "$SESSION" -n claude -c "$WORKDIR"
-tmux send-keys -t "$SESSION:claude" \
-  "export AGENT_NAME=claude AGENT_SESSION=$SESSION PATH=\"$BIN_DIR:\$PATH\"; $CLAUDE_LAUNCH" Enter
+shell_quote() {
+  printf '%q' "$1"
+}
 
-# 窗口 2: codex
-tmux new-window -t "$SESSION" -n codex -c "$WORKDIR"
-tmux send-keys -t "$SESSION:codex" \
-  "export AGENT_NAME=codex AGENT_SESSION=$SESSION PATH=\"$BIN_DIR:\$PATH\"; codex" Enter
+SESSION_Q="$(shell_quote "$SESSION")"
+BIN_DIR_Q="$(shell_quote "$BIN_DIR")"
+
+# 窗口 1: claude;窗口 2: codex。捕获 pane ID 后注入给 peer,避免按窗口名路由。
+CLAUDE_PANE="$(tmux new-session -d -s "$SESSION" -n claude -c "$WORKDIR" -P -F '#{pane_id}')"
+CODEX_PANE="$(tmux new-window -t "$SESSION" -n codex -c "$WORKDIR" -P -F '#{pane_id}')"
+CLAUDE_PANE_Q="$(shell_quote "$CLAUDE_PANE")"
+CODEX_PANE_Q="$(shell_quote "$CODEX_PANE")"
+
+tmux send-keys -t "$CLAUDE_PANE" \
+  "export AGENT_NAME=claude AGENT_SESSION=$SESSION_Q AGENT_CLAUDE_PANE=$CLAUDE_PANE_Q AGENT_CODEX_PANE=$CODEX_PANE_Q PATH=$BIN_DIR_Q:\$PATH; $CLAUDE_LAUNCH" Enter
+
+tmux send-keys -t "$CODEX_PANE" \
+  "export AGENT_NAME=codex AGENT_SESSION=$SESSION_Q AGENT_CLAUDE_PANE=$CLAUDE_PANE_Q AGENT_CODEX_PANE=$CODEX_PANE_Q PATH=$BIN_DIR_Q:\$PATH; codex" Enter
 
 cat <<EOF
 ✅ 会话 '$SESSION' 已创建(工作目录: $WORKDIR)

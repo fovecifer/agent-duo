@@ -7,10 +7,15 @@ AGENT_DUO_MARK_START='<!-- agent-duo:start -->'
 AGENT_DUO_MARK_END='<!-- agent-duo:end -->'
 
 # adk_has_block <agents_md_path>
-# 文件存在且包含起始标记 → 0;否则 → 1。
+# 文件存在且包含成对有序标记 → 0;否则 → 1。
 adk_has_block() {
   local f="$1"
-  [[ -f "$f" ]] && grep -qF "$AGENT_DUO_MARK_START" "$f"
+  [[ -f "$f" ]] || return 1
+  awk -v start="$AGENT_DUO_MARK_START" -v end="$AGENT_DUO_MARK_END" '
+    $0 == start { seen_start = 1; next }
+    seen_start && $0 == end { found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$f"
 }
 
 # adk_block <instructions_file>
