@@ -66,6 +66,17 @@ sequenceDiagram
 
 ## Quick start
 
+### Install with Homebrew (recommended)
+
+```sh
+brew install fovecifer/agent-duo/agent-duo
+```
+
+This installs the `peer` and `agent-duo-start` commands and pulls in `tmux`.
+You still need to install and log in to Claude Code and Codex CLI separately.
+
+### Install from source
+
 ```bash
 git clone https://github.com/<you>/agent-duo && cd agent-duo
 ./install.sh                      # symlinks `peer` into ~/.local/bin, checks tmux

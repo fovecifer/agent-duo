@@ -76,6 +76,17 @@ agent-duo/
 
 ## 安装(一次性)
 
+### 用 Homebrew 安装（推荐）
+
+```sh
+brew install fovecifer/agent-duo/agent-duo
+```
+
+会安装 `peer` 与 `agent-duo-start` 命令，并自动装上 `tmux`。
+Claude Code 与 Codex CLI 仍需你自行安装并登录。
+
+### 从源码安装
+
 1. `brew install tmux`(如已安装可跳过)
 2. 获取本仓库并安装命令:
 
