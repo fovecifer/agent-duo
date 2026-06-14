@@ -20,4 +20,13 @@ withblock="$TMP/with.md"
 printf '%s\n' '<!-- agent-duo:start -->' > "$withblock"
 assert_ok "has_block: marker present" adk_has_block "$withblock"
 
+# --- adk_block ---
+instr="$TMP/instr.md"
+printf 'LINE-A\nLINE-B\n' > "$instr"
+block="$(adk_block "$instr")"
+assert_contains "block: has start marker" "$block" '<!-- agent-duo:start -->'
+assert_contains "block: has end marker"   "$block" '<!-- agent-duo:end -->'
+assert_contains "block: has body line A"  "$block" 'LINE-A'
+assert_contains "block: has body line B"  "$block" 'LINE-B'
+
 exit "$ADK_FAIL"

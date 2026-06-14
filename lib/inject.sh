@@ -12,3 +12,12 @@ adk_has_block() {
   local f="$1"
   [[ -f "$f" ]] && grep -qF "$AGENT_DUO_MARK_START" "$f"
 }
+
+# adk_block <instructions_file>
+# 打印带标记的完整块:起始标记 + 指令正文 + 结束标记。
+adk_block() {
+  local instr="$1"
+  printf '%s\n' "$AGENT_DUO_MARK_START"
+  cat "$instr"
+  printf '%s\n' "$AGENT_DUO_MARK_END"
+}
