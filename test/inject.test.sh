@@ -48,4 +48,13 @@ body="$(cat "$existing")"
 assert_contains "inject: keeps user content" "$body" 'USER CONTENT'
 assert_contains "inject: adds block"         "$body" '<!-- agent-duo:start -->'
 
+# --- adk_claude_cmd ---
+cmd_no="$(adk_claude_cmd 0 "$instr")"
+assert_eq "claude_cmd: no-inject is plain" "$cmd_no" "claude"
+
+cmd_yes="$(adk_claude_cmd 1 "$instr")"
+assert_contains "claude_cmd: has flag"   "$cmd_yes" '--append-system-prompt'
+assert_contains "claude_cmd: has cat sub" "$cmd_yes" '"$(cat'
+assert_contains "claude_cmd: has path"   "$cmd_yes" "$instr"
+
 exit "$ADK_FAIL"

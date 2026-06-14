@@ -36,3 +36,15 @@ adk_inject_codex() {
   adk_block "$instr" >> "$f"
   return 0
 }
+
+# adk_claude_cmd <do_inject:0|1> <instructions_file>
+# do_inject=1 → 打印 claude --append-system-prompt "$(cat <path>)"($(...) 故意不展开,
+#               由 claude 窗口自己的 shell 在启动时替换);否则打印纯 claude。
+adk_claude_cmd() {
+  local inject="$1" instr="$2"
+  if [[ "$inject" == "1" ]]; then
+    printf 'claude --append-system-prompt "$(cat %q)"' "$instr"
+  else
+    printf 'claude'
+  fi
+}
