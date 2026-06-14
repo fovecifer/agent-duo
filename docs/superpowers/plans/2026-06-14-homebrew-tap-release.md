@@ -233,7 +233,7 @@ class AgentDuo < Formula
     assert_match "peer", (proj/"AGENTS.md").read
 
     # peer 包装脚本在 keg 中应能正常打印用法（验证 write_exec_script 下 $0 指向真身）
-    assert_match "peer peek", shell_output("#{bin}/peer help")
+    assert_match "peer peek", shell_output("AGENT_NAME=claude #{bin}/peer help")
   end
 end
 ```
