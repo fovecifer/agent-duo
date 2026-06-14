@@ -21,3 +21,18 @@ adk_block() {
   cat "$instr"
   printf '%s\n' "$AGENT_DUO_MARK_END"
 }
+
+# adk_inject_codex <agents_md_path> <instructions_file>
+# 幂等:块已存在 → 不动,返回 1;否则把块追加到文件(不存在则创建),返回 0。
+# 文件已存在且非空时,先空一行再追加,保持可读。
+adk_inject_codex() {
+  local f="$1" instr="$2"
+  if adk_has_block "$f"; then
+    return 1
+  fi
+  if [[ -s "$f" ]]; then
+    printf '\n' >> "$f"
+  fi
+  adk_block "$instr" >> "$f"
+  return 0
+}
