@@ -77,8 +77,15 @@ agent-duo/
 
 1. `brew install tmux`(如已安装可跳过)
 2. 把 `agent-duo/` 放到任意位置,例如 `~/agent-duo`,并 `chmod +x start.sh bin/peer`
-3. 把 `AGENT-INSTRUCTIONS.md` 的内容追加到项目的 `CLAUDE.md`(Claude Code 读取)
-   和 `AGENTS.md`(Codex 读取)。两个文件用同一段内容即可。
+3. `agent-duo-start` 在某个项目里**首次运行**时会询问一次,再启动两个 agent：
+
+   - **Claude**：通过启动参数 `--append-system-prompt` 传入协作说明 —— **不写任何文件**,会话结束即消失。
+   - **Codex**：没有等价的启动参数,因此说明会以带标记、可撤销的块写入项目的 `AGENTS.md`（`<!-- agent-duo:start -->` … `<!-- agent-duo:end -->`）。`CLAUDE.md` 不会被改动。
+
+   回答 `y` 后不会再询问(标记块本身就是同意的记录);后续运行只打印一行友好提示。拒绝则直接启动,不注入,并打印手动步骤。
+
+   - 非交互环境(CI、管道)默认跳过注入 —— 加 `-y` 或设 `AGENT_DUO_AUTO_INJECT=1` 可无提示自动注入。
+   - 更喜欢手动操作?把 `docs/AGENT-INSTRUCTIONS.md` 的正文追加到项目的 `CLAUDE.md` 和 `AGENTS.md` 即可。两个文件用同一段内容,`peer` 会从 `$AGENT_NAME` 自动识别"自己"和"对方"。
 
 ## 日常使用
 

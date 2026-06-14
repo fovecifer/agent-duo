@@ -79,7 +79,15 @@ If iTerm2 opens the two tmux windows as separate macOS windows, change this iTer
 `Settings > General > tmux > When attaching, restore windows as... = Tabs in the attaching window`.
 iTerm2 owns that mapping; `agent-duo` creates tmux windows, and iTerm2 decides whether they become native tabs or separate windows.
 
-Append `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` (read by Claude Code) **and** `AGENTS.md` (read by Codex). Same snippet for both — `peer` resolves "self" and "the other side" automatically from `$AGENT_NAME`.
+On first run in a project, `agent-duo-start` asks once before wiring the agents up:
+
+- **Claude** gets the peer instructions via `--append-system-prompt` at launch — **no file is touched**, and it's gone when the session ends.
+- **Codex** has no equivalent launch flag, so the instructions go into a marked, reversible block in your project's `AGENTS.md` (`<!-- agent-duo:start -->` … `<!-- agent-duo:end -->`). `CLAUDE.md` is never modified.
+
+Answer `y` once and it won't ask again (the marker block records your consent); later runs just print a one-line reminder. Decline and it launches without injecting, printing the manual steps.
+
+- Non-interactive shells (CI, pipes) skip injection by default — pass `-y` or set `AGENT_DUO_AUTO_INJECT=1` to inject without the prompt.
+- Prefer to wire it up by hand? Append the body of `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` and `AGENTS.md` yourself. Same snippet for both — `peer` resolves "self" and "the other side" automatically from `$AGENT_NAME`.
 
 Then just talk naturally:
 
