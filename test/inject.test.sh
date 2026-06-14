@@ -72,4 +72,12 @@ assert_not_ok "yes: n"     adk_answer_yes "n"
 assert_not_ok "yes: empty" adk_answer_yes ""
 assert_not_ok "yes: junk"  adk_answer_yes "maybe"
 
+# --- instructions file is pure (no editorial HTML comment, real content present) ---
+INSTR_FILE="$ROOT/docs/AGENT-INSTRUCTIONS.md"
+firstline="$(sed -n '1p' "$INSTR_FILE")"
+assert_not_contains "instr: no leading HTML comment" "$firstline" '<!--'
+allbody="$(cat "$INSTR_FILE")"
+assert_contains "instr: keeps collaboration heading" "$allbody" '与另一个编码 Agent 协作'
+assert_contains "instr: keeps peer tell"             "$allbody" 'peer tell'
+
 exit "$ADK_FAIL"

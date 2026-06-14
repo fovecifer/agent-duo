@@ -1,6 +1,3 @@
-<!-- 将本段追加到项目的 CLAUDE.md(给 Claude Code)和 AGENTS.md(给 Codex)中。
-     两个文件用同一段内容即可,peer 命令会自动识别"自己"和"对方"。 -->
-
 ## 与另一个编码 Agent 协作
 
 本机的同一个 tmux 会话中还运行着另一个交互式编码 Agent(Claude Code 或 Codex,
