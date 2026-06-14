@@ -57,4 +57,19 @@ assert_contains "claude_cmd: has flag"   "$cmd_yes" '--append-system-prompt'
 assert_contains "claude_cmd: has cat sub" "$cmd_yes" '"$(cat'
 assert_contains "claude_cmd: has path"   "$cmd_yes" "$instr"
 
+# --- adk_plan (has_block, auto_inject, is_tty) ---
+assert_eq "plan: block present → reminder" "$(adk_plan 1 0 0)" "reminder"
+assert_eq "plan: block present beats auto" "$(adk_plan 1 1 1)" "reminder"
+assert_eq "plan: no block + auto → auto"   "$(adk_plan 0 1 0)" "auto"
+assert_eq "plan: no block + tty → prompt"  "$(adk_plan 0 0 1)" "prompt"
+assert_eq "plan: no block, no tty → skip"  "$(adk_plan 0 0 0)" "skip"
+
+# --- adk_answer_yes ---
+assert_ok     "yes: y"     adk_answer_yes "y"
+assert_ok     "yes: Y"     adk_answer_yes "Y"
+assert_ok     "yes: yes"   adk_answer_yes "yes"
+assert_not_ok "yes: n"     adk_answer_yes "n"
+assert_not_ok "yes: empty" adk_answer_yes ""
+assert_not_ok "yes: junk"  adk_answer_yes "maybe"
+
 exit "$ADK_FAIL"

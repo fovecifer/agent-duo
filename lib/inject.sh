@@ -48,3 +48,25 @@ adk_claude_cmd() {
     printf 'claude'
   fi
 }
+
+# adk_plan <has_block:0|1> <auto_inject:0|1> <is_tty:0|1>
+# 打印计划: reminder | auto | prompt | skip
+#   块已存在            → reminder(不重写文件,但 claude 仍加参数)
+#   无块 & auto         → auto    (直接写块 + claude 加参数)
+#   无块 & 交互终端     → prompt  (询问用户)
+#   无块 & 非交互       → skip    (不注入,打印手动说明)
+adk_plan() {
+  local hb="$1" ai="$2" tty="$3"
+  if [[ "$hb" == "1" ]]; then echo reminder; return; fi
+  if [[ "$ai" == "1" ]]; then echo auto; return; fi
+  if [[ "$tty" == "1" ]]; then echo prompt; return; fi
+  echo skip
+}
+
+# adk_answer_yes <answer> → 同意(y/Y/yes/YES/Yes) 返回 0,否则 1。
+adk_answer_yes() {
+  case "$1" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
