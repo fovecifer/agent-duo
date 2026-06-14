@@ -9,6 +9,9 @@ source "$ROOT/lib/inject.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# 注:下面多处特意写死标记字面量(如 '<!-- agent-duo:start -->'),作为对输出契约的
+# 回归保护——不引用 $AGENT_DUO_MARK_START,避免常量被改后测试仍假绿。
+
 # --- adk_has_block ---
 missing="$TMP/none.md"
 assert_not_ok "has_block: file missing" adk_has_block "$missing"
@@ -68,6 +71,8 @@ assert_eq "plan: no block, no tty → skip"  "$(adk_plan 0 0 0)" "skip"
 assert_ok     "yes: y"     adk_answer_yes "y"
 assert_ok     "yes: Y"     adk_answer_yes "Y"
 assert_ok     "yes: yes"   adk_answer_yes "yes"
+assert_ok     "yes: YES"   adk_answer_yes "YES"
+assert_ok     "yes: Yes"   adk_answer_yes "Yes"
 assert_not_ok "yes: n"     adk_answer_yes "n"
 assert_not_ok "yes: empty" adk_answer_yes ""
 assert_not_ok "yes: junk"  adk_answer_yes "maybe"

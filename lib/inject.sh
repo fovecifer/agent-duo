@@ -19,7 +19,8 @@ adk_block() {
   local instr="$1"
   printf '%s\n' "$AGENT_DUO_MARK_START"
   cat "$instr"
-  printf '%s\n' "$AGENT_DUO_MARK_END"
+  # 前置 \n:即使指令文件结尾缺少换行,结束标记也单独成行。
+  printf '\n%s\n' "$AGENT_DUO_MARK_END"
 }
 
 # adk_inject_codex <agents_md_path> <instructions_file>
@@ -33,8 +34,8 @@ adk_inject_codex() {
   if [[ -s "$f" ]]; then
     printf '\n' >> "$f"
   fi
+  # 不显式 return 0:让 adk_block(实为 cat 的退出码)与重定向失败如实传播。
   adk_block "$instr" >> "$f"
-  return 0
 }
 
 # adk_claude_cmd <do_inject:0|1> <instructions_file>
