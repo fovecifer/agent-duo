@@ -35,6 +35,10 @@ SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 BIN_DIR="$SCRIPT_DIR/bin"
 LIB_DIR="$SCRIPT_DIR/lib"
 INSTR="$SCRIPT_DIR/docs/AGENT-INSTRUCTIONS.md"
+if [[ ! -f "$LIB_DIR/inject.sh" ]]; then
+  echo "错误: 找不到 $LIB_DIR/inject.sh,请确认 agent-duo 安装完整。" >&2
+  exit 1
+fi
 # shellcheck source=lib/inject.sh
 source "$LIB_DIR/inject.sh"
 
@@ -61,8 +65,11 @@ case "$(adk_plan "$has_block" "$AUTO" "$is_tty")" in
   auto)
     if adk_inject_codex "$AGENTS_MD" "$INSTR"; then
       echo "✓ 已在 $AGENTS_MD 写入 peer 协作块(-y / AGENT_DUO_AUTO_INJECT)。"
+      do_inject=1
+    else
+      echo "✗ 写入 $AGENTS_MD 失败,已跳过注入。" >&2
+      do_inject=0
     fi
-    do_inject=1
     ;;
   prompt)
     cat <<EOF
@@ -74,8 +81,13 @@ EOF
     printf '是否继续? [y/N] '
     read -r ans || ans=""
     if adk_answer_yes "$ans"; then
-      adk_inject_codex "$AGENTS_MD" "$INSTR" && echo "✓ 已写入 $AGENTS_MD。"
-      do_inject=1
+      if adk_inject_codex "$AGENTS_MD" "$INSTR"; then
+        echo "✓ 已写入 $AGENTS_MD。"
+        do_inject=1
+      else
+        echo "✗ 写入 $AGENTS_MD 失败,已跳过注入。" >&2
+        do_inject=0
+      fi
     else
       do_inject=0
       cat <<EOF

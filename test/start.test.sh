@@ -60,4 +60,17 @@ assert_not_contains "C: claude is plain" "$(cat "$SENDLOG")" '--append-system-pr
 assert_contains  "C: prints manual hint" "$(cat "$SCENARIO_TMP/out.txt")" 'AGENT_DUO_AUTO_INJECT'
 teardown
 
+# 场景 D:-y 标志(等价于 AGENT_DUO_AUTO_INJECT),验证 start.sh 的 flag 解析循环。
+# 注意:run_start 把额外参数当作环境变量前缀,故这里直接调用 start.sh 并把 -y 作为参数传入。
+setup
+PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest bash "$ROOT/start.sh" "$PROJECT" -y \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+assert_ok        "D: AGENTS.md created (-y)" test -f "$PROJECT/AGENTS.md"
+assert_contains  "D: block written (-y)"    "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
+assert_contains  "D: claude got flag (-y)"  "$(cat "$SENDLOG")" '--append-system-prompt'
+teardown
+
+# 说明:prompt 分支(无块 + 无 AUTO + 有 TTY)需要伪终端才能驱动,本无依赖测试框架无法模拟;
+# 其决策路径(adk_plan→prompt、adk_answer_yes)已由 test/inject.test.sh 的单元测试覆盖。
+
 exit "$ADK_FAIL"

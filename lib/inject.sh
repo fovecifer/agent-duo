@@ -24,7 +24,8 @@ adk_block() {
 }
 
 # adk_inject_codex <agents_md_path> <instructions_file>
-# 幂等:块已存在 → 不动,返回 1;否则把块追加到文件(不存在则创建),返回 0。
+# 幂等:块已存在 → 不动,返回 1;成功写入 → 返回 0;I/O 错误 → 返回非零(来自 cat/重定向)。
+# 调用方应只在返回 0 时认为注入成功(块已存在的场景由 adk_plan 提前判掉,不会走到这里)。
 # 文件已存在且非空时,先空一行再追加,保持可读。
 adk_inject_codex() {
   local f="$1" instr="$2"
