@@ -86,7 +86,7 @@ EOF
     read -r ans || ans=""
     if adk_answer_yes "$ans"; then
       if adk_inject_codex "$AGENTS_MD" "$INSTR"; then
-        echo "✓ 已写入 $AGENTS_MD。"
+        echo "✓ 已写入 ${AGENTS_MD}。"
         do_inject=1
       else
         echo "✗ 写入 $AGENTS_MD 失败,已跳过注入。" >&2

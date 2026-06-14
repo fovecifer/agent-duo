@@ -34,6 +34,17 @@ run_start() { # 在 stub PATH + 指定 stdin/env 下运行 start.sh
     >"$SCENARIO_TMP/out.txt" 2>&1
 }
 
+# 静态护栏:start.sh 里不得出现 "$变量" 紧贴非 ASCII 字节的写法。
+# 某些 locale 下 bash 会把多字节字符首字节并入变量名(如 $AGENTS_MD。→ 查找 AGENTS_MD<字节>),
+# 在 set -u 下报 unbound variable。必须写成 ${AGENTS_MD}。这条覆盖了无法用普通测试驱动的交互分支。
+if perl -ne 'exit 1 if /\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]/' "$ROOT/start.sh"; then
+  printf 'ok   start.sh: no bare $var adjacent to non-ASCII\n'
+else
+  printf 'FAIL start.sh: a bare $var is glued to a non-ASCII char (use ${var}) — line:\n'
+  perl -ne 'print "  $.: $_" if /\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]/' "$ROOT/start.sh"
+  ADK_FAIL=1
+fi
+
 # 场景 A:AUTO_INJECT=1 → 无询问,写块,claude 带 --append-system-prompt
 setup
 AGENT_DUO_AUTO_INJECT=1 run_start </dev/null
