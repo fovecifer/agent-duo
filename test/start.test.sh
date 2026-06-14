@@ -1,22 +1,34 @@
 #!/usr/bin/env bash
 # test/start.test.sh — start.sh 注入接线的集成测试(用 stub 替换 tmux/claude/codex)
-set -u
+set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 source "$DIR/assert.sh"
 
+make_tmp() {
+  local tmp
+  tmp="$(mktemp -d)" || { echo "FAIL mktemp -d failed" >&2; exit 1; }
+  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
+    echo "FAIL mktemp -d returned an invalid path" >&2
+    exit 1
+  fi
+  printf '%s\n' "$tmp"
+}
+
 # 为每个场景搭建:stub bin + 干净项目目录 + send-keys 日志
 setup() {
-  SCENARIO_TMP="$(mktemp -d)"
+  SCENARIO_TMP="$(make_tmp)"
   STUB_BIN="$SCENARIO_TMP/bin"; mkdir -p "$STUB_BIN"
   PROJECT="$SCENARIO_TMP/project"; mkdir -p "$PROJECT"
   SENDLOG="$SCENARIO_TMP/sendkeys.log"; : > "$SENDLOG"
 
-  # tmux stub:has-session 返回 1(无会话),send-keys 记录参数,其它成功。
+  # tmux stub:has-session 返回 1(无会话),new-* 返回 pane ID,send-keys 记录参数。
   cat > "$STUB_BIN/tmux" <<STUB
 #!/usr/bin/env bash
 case "\$1" in
   has-session) exit 1 ;;
+  new-session) printf '%%1\n'; exit 0 ;;
+  new-window)  printf '%%2\n'; exit 0 ;;
   send-keys)   printf '%s\n' "\$*" >> "$SENDLOG"; exit 0 ;;
   *)           exit 0 ;;
 esac
@@ -27,10 +39,14 @@ STUB
   printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/codex"
   chmod +x "$STUB_BIN/claude" "$STUB_BIN/codex"
 }
-teardown() { rm -rf "$SCENARIO_TMP"; }
+teardown() {
+  if [[ -n "${SCENARIO_TMP:-}" && -d "$SCENARIO_TMP" && "$SCENARIO_TMP" != "/" ]]; then
+    rm -rf "$SCENARIO_TMP"
+  fi
+}
 
 run_start() { # 在 stub PATH + 指定 stdin/env 下运行 start.sh
-  PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest "$@" bash "$ROOT/start.sh" "$PROJECT" \
+  PATH="${TEST_PATH:-$STUB_BIN:$PATH}" AGENT_SESSION=adktest "$@" bash "$ROOT/start.sh" "$PROJECT" \
     >"$SCENARIO_TMP/out.txt" 2>&1
 }
 
@@ -51,6 +67,7 @@ AGENT_DUO_AUTO_INJECT=1 run_start </dev/null
 assert_ok        "A: AGENTS.md created" test -f "$PROJECT/AGENTS.md"
 assert_contains  "A: block written"     "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
 assert_contains  "A: claude got flag"   "$(cat "$SENDLOG")" '--append-system-prompt'
+assert_contains  "A: pane ids exported"  "$(cat "$SENDLOG")" 'AGENT_CLAUDE_PANE=%1 AGENT_CODEX_PANE=%2'
 teardown
 
 # 场景 B:已有块 → 友好提示,不重复块,claude 仍带参数
@@ -79,6 +96,20 @@ PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest bash "$ROOT/start.sh" "$PROJECT" -y
 assert_ok        "D: AGENTS.md created (-y)" test -f "$PROJECT/AGENTS.md"
 assert_contains  "D: block written (-y)"    "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
 assert_contains  "D: claude got flag (-y)"  "$(cat "$SENDLOG")" '--append-system-prompt'
+teardown
+
+# 场景 E:缺少 claude/codex 预检失败,且不创建 tmux pane。
+setup
+rm -f "$STUB_BIN/codex"
+TEST_PATH="$STUB_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+if run_start </dev/null; then
+  printf 'FAIL E: missing codex should fail\n'
+  ADK_FAIL=1
+else
+  printf 'ok   E: missing codex fails before launch\n'
+fi
+assert_eq        "E: no panes launched" "$(cat "$SENDLOG")" ""
+assert_contains  "E: error mentions codex" "$(cat "$SCENARIO_TMP/out.txt")" '找不到 codex'
 teardown
 
 # 说明:prompt 分支(无块 + 无 AUTO + 有 TTY)需要伪终端才能驱动,本无依赖测试框架无法模拟;

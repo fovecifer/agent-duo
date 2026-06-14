@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
 # test/inject.test.sh — lib/inject.sh 的单元测试
-set -u
+set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 source "$DIR/assert.sh"
 source "$ROOT/lib/inject.sh"
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+make_tmp() {
+  local tmp
+  tmp="$(mktemp -d)" || { echo "FAIL mktemp -d failed" >&2; exit 1; }
+  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
+    echo "FAIL mktemp -d returned an invalid path" >&2
+    exit 1
+  fi
+  printf '%s\n' "$tmp"
+}
+
+TMP="$(make_tmp)"
+cleanup() {
+  if [[ -n "${TMP:-}" && -d "$TMP" && "$TMP" != "/" ]]; then
+    rm -rf "$TMP"
+  fi
+}
+trap cleanup EXIT
 
 # 注:下面多处特意写死标记字面量(如 '<!-- agent-duo:start -->'),作为对输出契约的
 # 回归保护——不引用 $AGENT_DUO_MARK_START,避免常量被改后测试仍假绿。
@@ -19,9 +34,17 @@ assert_not_ok "has_block: file missing" adk_has_block "$missing"
 empty="$TMP/empty.md"; : > "$empty"
 assert_not_ok "has_block: file empty" adk_has_block "$empty"
 
+damaged="$TMP/damaged.md"
+printf '%s\n' '<!-- agent-duo:start -->' > "$damaged"
+assert_not_ok "has_block: lone start marker is damaged" adk_has_block "$damaged"
+
+reversed="$TMP/reversed.md"
+printf '%s\n%s\n' '<!-- agent-duo:end -->' '<!-- agent-duo:start -->' > "$reversed"
+assert_not_ok "has_block: reversed markers are damaged" adk_has_block "$reversed"
+
 withblock="$TMP/with.md"
-printf '%s\n' '<!-- agent-duo:start -->' > "$withblock"
-assert_ok "has_block: marker present" adk_has_block "$withblock"
+printf '%s\n%s\n%s\n' '<!-- agent-duo:start -->' 'x' '<!-- agent-duo:end -->' > "$withblock"
+assert_ok "has_block: complete marker pair present" adk_has_block "$withblock"
 
 # --- adk_block ---
 instr="$TMP/instr.md"
