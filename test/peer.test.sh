@@ -380,6 +380,25 @@ assert_not_ok "add: bad provider" run_peer add --provider gpt --role worker
 assert_contains "add: bad provider error" "$(cat "$ERR")" 'provider 必须是 claude 或 codex'
 teardown
 
+# rm:按 id 找到 pane 并 kill-window。
+setup
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm: succeeds" run_peer rm worker
+assert_contains "rm: kills window" "$(cat "$TMUX_STUB_LOG")" 'kill-window -t %2'
+teardown
+
+# rm:未知 id 报错。
+setup
+assert_not_ok "rm: unknown id" run_peer rm ghost
+assert_contains "rm: unknown error" "$(cat "$ERR")" "找不到 agent 'ghost'"
+teardown
+
+# rm:拒绝移除自己。
+setup
+assert_not_ok "rm: refuse self" run_peer rm supervisor
+assert_contains "rm: refuse self error" "$(cat "$ERR")" '不能移除自己'
+teardown
+
 # 缺失 session:peek/status 都报错。
 setup
 TMUX_STUB_HAS_SESSION=0 assert_not_ok "missing session: peek fails" run_peer peek

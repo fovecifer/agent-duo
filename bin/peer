@@ -350,6 +350,22 @@ case "$cmd" in
     "$0" ls
     ;;
 
+  rm)
+    ensure_session
+    rm_id="${1:-}"
+    if [[ -z "$rm_id" ]]; then
+      echo "用法: peer rm <id>" >&2; exit 1
+    fi
+    if [[ "$rm_id" == "$ME" ]]; then
+      echo "错误: 不能移除自己。" >&2; exit 1
+    fi
+    if ! rm_pane="$(pane_for_id "$rm_id")"; then
+      echo "错误: 找不到 agent '$rm_id'。" >&2; exit 1
+    fi
+    tmux kill-window -t "$rm_pane"
+    echo "已移除 agent '$rm_id'(pane=$rm_pane)。"
+    ;;
+
   esc)
     ensure_session
     if [[ "${1:-}" == "--force" ]]; then FORCE_SEND=1; shift; fi
