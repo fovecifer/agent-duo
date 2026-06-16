@@ -3,6 +3,9 @@
 #
 # 用法:
 #   peer ls                 列出本会话所有 agent(id / role / provider / pane)
+#   peer add --provider claude|codex --role <role> [--id <id>]
+#                           新建并注册一个可见队友(新窗口),返回其 id
+#   peer rm <id>            移除一个队友(关闭其窗口)
 #   peer peek [<id>] [行数]  查看某个 agent 终端最近 N 行输出(默认 80)
 #   peer tell [--force] [<id>] "消息"
 #                           发送单行消息到目标输入框并回车
@@ -379,6 +382,6 @@ case "$cmd" in
     ;;
 
   help|*)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac
