@@ -17,7 +17,7 @@ reg_validate_provider() {
 reg_provider_launch_cmd() {
   local provider="$1" instr="$2"
   case "$provider" in
-    claude) printf 'claude --append-system-prompt "$(cat %s)"' "$instr" ;;
+    claude) printf 'claude --append-system-prompt "$(cat %q)"' "$instr" ;;
     codex)  printf 'codex' ;;
     *)      return 1 ;;
   esac
