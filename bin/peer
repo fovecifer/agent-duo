@@ -31,6 +31,8 @@ PEER_ROOT="$(cd "$(dirname "$PEER_SRC")/.." && pwd)"
 # shellcheck source=lib/registry.sh
 source "$PEER_ROOT/lib/registry.sh"
 
+PEER_INSTR="$PEER_ROOT/docs/AGENT-INSTRUCTIONS.md"
+
 SELF_PANE="${TMUX_PANE:-}"
 
 # 自识别:优先读自己 pane 的 @agent_id;缺失则回退 AGENT_NAME(迁移兼容)。
@@ -198,6 +200,41 @@ case "$cmd" in
         printf '%-3s %-16s %-12s %-10s %s\n' "$mark" "$id" "$role" "$provider" "$pane"
       fi
     done < <(list_agents)
+    ;;
+
+  add)
+    ensure_session
+    provider=""; role=""; want_id=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --provider) provider="${2:-}"; shift 2 ;;
+        --role)     role="${2:-}"; shift 2 ;;
+        --id)       want_id="${2:-}"; shift 2 ;;
+        *) echo "错误: 未知参数 '$1'。用法: peer add --provider claude|codex --role <role> [--id <id>]" >&2; exit 1 ;;
+      esac
+    done
+    if ! reg_validate_provider "$provider"; then
+      echo "错误: provider 必须是 claude 或 codex,当前为 '$provider'。" >&2; exit 1
+    fi
+    if [[ -z "$role" ]]; then
+      echo "错误: 必须用 --role 指定角色。" >&2; exit 1
+    fi
+    new_id="$want_id"
+    if [[ -z "$new_id" ]]; then
+      new_id="$(reg_derive_id "$role" "$(agent_ids)")"
+    elif agent_ids | grep -qx "$new_id"; then
+      echo "错误: id '$new_id' 已被占用。" >&2; exit 1
+    fi
+    # 新建 window(裸 shell),捕获 pane;按 start.sh 模式 send-keys 导出环境并启动 provider。
+    new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$PWD" -P -F '#{pane_id}')"
+    tmux set-option -p -t "$new_pane" @agent_id "$new_id"
+    tmux set-option -p -t "$new_pane" @agent_role "$role"
+    tmux set-option -p -t "$new_pane" @agent_provider "$provider"
+    launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
+    bin_dir="$(dirname "$PEER_SRC")"
+    tmux send-keys -t "$new_pane" \
+      "export AGENT_SESSION=$(printf '%q' "$SESSION") PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
+    echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
     ;;
 
   peek)

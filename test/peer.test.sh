@@ -357,6 +357,29 @@ assert_not_ok "invalid: bad wait timeout" run_peer wait worker nope
 assert_contains "invalid: bad wait error" "$(cat "$ERR")" '超时秒数必须是正整数'
 teardown
 
+# add:新建 window、写三个 @agent_* 标签、send-keys 启动 provider、打印 id。
+setup
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: succeeds" run_peer add --provider codex --role worker --id helper
+assert_contains "add: new-window called" "$(cat "$TMUX_STUB_LOG")" 'new-window'
+assert_contains "add: tags id"       "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id helper'
+assert_contains "add: tags role"     "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_role worker'
+assert_contains "add: tags provider" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_provider codex'
+assert_contains "add: launches codex" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %5'
+assert_contains "add: prints id" "$(cat "$OUT")" 'helper'
+teardown
+
+# add:省略 --id → 由 role 派生;已存在 worker → worker-2。
+setup
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: derive id" run_peer add --provider codex --role worker
+assert_contains "add: derived worker-2" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id worker-2'
+teardown
+
+# add:非法 provider 报错。
+setup
+assert_not_ok "add: bad provider" run_peer add --provider gpt --role worker
+assert_contains "add: bad provider error" "$(cat "$ERR")" 'provider 必须是 claude 或 codex'
+teardown
+
 # 缺失 session:peek/status 都报错。
 setup
 TMUX_STUB_HAS_SESSION=0 assert_not_ok "missing session: peek fails" run_peer peek
