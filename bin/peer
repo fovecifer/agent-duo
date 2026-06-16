@@ -315,8 +315,9 @@ case "$cmd" in
 
   esc)
     ensure_session
+    if [[ "${1:-}" == "--force" ]]; then FORCE_SEND=1; shift; fi
     maybe_id=""
-    if [[ -n "${1:-}" ]]; then maybe_id="$1"; shift; fi
+    if [[ -n "${1:-}" && "${1:-}" != "--force" ]]; then maybe_id="$1"; shift; fi
     if [[ "${1:-}" == "--force" ]]; then FORCE_SEND=1; shift; fi
     target="$(resolve_target_pane "$maybe_id")"
     check_safe_to_send_keys "$target"

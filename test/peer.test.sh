@@ -321,6 +321,13 @@ assert_contains "esc: force notice" "$(cat "$ERR")" '已跳过对方权限弹窗
 assert_contains "esc: force escape" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %2 Escape'
 teardown
 
+# esc:--force(作为参数)跳过弹窗检测并发送 Escape。
+setup
+TMUX_STUB_CAPTURE_MODE=prompt assert_ok "esc: force arg sends despite prompt" run_peer esc --force
+assert_contains "esc: force arg notice" "$(cat "$ERR")" '已跳过对方权限弹窗检测'
+assert_contains "esc: force arg escape" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %2 Escape'
+teardown
+
 # wait:连续两次稳定采样才成功。
 setup
 assert_ok "wait: stable after repeated samples" run_peer wait 3 1 2
