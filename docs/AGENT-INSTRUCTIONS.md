@@ -1,7 +1,8 @@
 ## 与另一个编码 Agent 协作
 
-本机的同一个 tmux 会话中还运行着另一个交互式编码 Agent(Claude Code 或 Codex,
-环境变量 `AGENT_NAME` 标识了你自己的身份)。你可以通过 `peer` 命令与它交互:
+本机的同一个 tmux 会话中还运行着另一个交互式编码 Agent(Claude Code 或 Codex)。
+你自己的身份由所在 tmux pane 的 `@agent_id` 标记(可用 `peer ls` 查看;
+你可能是 supervisor,也可能是某个 worker/reviewer)。你可以通过 `peer` 命令与它交互:
 
 - `peer peek [行数]` — 查看对方终端最近的输出(默认 80 行)
 - `peer tell "消息"` — 发送单行消息到对方输入框并回车,效果等同于用户直接对它说话
@@ -15,11 +16,16 @@
 - `peer wait [超时秒]` — 阻塞等待,直到对方屏幕输出稳定(视为它已完成当前任务)
 - `peer esc` — 向对方发送 Escape,打断它正在进行的生成
 - `peer status` — 查看双方身份与窗口状态
+- `peer ls` — 列出本会话所有 agent(id / role / provider / pane),自己一行带 `*`
+- `peer add --provider claude|codex --role <role> [--id <id>]` — 新建一个**可见的**队友 tab 并自动注册;返回它的 id
+- `peer rm <id>` — 移除一个队友 tab
+- 寻址:`peer tell/peek/wait/esc [<id>]` 可指定目标 id;**正好两个 agent 时可省略**(默认发给"另一个");三个及以上必须显式指定 id
 
 ### 使用规则
 
-1. **仅在用户明确要求时**才向对方发送指令(`peer tell` / `peer esc`);
-   `peer peek` 用于查看状态,可以在用户询问对方进展时主动使用。
+1. **仅在用户明确要求时**才向对方发送指令(`peer tell` / `peer esc`)或改变团队
+   编制(`peer add` / `peer rm`);`peer peek` / `peer ls` 用于查看状态,可在用户
+   询问时主动使用。
 2. 典型流程:`peer tell "..."` → `peer wait` → `peer peek 120`,
    然后把对方回复的要点**转述给用户**,不要只说"已发送"。
 3. 对方屏幕是 TUI 界面,`peek` 抓到的文本可能含边框、状态栏等噪音,自行过滤。
@@ -42,3 +48,6 @@
 2. 用户说「**委派 / 派一个 Codex / 让 Codex 子 agent 去跑 / spawn 一个**」→ 指派生无头子 agent,**不要**用 `peer`。
 3. 用户只说「**codex**」而未限定 → 默认理解为 **peer 对方**(这正是 agent-duo 的主题);但若该动作有副作用或你不确定,先向用户确认是哪一个,再行动。
 4. 注意:即使 peer 对方本身就是一个 Codex 实例,它仍属于第一类(peer),与"派生的 Codex 子 agent"是两回事——一个是你身边的固定队友,一个是你临时叫来的零工。
+5. `peer add` 创建的是**可见的、长期存活的 peer 队友**(在新 tab 里,用户看得见,
+   用 `peer ls`/`peer tell <id>` 与之交互),与第 2 条"派生无头子 agent(codex exec)"
+   完全不同——前者是 agent-duo 工作台的一等成员,后者是临时零工。
