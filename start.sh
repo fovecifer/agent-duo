@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# start.sh — 创建一个 tmux 会话,两个窗口分别运行 Claude Code 和 Codex,
-#            并注入 peer 工具,使两者可以互相查看输出、互发指令。
+# start.sh — 创建一个 tmux 会话,起一个 supervisor 窗口(默认 claude),
+#            并注入 peer 工具,使 supervisor 可按需 `peer add` 长出更多 agent。
 #
 # 用法:
-#   ./start.sh [工作目录]     # 默认为当前目录
+#   ./start.sh [工作目录] [--supervisor claude|codex] [--with <provider>:<role>]
+#   ./start.sh                       # 默认为当前目录,supervisor=claude,无额外 worker
+#   ./start.sh --supervisor codex    # supervisor 用 codex
+#   ./start.sh --with codex:worker   # 额外起一个 codex worker(等价稍后 peer add)
 #
 # 启动后在 iTerm2 里执行:
 #   tmux -CC attach -t agents
-# iTerm2 可把两个 tmux 窗口渲染成两个原生 tab。若被打开成两个 macOS 窗口,
+# iTerm2 可把 tmux 窗口渲染成原生 tab。若被打开成 macOS 窗口,
 # 到 iTerm2 Settings > General > tmux 将 "When attaching, restore windows as..."
 # 设为 "Tabs in the attaching window"。
 
@@ -15,14 +18,19 @@ set -euo pipefail
 
 SESSION="${AGENT_SESSION:-agents}"
 
-# 解析 -y/--yes(其余参数原样保留);AGENT_DUO_AUTO_INJECT=1 等价于 -y。
+# 解析 -y/--yes、--supervisor <provider>、--with <provider>:<role>(其余参数原样保留);
+# AGENT_DUO_AUTO_INJECT=1 等价于 -y。
 AUTO=0
 [[ "${AGENT_DUO_AUTO_INJECT:-0}" == "1" ]] && AUTO=1
+SUPERVISOR_PROVIDER="claude"
+WITH_SPEC=""   # 形如 codex:worker
 _args=()
-for _a in "$@"; do
-  case "$_a" in
-    -y|--yes) AUTO=1 ;;
-    *) _args+=("$_a") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -y|--yes) AUTO=1; shift ;;
+    --supervisor) SUPERVISOR_PROVIDER="${2:-}"; shift 2 ;;
+    --with) WITH_SPEC="${2:-}"; shift 2 ;;
+    *) _args+=("$1"); shift ;;
   esac
 done
 set -- ${_args[@]+"${_args[@]}"}
@@ -39,12 +47,23 @@ if [[ ! -f "$LIB_DIR/inject.sh" ]]; then
   echo "错误: 找不到 $LIB_DIR/inject.sh,请确认 agent-duo 安装完整。" >&2
   exit 1
 fi
+if [[ ! -f "$LIB_DIR/registry.sh" ]]; then
+  echo "错误: 找不到 $LIB_DIR/registry.sh,请确认 agent-duo 安装完整。" >&2
+  exit 1
+fi
 if [[ ! -f "$INSTR" ]]; then
   echo "错误: 找不到 $INSTR,请确认 agent-duo 安装完整。" >&2
   exit 1
 fi
 # shellcheck source=lib/inject.sh
 source "$LIB_DIR/inject.sh"
+# shellcheck source=lib/registry.sh
+source "$LIB_DIR/registry.sh"
+
+if ! reg_validate_provider "$SUPERVISOR_PROVIDER"; then
+  echo "错误: --supervisor 必须是 claude 或 codex,当前为 '$SUPERVISOR_PROVIDER'。" >&2
+  exit 1
+fi
 
 if ! command -v tmux >/dev/null; then
   echo "请先安装 tmux: brew install tmux" >&2
@@ -129,25 +148,45 @@ shell_quote() {
 SESSION_Q="$(shell_quote "$SESSION")"
 BIN_DIR_Q="$(shell_quote "$BIN_DIR")"
 
-# 窗口 1: claude;窗口 2: codex。捕获 pane ID 后注入给 peer,避免按窗口名路由。
-CLAUDE_PANE="$(tmux new-session -d -s "$SESSION" -n claude -c "$WORKDIR" -P -F '#{pane_id}')"
-CODEX_PANE="$(tmux new-window -t "$SESSION" -n codex -c "$WORKDIR" -P -F '#{pane_id}')"
-CLAUDE_PANE_Q="$(shell_quote "$CLAUDE_PANE")"
-CODEX_PANE_Q="$(shell_quote "$CODEX_PANE")"
+# 单 supervisor 窗口(默认 claude,可用 --supervisor 指定 codex)。
+# 身份走 tmux per-pane 用户选项 @agent_*,不再注入 AGENT_NAME。
+SUP_PANE="$(tmux new-session -d -s "$SESSION" -n supervisor -c "$WORKDIR" -P -F '#{pane_id}')"
+tmux set-option -p -t "$SUP_PANE" @agent_id supervisor
+tmux set-option -p -t "$SUP_PANE" @agent_role supervisor
+tmux set-option -p -t "$SUP_PANE" @agent_provider "$SUPERVISOR_PROVIDER"
 
-tmux send-keys -t "$CLAUDE_PANE" \
-  "export AGENT_NAME=claude AGENT_SESSION=$SESSION_Q AGENT_CLAUDE_PANE=$CLAUDE_PANE_Q AGENT_CODEX_PANE=$CODEX_PANE_Q PATH=$BIN_DIR_Q:\$PATH; $CLAUDE_LAUNCH" Enter
+if [[ "$SUPERVISOR_PROVIDER" == "claude" ]]; then
+  SUP_LAUNCH="$CLAUDE_LAUNCH"
+else
+  SUP_LAUNCH="codex"
+fi
+tmux send-keys -t "$SUP_PANE" \
+  "export AGENT_SESSION=$SESSION_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH" Enter
 
-tmux send-keys -t "$CODEX_PANE" \
-  "export AGENT_NAME=codex AGENT_SESSION=$SESSION_Q AGENT_CLAUDE_PANE=$CLAUDE_PANE_Q AGENT_CODEX_PANE=$CODEX_PANE_Q PATH=$BIN_DIR_Q:\$PATH; codex" Enter
+# --with <provider>:<role> → 立即再起一个 worker(等价 peer add)。
+if [[ -n "$WITH_SPEC" ]]; then
+  W_PROVIDER="${WITH_SPEC%%:*}"
+  W_ROLE="${WITH_SPEC#*:}"
+  if ! reg_validate_provider "$W_PROVIDER"; then
+    echo "错误: --with 的 provider 必须是 claude 或 codex,当前为 '$W_PROVIDER'。" >&2
+    exit 1
+  fi
+  W_PANE="$(tmux new-window -t "$SESSION" -n "$W_ROLE" -c "$WORKDIR" -P -F '#{pane_id}')"
+  tmux set-option -p -t "$W_PANE" @agent_id "$W_ROLE"
+  tmux set-option -p -t "$W_PANE" @agent_role "$W_ROLE"
+  tmux set-option -p -t "$W_PANE" @agent_provider "$W_PROVIDER"
+  W_LAUNCH="$(reg_provider_launch_cmd "$W_PROVIDER" "$INSTR")"
+  tmux send-keys -t "$W_PANE" \
+    "export AGENT_SESSION=$SESSION_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
+fi
 
 cat <<EOF
 ✅ 会话 '$SESSION' 已创建(工作目录: $WORKDIR)
 
-在 iTerm2 中附加(推荐,两个窗口会变成原生 tab):
+在 iTerm2 中附加(推荐,窗口会变成原生 tab):
     tmux -CC attach -t $SESSION
 
-如果被打开成两个 macOS 窗口:
+如果被打开成 macOS 窗口:
     iTerm2 Settings > General > tmux > When attaching, restore windows as... = Tabs in the attaching window
 
 或普通模式附加:
