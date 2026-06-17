@@ -22,6 +22,7 @@
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
 #                           拒绝一次待审批请求
+#   peer loopd              在当前 pane 运行 loop daemon 看板/轮询
 #   peer status             显示自己/默认目标的身份与会话内全员
 #   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
 #   peer --force tell/esc   跳过权限弹窗检测并强制发送
@@ -833,6 +834,11 @@ case "$cmd" in
     run_approval_broker deny --root "$AGENT_DUO_ROOT" --reason "$deny_reason" "$approval_id"
     ;;
 
+  loopd)
+    ensure_session
+    exec bash "$PEER_ROOT/scripts/loopd" "$@"
+    ;;
+
   status)
     ensure_session
     target="$(resolve_target_pane "" 2>/dev/null || true)"
@@ -871,6 +877,6 @@ case "$cmd" in
     ;;
 
   help|*)
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

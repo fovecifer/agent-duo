@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Mark supervisor idle, then drain one pending runtime event via Stop block.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
+# shellcheck source=lib/loop.sh
+source "$ROOT/lib/loop.sh"
+
+AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
+ad_loop_stop_drain "$AGENT_DUO_ROOT"
