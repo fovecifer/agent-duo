@@ -405,6 +405,12 @@ peer gate cancel
 - 改变组织、团队、客户可见行为的动作。
 - 无法仅通过 git diff 回滚的动作。
 
+> **更新（2026-06-17）：把"要不要人拍板"从判断变决策树，主轴是可逆性。** 上面最后一条是关键判据，提炼为一句可机械检查的规则：
+>
+> > **"这件事能不能只用 git 撤销？"** 改动只活在 worktree/git 里 → 可逆 → 倾向自主；碰到 git 以外任何东西（云资源、网络入口、钱、secret、别人能看到的状态）→ 不可逆 → 升级。
+>
+> supervisor 要自主做某事，须同时证明 **可逆 + 命中 policy + 在 scope 内**，任一证不出即升级；默认偏向升级。判断**判错也不致命**：危险动作由 `PreToolUse`/`PermissionRequest` policy hook 在执行前独立拦截（UX 分档 ≠ 安全闸门，二者解耦）。升级有三个独立来源：worker 的 `needs.kind=decision`、supervisor 的类别匹配、policy hook 的拦截。完整决策树见 [loop runtime 设计 §5](docs/superpowers/specs/2026-06-17-loop-runtime-design.md)。
+
 ## Truthful Progress Protocol
 
 另一个关键痛点是：当 AI 不能继续有效执行时，它应该及时上报，而不是硬编数据、假装已经完成，或用没有证据的状态描述糊弄过去。
