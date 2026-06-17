@@ -349,11 +349,6 @@ ab_bash_segment_allowed() {
   if ab_match "$text" '^pwd([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
   if ab_match "$text" '^ls([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
   if ab_match "$text" '^(cat|head|tail|wc|rg|grep|awk)([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
-  if ab_match "$text" '^sed[[:space:]]' &&
-     ! ab_match "$text" '(^|[[:space:]])(-i[^[:space:]]*|--in-place(=[^[:space:]]*)?)([[:space:]]|$)'; then
-    printf 'allow.inspect'
-    return 0
-  fi
   if ab_match "$text" '^find[[:space:]]' && ! ab_match "$text" '(-delete|-exec)'; then printf 'allow.inspect'; return 0; fi
   if ab_match "$text" '^git[[:space:]]+(status|diff|show|log|branch|rev-parse|ls-files|grep)([[:space:]]|$)'; then printf 'allow.git_read'; return 0; fi
   if ab_match "$text" '^(bash|sh)[[:space:]]+test/run\.sh([[:space:]]|$)'; then printf 'allow.test'; return 0; fi

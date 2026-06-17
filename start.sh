@@ -240,6 +240,8 @@ LOOPD_PANE="$(tmux new-window -t "$SESSION" -n loopd -c "$WORKDIR" -P -F '#{pane
 tmux set-option -p -t "$LOOPD_PANE" @agent_id loopd
 tmux set-option -p -t "$LOOPD_PANE" @agent_role daemon
 tmux set-option -p -t "$LOOPD_PANE" @agent_provider bash
+mkdir -p "$WORKDIR/.agent-duo/state"
+date +%s > "$WORKDIR/.agent-duo/state/daemon.expected"
 tmux send-keys -t "$LOOPD_PANE" \
   "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q PATH=$BIN_DIR_Q:\$PATH; peer loopd" Enter
 

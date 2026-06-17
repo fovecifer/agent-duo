@@ -376,7 +376,7 @@ TMUX_STUB_CAPTURE_MODE=changing assert_not_ok "wait: times out on changing outpu
 assert_contains "wait: timeout message" "$(cat "$ERR")" '等待超时(1s)'
 teardown
 
-# report:写 rN.json、更新 latest 指针、打印 sentinel、追加极小 event。
+# report:写 rN.json、更新 latest 指针、追加极小 event、打印 sentinel。
 setup
 TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: succeeds" \
   run_peer report --type checkpoint --status in_progress --round 7 --step s1 --delta "tests added" --next "implement codec"
@@ -442,6 +442,8 @@ TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_not_ok "report: queue appe
   run_peer report --type checkpoint --status in_progress --round 4 --delta "cannot enqueue"
 assert_eq "report: queue append failure no sentinel" "$(cat "$OUT")" ""
 assert_contains "report: queue append failure error" "$(cat "$ERR")" 'Is a directory'
+assert_ok "report: queue append failure removes rN" test ! -e "$PROJECT/.agent-duo/state/worker/r4.json"
+assert_ok "report: queue append failure leaves no latest" test ! -L "$PROJECT/.agent-duo/state/worker/report.json"
 teardown
 
 # wait --round:等待指定 round 的 sentinel,不再靠屏幕稳定猜测回合边界。

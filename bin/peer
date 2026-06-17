@@ -17,7 +17,7 @@
 #   peer report --type <plan|checkpoint|request|result>
 #               --status <in_progress|blocked|partial|done|failed|unknown>
 #               [--step sN] [--round N] [--delta ...] [--next ...]
-#                           写结构化 report、打印 sentinel、追加 runtime event
+#                           写结构化 report、追加 runtime event、打印 sentinel
 #   peer approvals          列出待审批的 Approval Broker 请求
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
@@ -776,11 +776,6 @@ case "$cmd" in
       "$evidence_cmd" "$evidence_result" "$evidence_ref"
     mv "$tmp_report" "$report_file"
 
-    tmp_latest="$state_dir/.report.json.$$"
-    rm -f "$tmp_latest"
-    ln -s "r${round}.json" "$tmp_latest"
-    mv -f "$tmp_latest" "$latest_file"
-
     sha="$(sha256_file "$report_file")"
     ts="$(iso_ts)"
     tag="$(codec_tag)"
@@ -792,7 +787,15 @@ case "$cmd" in
     if [[ -z "$summary" ]]; then summary="$(one_line "$next_text")"; fi
     if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
     event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
-    append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"
+    if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"; then
+      rm -f "$report_file"
+      exit 1
+    fi
+
+    tmp_latest="$state_dir/.report.json.$$"
+    rm -f "$tmp_latest"
+    ln -s "r${round}.json" "$tmp_latest"
+    mv -f "$tmp_latest" "$latest_file"
 
     printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
       "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"

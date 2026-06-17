@@ -100,6 +100,16 @@ assert_ok "hook: sed long backup inplace hard-denies" run_hook \
 assert_contains "hook: sed long backup inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 assert_not_contains "hook: sed long backup inplace not allowed" "$(cat "$OUT")" '"decision":"allow"'
 
+assert_ok "hook: sed write command escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"sed -n '\''w /tmp/agent-duo-sed-write'\'' README.md"},"round":6}'
+assert_contains "hook: sed write command pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: sed write command not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+assert_ok "hook: sed file script escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"sed -f rewrite.sed README.md"},"round":6}'
+assert_contains "hook: sed file script pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: sed file script not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
 assert_ok "hook: bash redirection escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo pwn > /tmp/agent-duo-pwn"},"round":6}'
 assert_contains "hook: bash redirection pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'

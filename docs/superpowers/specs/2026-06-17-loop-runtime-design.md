@@ -299,6 +299,7 @@ daemon 不是神秘服务——它是**一个跑在可见 tmux pane 里的 bash 
   events/delivered         # 已投递 queue 行号集合（支持优先级投递）
   state/supervisor.turn    # "busy"/"idle"，由 supervisor 的 hook 写
   state/<id>/report.json   # 各 worker 最新报告（peer report 写）
+  state/daemon.expected    # start/loopd 写入，表示本 session 预期有 daemon
   state/daemon.heartbeat   # daemon 自己的心跳时间戳
 ```
 
@@ -366,7 +367,7 @@ done
 
 ### MVP 边界（分两次长出来）
 
-- **第 1 步（codec）**：只有 `peer report` 写 文件/sentinel/queue + Stop hook drain。**此时人当注入者**，无 daemon 也能跑真 loop。
+- **第 1 步（codec）**：只有 `peer report` 写文件、追加 queue event、打印 sentinel + Stop hook drain。**此时人当注入者**，无 daemon 也能跑真 loop。
 - **第 2 步**：加 ④ idle-arrival 唤醒 → 循环自动化。
 - **第 3 步**：加 ②③⑤ liveness/tick/看板。
 

@@ -141,6 +141,26 @@ assert_ok "hook stop: fresh daemon clears marker" run_hook bash "$ROOT/scripts/s
 assert_ok "hook stop: offline marker cleared" test ! -f "$PROJECT/.agent-duo/state/daemon.offline.notified"
 teardown
 
+# Stop hook treats a missing heartbeat as offline only after loopd was expected.
+setup
+printf '%s\n' "$(date +%s)" > "$PROJECT/.agent-duo/state/daemon.expected"
+assert_ok "hook stop: missing daemon heartbeat blocks" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_contains "hook stop: missing daemon heartbeat decision" "$(cat "$OUT")" '"decision":"block"'
+assert_contains "hook stop: missing daemon heartbeat message" "$(cat "$OUT")" '运行时监控离线'
+teardown
+
+# Daemon offline is a first-class warning and preempts queued runtime events once.
+setup
+printf '%s\n' "$(( $(date +%s) - 999 ))" > "$PROJECT/.agent-duo/state/daemon.heartbeat"
+write_event e1 worker blocked 3 "needs approval" ".agent-duo/state/worker/r3.json"
+assert_ok "hook stop: stale daemon preempts queue" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_contains "hook stop: stale daemon preempt decision" "$(cat "$OUT")" '运行时监控离线'
+assert_eq "hook stop: stale daemon leaves cursor" "$(cat "$PROJECT/.agent-duo/events/cursor" 2>/dev/null || true)" ""
+assert_ok "hook stop: stale daemon then drains queue" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_contains "hook stop: queue drains after offline notice" "$(cat "$OUT")" 'id=e1 agent=worker type=blocked round=3'
+assert_eq "hook stop: queue cursor advances after notice" "$(cat "$PROJECT/.agent-duo/events/cursor")" "1"
+teardown
+
 # Stop hook drains exactly one pending event, emits a block decision, and advances cursor.
 setup
 write_event e1 worker blocked 3 "needs approval" ".agent-duo/state/worker/r3.json"

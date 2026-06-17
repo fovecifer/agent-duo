@@ -232,7 +232,7 @@ Sentinel = 架在「文件(payload)」与「TUI 现实(在跑 / 已停 / 卡在 
 
 ### 顺序与谁来发
 
-**写临时文件 → 原子 rename → 计算 sha → 再打印 sentinel（带该文件 sha）。** 保证正常读者不会读到半截文件，且 supervisor 可用 sha 检测屏幕/文件不一致。当前实现为去掉 Python 运行时依赖，不再做跨崩溃 `fsync`；断电/内核崩溃时可能丢失已返回成功的 report/event。
+**写临时文件 → 原子 rename → 计算 sha → 追加 runtime event → 再打印 sentinel（带该文件 sha）。** 保证正常读者不会读到半截文件，且 supervisor 可用 sha 检测屏幕/文件不一致。当前实现为去掉 Python 运行时依赖，不再做跨崩溃 `fsync`；断电/内核崩溃时可能丢失已返回成功的 report/event。
 
 **sentinel 不是 LLM 手敲的，是 `peer report` CLI 发的**：
 

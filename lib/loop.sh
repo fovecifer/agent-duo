@@ -244,6 +244,10 @@ ad_loop_daemon_heartbeat_file() { # <root>
   printf '%s/daemon.heartbeat' "$(ad_loop_state_dir "$1")"
 }
 
+ad_loop_daemon_expected_file() { # <root>
+  printf '%s/daemon.expected' "$(ad_loop_state_dir "$1")"
+}
+
 ad_loop_daemon_offline_marker() { # <root>
   printf '%s/daemon.offline.notified' "$(ad_loop_state_dir "$1")"
 }
@@ -253,7 +257,10 @@ ad_loop_daemon_heartbeat_stale() { # <root> <now>
   ttl="${LOOPD_HEARTBEAT_TTL:-10}"
   ad_loop_is_nonnegative_int "$ttl" || ttl="10"
   heartbeat_file="$(ad_loop_daemon_heartbeat_file "$root")"
-  [[ -f "$heartbeat_file" ]] || return 1
+  if [[ ! -f "$heartbeat_file" ]]; then
+    [[ -f "$(ad_loop_daemon_expected_file "$root")" ]]
+    return $?
+  fi
   heartbeat="$(sed -n '1p' "$heartbeat_file" 2>/dev/null || true)"
   ad_loop_is_nonnegative_int "$heartbeat" || return 0
   (( now - heartbeat > ttl ))
@@ -277,10 +284,12 @@ ad_loop_maybe_block_daemon_offline() { # <root>
 ad_loop_stop_drain() { # <root>
   local root="$1"
   ad_loop_mark_supervisor_turn "$root" idle
+  if ad_loop_maybe_block_daemon_offline "$root"; then
+    return 0
+  fi
   if ad_loop_with_cursor_lock "$root" ad_loop_deliver_next_event_locked "$root" block; then
     return 0
   fi
-  ad_loop_maybe_block_daemon_offline "$root" || true
 }
 
 ad_loop_user_prompt_submit() { # <root>
@@ -522,6 +531,7 @@ ad_loop_once() { # <root> <session>
   ad_loop_ensure_dirs "$root"
   now="$(ad_loop_now_epoch)"
   heartbeat="$(ad_loop_daemon_heartbeat_file "$root")"
+  printf '%s\n' "$now" > "$(ad_loop_daemon_expected_file "$root")"
   printf '%s\n' "$now" > "$heartbeat"
   silent_t="${LOOPD_SILENT_T:-180}"
   tick_t="${LOOPD_TICK_T:-1800}"
