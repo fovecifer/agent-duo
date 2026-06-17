@@ -18,6 +18,10 @@
 #               --status <in_progress|blocked|partial|done|failed|unknown>
 #               [--step sN] [--round N] [--delta ...] [--next ...]
 #                           写结构化 report、打印 sentinel、追加 runtime event
+#   peer approvals          列出待审批的 Approval Broker 请求
+#   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
+#   peer deny <id> [--reason "..."]
+#                           拒绝一次待审批请求
 #   peer status             显示自己/默认目标的身份与会话内全员
 #   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
 #   peer --force tell/esc   跳过权限弹窗检测并强制发送
@@ -41,6 +45,8 @@ PEER_ROOT="$(cd "$(dirname "$PEER_SRC")/.." && pwd)"
 source "$PEER_ROOT/lib/registry.sh"
 
 PEER_INSTR="$PEER_ROOT/docs/AGENT-INSTRUCTIONS.md"
+APPROVAL_BROKER="$PEER_ROOT/lib/approval_broker.sh"
+APPROVAL_HOOK="$PEER_ROOT/bin/agent-duo-approval-hook"
 AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
 AGENT_DUO_DIR="$AGENT_DUO_ROOT/.agent-duo"
 
@@ -140,9 +146,23 @@ is_report_status() {
 
 require_python3() {
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "错误: peer report 需要 python3 来写入 JSON 并 fsync。" >&2
+    echo "错误: 该 peer 子命令需要 python3 来写入 JSON 并 fsync。" >&2
     exit 1
   fi
+}
+
+run_approval_broker() {
+  bash "$APPROVAL_BROKER" "$@"
+}
+
+install_approval_session_settings() { # <agent_id> <provider> <worktree>
+  local agent_id="$1" provider="$2" worktree="$3"
+  run_approval_broker install \
+    --agent-id "$agent_id" \
+    --provider "$provider" \
+    --hook "$APPROVAL_HOOK" \
+    --root "$AGENT_DUO_ROOT" \
+    --worktree "$worktree"
 }
 
 iso_ts() {
@@ -457,10 +477,16 @@ case "$cmd" in
     tmux set-option -p -t "$new_pane" @agent_id "$new_id"
     tmux set-option -p -t "$new_pane" @agent_role "$role"
     tmux set-option -p -t "$new_pane" @agent_provider "$provider"
+    approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$PWD")"
     launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
     bin_dir="$(dirname "$PEER_SRC")"
+    root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
+    agent_q="$(printf '%q' "$new_id")"
+    worktree_q="$(printf '%q' "$PWD")"
+    hook_q="$(printf '%q' "$APPROVAL_HOOK")"
+    settings_q="$(printf '%q' "$approval_settings")"
     tmux send-keys -t "$new_pane" \
-      "export AGENT_SESSION=$(printf '%q' "$SESSION") PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
+      "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
     echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
     ;;
 
@@ -761,6 +787,52 @@ case "$cmd" in
     append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"
     ;;
 
+  approvals)
+    show_all=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --all) show_all=1; shift ;;
+        *) echo "用法: peer approvals [--all]" >&2; exit 1 ;;
+      esac
+    done
+    if [[ "$show_all" == "1" ]]; then
+      run_approval_broker list --root "$AGENT_DUO_ROOT" --all
+    else
+      run_approval_broker list --root "$AGENT_DUO_ROOT"
+    fi
+    ;;
+
+  approve)
+    approval_id="${1:-}"
+    if [[ -z "$approval_id" ]]; then
+      echo "用法: peer approve <id>" >&2
+      exit 1
+    fi
+    shift
+    if [[ $# -gt 0 ]]; then
+      echo "用法: peer approve <id>" >&2
+      exit 1
+    fi
+    run_approval_broker approve --root "$AGENT_DUO_ROOT" "$approval_id"
+    ;;
+
+  deny)
+    approval_id="${1:-}"
+    if [[ -z "$approval_id" ]]; then
+      echo "用法: peer deny <id> [--reason \"...\"]" >&2
+      exit 1
+    fi
+    shift
+    deny_reason=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --reason) deny_reason="${2:-}"; shift 2 ;;
+        *) echo "用法: peer deny <id> [--reason \"...\"]" >&2; exit 1 ;;
+      esac
+    done
+    run_approval_broker deny --root "$AGENT_DUO_ROOT" --reason "$deny_reason" "$approval_id"
+    ;;
+
   status)
     ensure_session
     target="$(resolve_target_pane "" 2>/dev/null || true)"
@@ -799,6 +871,6 @@ case "$cmd" in
     ;;
 
   help|*)
-    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac
