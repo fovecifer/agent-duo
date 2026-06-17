@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# agent-duo loop daemon: visible tmux-pane dashboard + runtime poller.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
+# shellcheck source=lib/loop.sh
+source "$ROOT/lib/loop.sh"
+
+AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
+SESSION="${AGENT_SESSION:-agents}"
+INTERVAL="${LOOPD_INTERVAL:-2}"
+ONCE="${LOOPD_ONCE:-0}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --once)
+      ONCE=1
+      shift
+      ;;
+    --interval)
+      INTERVAL="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "用法: loopd [--once] [--interval 秒]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! [[ "$INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "错误: --interval/LOOPD_INTERVAL 必须是数字秒数。" >&2
+  exit 1
+fi
+
+while true; do
+  if [[ -t 1 && "$ONCE" != "1" ]]; then
+    printf '\033[H\033[2J'
+  fi
+  ad_loop_once "$AGENT_DUO_ROOT" "$SESSION"
+  if [[ "$ONCE" == "1" ]]; then
+    exit 0
+  fi
+  sleep "$INTERVAL"
+done

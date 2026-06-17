@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+# lib/loop.sh — loop runtime helpers shared by loopd and supervisor hooks.
+# Source-only library; compatible with macOS bash 3.2.
+
+ad_loop_duo_dir() { # <root>
+  printf '%s/.agent-duo' "$1"
+}
+
+ad_loop_events_dir() { # <root>
+  printf '%s/events' "$(ad_loop_duo_dir "$1")"
+}
+
+ad_loop_state_dir() { # <root>
+  printf '%s/state' "$(ad_loop_duo_dir "$1")"
+}
+
+ad_loop_queue_file() { # <root>
+  printf '%s/queue.jsonl' "$(ad_loop_events_dir "$1")"
+}
+
+ad_loop_cursor_file() { # <root>
+  printf '%s/cursor' "$(ad_loop_events_dir "$1")"
+}
+
+ad_loop_cursor_lock() { # <root>
+  printf '%s/cursor.lock' "$(ad_loop_events_dir "$1")"
+}
+
+ad_loop_ensure_dirs() { # <root>
+  local root="$1"
+  mkdir -p "$(ad_loop_events_dir "$root")" "$(ad_loop_state_dir "$root")"
+  [[ -e "$(ad_loop_queue_file "$root")" ]] || : > "$(ad_loop_queue_file "$root")"
+}
+
+ad_loop_now_epoch() {
+  date +%s
+}
+
+ad_loop_iso_ts() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+ad_loop_is_nonnegative_int() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+ad_loop_read_cursor() { # <root>
+  local cursor_file value
+  cursor_file="$(ad_loop_cursor_file "$1")"
+  value="0"
+  if [[ -f "$cursor_file" ]]; then
+    value="$(sed -n '1p' "$cursor_file" 2>/dev/null || true)"
+  fi
+  if ! ad_loop_is_nonnegative_int "$value"; then
+    value="0"
+  fi
+  printf '%s' "$value"
+}
+
+ad_loop_write_cursor() { # <root> <line_number>
+  local root="$1" value="$2" cursor_file tmp
+  ad_loop_ensure_dirs "$root"
+  cursor_file="$(ad_loop_cursor_file "$root")"
+  tmp="${cursor_file}.$$"
+  printf '%s\n' "$value" > "$tmp"
+  mv -f "$tmp" "$cursor_file"
+}
+
+ad_loop_line_count() { # <file>
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    wc -l < "$file" | tr -d ' '
+  else
+    printf '0'
+  fi
+}
+
+ad_loop_pending_count() { # <root>
+  local root="$1" queue cursor lines
+  queue="$(ad_loop_queue_file "$root")"
+  cursor="$(ad_loop_read_cursor "$root")"
+  lines="$(ad_loop_line_count "$queue")"
+  if (( lines > cursor )); then
+    printf '%s' "$(( lines - cursor ))"
+  else
+    printf '0'
+  fi
+}
+
+ad_loop_with_cursor_lock() { # <root> <function> [args...]
+  local root="$1" lock lock_dir fn
+  shift
+  fn="$1"
+  shift
+  ad_loop_ensure_dirs "$root"
+  lock="$(ad_loop_cursor_lock "$root")"
+  : > "$lock"
+  if command -v flock >/dev/null 2>&1; then
+    (
+      exec 9>"$lock"
+      flock 9
+      "$fn" "$@"
+    )
+  else
+    lock_dir="${lock}.d"
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+      sleep 0.1
+    done
+    (
+      trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+      "$fn" "$@"
+    )
+  fi
+}
+
+ad_loop_event_text() { # <event_json>
+  jq -r '
+    "«AGENTDUO event» id=\(.id) agent=\(.agent) type=\(.type) round=\(.round) ref=\(.ref)\nsummary: \(.summary)"
+  ' <<EOF
+$1
+EOF
+}
+
+ad_loop_print_block_decision() { # <event_text>
+  jq -cn --arg reason "$1" '{decision:"block",reason:$reason}'
+}
+
+ad_loop_inject_event_text() { # <event_text>
+  local peer_bin text
+  text="$1"
+  peer_bin="${AGENT_DUO_PEER_BIN:-peer}"
+  "$peer_bin" tell supervisor "$text" >/dev/null 2>&1
+}
+
+ad_loop_deliver_next_event_locked() { # <root> <mode:inject|block|print>
+  local root="$1" mode="$2" queue cursor lines next event text
+  queue="$(ad_loop_queue_file "$root")"
+  cursor="$(ad_loop_read_cursor "$root")"
+  lines="$(ad_loop_line_count "$queue")"
+  if (( cursor >= lines )); then
+    return 1
+  fi
+
+  next="$(( cursor + 1 ))"
+  event="$(sed -n "${next}p" "$queue")"
+  if [[ -z "$event" ]]; then
+    return 1
+  fi
+  text="$(ad_loop_event_text "$event")" || return 1
+
+  case "$mode" in
+    inject)
+      ad_loop_inject_event_text "$text" || return 1
+      ;;
+    block)
+      ad_loop_print_block_decision "$text"
+      ;;
+    print)
+      printf '%s\n' "$text"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+
+  ad_loop_write_cursor "$root" "$next"
+  return 0
+}
+
+ad_loop_mark_supervisor_turn() { # <root> <busy|idle>
+  local root="$1" state="$2"
+  ad_loop_ensure_dirs "$root"
+  printf '%s\n' "$state" > "$(ad_loop_state_dir "$root")/supervisor.turn"
+}
+
+ad_loop_stop_drain() { # <root>
+  local root="$1"
+  ad_loop_mark_supervisor_turn "$root" idle
+  ad_loop_with_cursor_lock "$root" ad_loop_deliver_next_event_locked "$root" block || true
+}
+
+ad_loop_user_prompt_submit() { # <root>
+  ad_loop_mark_supervisor_turn "$1" busy
+}
+
+ad_loop_tmux_panes() { # <session>
+  tmux list-panes -s -t "$1" \
+    -F '#{pane_id}	#{@agent_id}	#{@agent_role}	#{@agent_provider}' 2>/dev/null || true
+}
+
+ad_loop_pane_for_id() { # <session> <agent_id>
+  ad_loop_tmux_panes "$1" | awk -F'\t' -v w="$2" '$2 == w { print $1; found=1 } END { exit found ? 0 : 1 }'
+}
+
+ad_loop_role_for_id() { # <session> <agent_id>
+  ad_loop_tmux_panes "$1" | awk -F'\t' -v w="$2" '$2 == w { print $3; found=1 } END { exit found ? 0 : 1 }'
+}
+
+ad_loop_is_worker_role() { # <role>
+  case "$1" in
+    ""|supervisor|daemon|loopd) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+ad_loop_active_workers() { # <session>
+  local session="$1"
+  ad_loop_tmux_panes "$session" | while IFS=$'\t' read -r pane id role provider; do
+    [[ -n "$pane" && -n "$id" ]] || continue
+    if ad_loop_is_worker_role "$role"; then
+      printf '%s\n' "$id"
+    fi
+  done
+}
+
+ad_loop_state_agents() { # <root>
+  local state d base
+  state="$(ad_loop_state_dir "$1")"
+  for d in "$state"/*; do
+    [[ -d "$d" ]] || continue
+    [[ -f "$d/report.json" ]] || continue
+    base="${d##*/}"
+    case "$base" in
+      supervisor|daemon|loopd) continue ;;
+    esac
+    printf '%s\n' "$base"
+  done
+}
+
+ad_loop_report_path() { # <root> <agent_id>
+  printf '%s/%s/report.json' "$(ad_loop_state_dir "$1")" "$2"
+}
+
+ad_loop_report_round() { # <report_path>
+  local round
+  round="$(jq -r '.round // 0' "$1" 2>/dev/null || true)"
+  if ! ad_loop_is_nonnegative_int "$round"; then
+    round="0"
+  fi
+  printf '%s' "$round"
+}
+
+ad_loop_report_status() { # <report_path>
+  jq -r '.status // "unknown"' "$1" 2>/dev/null || printf 'unknown'
+}
+
+ad_loop_report_ref() { # <root> <agent_id> <round>
+  local root="$1" agent="$2" round="$3" report target
+  report="$(ad_loop_report_path "$root" "$agent")"
+  if [[ -L "$report" ]]; then
+    target="$(readlink "$report")"
+    if [[ -n "$target" ]]; then
+      printf '.agent-duo/state/%s/%s' "$agent" "$target"
+      return 0
+    fi
+  fi
+  if [[ "$round" != "0" ]]; then
+    printf '.agent-duo/state/%s/r%s.json' "$agent" "$round"
+  else
+    printf '.agent-duo/state/%s/report.json' "$agent"
+  fi
+}
+
+ad_loop_mtime() { # <path>
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || printf '0'
+}
+
+ad_loop_event_seen() { # <root> <agent> <type> <round> <ref>
+  local queue
+  queue="$(ad_loop_queue_file "$1")"
+  [[ -f "$queue" ]] || return 1
+  jq -e --arg agent "$2" --arg type "$3" --arg ref "$5" --argjson round "$4" '
+    select(.agent == $agent and .type == $type and .round == $round and .ref == $ref)
+  ' "$queue" >/dev/null 2>&1
+}
+
+ad_loop_append_event() { # <root> <agent> <type> <round> <summary> <ref>
+  local root="$1" agent="$2" type="$3" round="$4" summary="$5" ref="$6" queue id ts json
+  ad_loop_ensure_dirs "$root"
+  queue="$(ad_loop_queue_file "$root")"
+  id="$(printf 'e%s-%s-%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$type" "$agent" "$round" "$RANDOM")"
+  ts="$(ad_loop_iso_ts)"
+  json="$(jq -cn \
+    --arg id "$id" --arg ts "$ts" --arg agent "$agent" --arg type "$type" \
+    --arg summary "$summary" --arg ref "$ref" --argjson round "$round" \
+    '{id:$id,ts:$ts,agent:$agent,type:$type,round:$round,summary:$summary,ref:$ref}')"
+  printf '%s\n' "$json" >> "$queue"
+}
+
+ad_loop_append_event_once() { # <root> <agent> <type> <round> <summary> <ref>
+  if ad_loop_event_seen "$1" "$2" "$3" "$4" "$6"; then
+    return 0
+  fi
+  ad_loop_append_event "$@"
+}
+
+ad_loop_pane_quiet() { # <pane> [sample_seconds]
+  local pane="$1" sample="${2:-0.5}" first second
+  first="$(tmux capture-pane -p -J -t "$pane" -S -80 2>/dev/null || true)"
+  sleep "$sample"
+  second="$(tmux capture-pane -p -J -t "$pane" -S -80 2>/dev/null || true)"
+  [[ -n "$first$second" && "$first" == "$second" ]]
+}
+
+ad_loop_supervisor_guard_ok() { # <session>
+  local session="$1" pane in_mode sample
+  pane="$(ad_loop_pane_for_id "$session" supervisor 2>/dev/null || true)"
+  [[ -n "$pane" ]] || return 1
+  in_mode="$(tmux display-message -p -t "$pane" '#{pane_in_mode}' 2>/dev/null || true)"
+  [[ "$in_mode" == "1" ]] && return 1
+  sample="${LOOPD_DRAFT_SAMPLE:-${LOOPD_QUIET_SAMPLE:-0.5}}"
+  ad_loop_pane_quiet "$pane" "$sample"
+}
+
+ad_loop_check_liveness() { # <root> <session> <now> <silent_t>
+  local root="$1" session="$2" now="$3" silent_t="$4" agent report round ref pane last quiet_sample
+  quiet_sample="${LOOPD_QUIET_SAMPLE:-0.5}"
+  ad_loop_state_agents "$root" | while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    report="$(ad_loop_report_path "$root" "$agent")"
+    round="$(ad_loop_report_round "$report")"
+    ref="$(ad_loop_report_ref "$root" "$agent" "$round")"
+    pane="$(ad_loop_pane_for_id "$session" "$agent" 2>/dev/null || true)"
+    if [[ -z "$pane" ]]; then
+      ad_loop_append_event_once "$root" "$agent" dead "$round" "pane missing" "$ref"
+      continue
+    fi
+    last="$(ad_loop_mtime "$report")"
+    if ad_loop_is_nonnegative_int "$last" && (( now - last > silent_t )); then
+      if ad_loop_pane_quiet "$pane" "$quiet_sample"; then
+        ad_loop_append_event_once "$root" "$agent" silent "$round" "no report for $(( now - last ))s; pane quiet" "$ref"
+      fi
+    fi
+  done
+}
+
+ad_loop_last_tick_epoch() { # <root>
+  local queue
+  queue="$(ad_loop_queue_file "$1")"
+  [[ -f "$queue" ]] || { printf '0'; return 0; }
+  jq -r '[select(.type == "tick") | (.ts | fromdateiso8601? // 0)] | max // 0' "$queue" 2>/dev/null || printf '0'
+}
+
+ad_loop_maybe_tick() { # <root> <session> <now> <tick_t>
+  local root="$1" session="$2" now="$3" tick_t="$4" active last agent report mtime newest
+  active="$(ad_loop_active_workers "$session" | sed -n '1p')"
+  [[ -n "$active" ]] || return 0
+  last="$(ad_loop_last_tick_epoch "$root")"
+  if ! ad_loop_is_nonnegative_int "$last"; then
+    last="0"
+  fi
+  if [[ "$last" == "0" ]]; then
+    newest="$(ad_loop_active_workers "$session" | while IFS= read -r agent; do
+      [[ -n "$agent" ]] || continue
+      report="$(ad_loop_report_path "$root" "$agent")"
+      [[ -f "$report" ]] || continue
+      mtime="$(ad_loop_mtime "$report")"
+      if ad_loop_is_nonnegative_int "$mtime"; then
+        printf '%s\n' "$mtime"
+      fi
+    done | sort -n | tail -1)"
+    if ad_loop_is_nonnegative_int "$newest" && [[ "$newest" != "0" ]]; then
+      last="$newest"
+    else
+      last="$now"
+    fi
+  fi
+  if (( now - last > tick_t )); then
+    ad_loop_append_event "$root" "-" tick 0 "loop tick" ""
+  fi
+}
+
+ad_loop_idle_arrival() { # <root> <session>
+  local root="$1" session="$2" turn pending
+  turn="$(sed -n '1p' "$(ad_loop_state_dir "$root")/supervisor.turn" 2>/dev/null || true)"
+  [[ "$turn" == "idle" ]] || return 0
+  pending="$(ad_loop_pending_count "$root")"
+  [[ "$pending" != "0" ]] || return 0
+  ad_loop_supervisor_guard_ok "$session" || return 0
+  ad_loop_with_cursor_lock "$root" ad_loop_deliver_next_event_locked "$root" inject || true
+}
+
+ad_loop_render_dashboard() { # <root> <session>
+  local root="$1" session="$2" now turn pending workers agent pane report status round
+  now="$(ad_loop_now_epoch)"
+  turn="$(sed -n '1p' "$(ad_loop_state_dir "$root")/supervisor.turn" 2>/dev/null || true)"
+  [[ -n "$turn" ]] || turn="unknown"
+  pending="$(ad_loop_pending_count "$root")"
+  workers="$( { ad_loop_state_agents "$root"; ad_loop_active_workers "$session"; } | grep -v '^$' | sort -u || true )"
+
+  printf 'agent-duo loopd\n'
+  printf 'heartbeat: %s\n' "$now"
+  printf 'supervisor: %s\n' "$turn"
+  printf 'pending: %s\n' "$pending"
+  printf 'workers:\n'
+  if [[ -z "$workers" ]]; then
+    printf '  (none)\n'
+    return 0
+  fi
+  printf '%s\n' "$workers" | while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    pane="$(ad_loop_pane_for_id "$session" "$agent" 2>/dev/null || true)"
+    report="$(ad_loop_report_path "$root" "$agent")"
+    if [[ -f "$report" ]]; then
+      status="$(ad_loop_report_status "$report")"
+      round="$(ad_loop_report_round "$report")"
+    else
+      status="no-report"
+      round="0"
+    fi
+    [[ -n "$pane" ]] || pane="-"
+    printf '  %s pane=%s round=%s status=%s\n' "$agent" "$pane" "$round" "$status"
+  done
+}
+
+ad_loop_once() { # <root> <session>
+  local root="$1" session="$2" now silent_t tick_t heartbeat
+  ad_loop_ensure_dirs "$root"
+  now="$(ad_loop_now_epoch)"
+  heartbeat="$(ad_loop_state_dir "$root")/daemon.heartbeat"
+  printf '%s\n' "$now" > "$heartbeat"
+  silent_t="${LOOPD_SILENT_T:-180}"
+  tick_t="${LOOPD_TICK_T:-1800}"
+  ad_loop_check_liveness "$root" "$session" "$now" "$silent_t"
+  ad_loop_maybe_tick "$root" "$session" "$now" "$tick_t"
+  ad_loop_idle_arrival "$root" "$session"
+  ad_loop_render_dashboard "$root" "$session"
+}

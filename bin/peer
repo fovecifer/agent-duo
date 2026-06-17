@@ -18,6 +18,7 @@
 #               --status <in_progress|blocked|partial|done|failed|unknown>
 #               [--step sN] [--round N] [--delta ...] [--next ...]
 #                           写结构化 report、打印 sentinel、追加 runtime event
+#   peer loopd              在当前 pane 运行 loop daemon 看板/轮询
 #   peer status             显示自己/默认目标的身份与会话内全员
 #   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
 #   peer --force tell/esc   跳过权限弹窗检测并强制发送
@@ -761,6 +762,11 @@ case "$cmd" in
     append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"
     ;;
 
+  loopd)
+    ensure_session
+    exec bash "$PEER_ROOT/scripts/loopd" "$@"
+    ;;
+
   status)
     ensure_session
     target="$(resolve_target_pane "" 2>/dev/null || true)"
@@ -799,6 +805,6 @@ case "$cmd" in
     ;;
 
   help|*)
-    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

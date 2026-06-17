@@ -147,6 +147,7 @@ shell_quote() {
 
 SESSION_Q="$(shell_quote "$SESSION")"
 BIN_DIR_Q="$(shell_quote "$BIN_DIR")"
+WORKDIR_Q="$(shell_quote "$WORKDIR")"
 
 # 单 supervisor 窗口(默认 claude,可用 --supervisor 指定 codex)。
 # 身份走 tmux per-pane 用户选项 @agent_*,不再注入 AGENT_NAME。
@@ -162,6 +163,14 @@ else
 fi
 tmux send-keys -t "$SUP_PANE" \
   "export AGENT_SESSION=$SESSION_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH" Enter
+
+# loopd 是可见 pane:负责 cursor 投递、liveness/tick 与看板。
+LOOPD_PANE="$(tmux new-window -t "$SESSION" -n loopd -c "$WORKDIR" -P -F '#{pane_id}')"
+tmux set-option -p -t "$LOOPD_PANE" @agent_id loopd
+tmux set-option -p -t "$LOOPD_PANE" @agent_role daemon
+tmux set-option -p -t "$LOOPD_PANE" @agent_provider bash
+tmux send-keys -t "$LOOPD_PANE" \
+  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q PATH=$BIN_DIR_Q:\$PATH; peer loopd" Enter
 
 # --with <provider>:<role> → 立即再起一个 worker(等价 peer add)。
 if [[ -n "$WITH_SPEC" ]]; then
