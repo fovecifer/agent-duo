@@ -268,11 +268,108 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
 - supervisor 中途挂 → 队列 + cursor 落盘，新 supervisor（或人）从 cursor 续，未处理 gate 还在 → 接 budget MVP 的 handoff packet。
 - 队列膨胀 → notify 合并 + 已处理归档。
-- daemon 死 → **降级继续**：worker / 人事件仍直接入队，loop 不停，只是暂时没有 liveness / 看板。daemon 是**增强项，非单点**。
+
+### daemon 降级边界
+
+daemon 是**纯增强项**。它死了，系统退化为"反应式 + 人来戳"——正好等于无 daemon 的 MVP 形态——但**绝不丢事件、不丢状态、不出不可逆后果**。
+
+| 类别 | 项 | daemon 死后 |
+|---|---|---|
+| **硬底线（永不丢，且不依赖 daemon）** | 队列 + cursor、Stop 便车投递、worker/人 事件产生 | 不受影响 |
+| **可接受丢失** | idle-arrival 自动唤醒、liveness（silent/dead）、tick、看板 | 退化：idle 期事件等人下次开口时由 Stop 便车补上 |
+
+**要补的一个洞**：liveness / stuck 是安全网，daemon 死了它们**静默消失**很危险（worker 真死没人捞）。所以 daemon 死本身必须被发现并上浮：daemon 定期写 `state/daemon.heartbeat`，supervisor 的 hook（或下个 turn）发现心跳过期，就用人话告诉人"运行时监控离线，失去存活/卡死检测，建议重启"（第①档）。daemon 无状态，重启安全（见 §10）。
 
 ---
 
-## 10. 增量落地
+## 10. daemon 实现
+
+daemon 不是神秘服务——它是**一个跑在可见 tmux pane 里的 bash 轮询脚本**，无状态、可随时重启，该 pane 同时就是看板。
+
+- **语言**：bash + `jq` + `tmux`，与仓库现有代码一致（registry MVP 3、测试皆 bash）。node 亦可（codex 插件即 node），但 bash 更贴本 repo。
+- **不用 inotify**：看板本就每几秒重绘，直接**轮询**（2–3s）最简单、无额外依赖。
+- **无状态**：真相全在磁盘文件，daemon 只读它们、算、写派生事件、重绘。崩了重启即可，不丢任何东西。
+
+### 它碰的文件
+
+```
+.agent-duo/
+  events/queue.jsonl       # append-only 事件流（生产者: peer report、daemon）
+  events/cursor (+ .lock)  # "已投递到哪"的游标 + flock 锁
+  state/supervisor.turn    # "busy"/"idle"，由 supervisor 的 hook 写
+  state/<id>/report.json   # 各 worker 最新报告（peer report 写）
+  state/daemon.heartbeat   # daemon 自己的心跳时间戳
+```
+
+### 主循环骨架
+
+```bash
+# agent-duo loopd
+TICK_T=1800 SILENT_T=180   # 30min tick；3min 静默判失联
+last_tick=0
+while true; do
+  now=$(date +%s)
+  echo "$now" > .agent-duo/state/daemon.heartbeat        # ① 写心跳
+
+  alive=$(tmux list-panes -s -F '#{@agent_id}')          # ② liveness
+  for w in $(active_workers); do
+    grep -qx "$w" <<<"$alive" || emit_event "$w" dead     #   pane 没了 → dead
+    last=$(mtime ".agent-duo/state/$w/report.json")
+    (( now-last > SILENT_T )) && pane_quiet "$w" && emit_event "$w" silent
+  done
+
+  (( $(active_workers|wc -l) && now-last_tick > TICK_T )) \
+     && { emit_event "-" tick; last_tick=$now; }          # ③ 时间 tick（仅活跃时）
+
+  if [[ "$(cat .agent-duo/state/supervisor.turn)" == idle ]] \
+     && has_pending && draft_guard_ok; then               # ④ idle-arrival 唤醒
+       flock .agent-duo/events/cursor.lock -c deliver_pending
+  fi
+
+  render_dashboard                                        # ⑤ 重绘看板 pane
+  sleep 2
+done
+```
+
+`emit_event` = 往 `queue.jsonl` 追加一行 JSON；`deliver_pending` = 读 cursor 之后的待投递事件、`peer tell supervisor "«AGENTDUO event» …"`、推进 cursor。
+
+### 投递不能重复（唯一要小心处）
+
+事件有**两个投递者**——busy 时是 supervisor 的 **Stop hook**（Stop 便车），idle 时是 **daemon**（send-keys 唤醒）。**cursor 是"已投递到哪"的唯一真相**：两边投递前都 `flock cursor.lock`，读 cursor 之后的待办、投递、推进 cursor、解锁。两种情况实际互斥（Stop hook 在 turn 结束=刚离 busy 时跑；daemon 仅在 state=idle 时投），flock 把那条窄缝也焊死，保证一条事件最多投一次。
+
+### hook 那一侧（配合 daemon 的两行）
+
+忙/闲不是 daemon 写的，是 hook 写的，极简：
+
+```jsonc
+// supervisor session settings
+"UserPromptSubmit": [{ "hooks":[{ "type":"command",
+   "command":"echo busy > .agent-duo/state/supervisor.turn" }]}],
+"Stop":            [{ "hooks":[{ "type":"command",
+   "command":"node stop-drain.mjs" }]}]   // 写 idle + Stop 便车 drain 队列
+```
+
+`stop-drain` 仿照 codex 插件的 `stop-review-gate-hook.mjs`：写 `idle`，再 `flock` 读队列，有待办就 `decision:block`+事件文本让 supervisor 续处理，没有就放行。
+
+### tick：按轮次免费、按时间靠 daemon
+
+- **按轮次**的方向检查（每 N 个 worker 回合复查 mission）**不需要 tick**——搭已有事件便车，supervisor 自己数轮次，几乎免费，**始终开**。
+- **按时间**的 tick（防 worker 慢磨、轮次不够）由 daemon 的 ③ 发：**默认开，但"长周期（30min）+ 仅活跃 worker 时 arm + 第③档静默"**——只让 supervisor 自查，查到漂移/预算问题才上浮，否则不打扰人（守水线）。
+
+### 启停 / 重启 / 自我暴露
+
+- **启**：`start.sh` 起完 supervisor 后 spawn 一个 loopd pane（类似 `--with` 的糖）。
+- **停**：随 tmux session 消亡。
+- **重启**：无状态，任何人或 supervisor（用 Bash）`agent-duo loopd` 重新拉起即可。
+- **daemon 死的自我暴露**：supervisor 的 hook（或下个 turn）读 `daemon.heartbeat`，过期就用人话告诉人"运行时监控离线，失去存活/卡死检测，建议重启"——堵上"安全网静默消失"的洞（见 §9）。
+
+### MVP 边界（分两次长出来）
+
+- **第 1 步（codec）**：只有 `peer report` 写 文件/sentinel/queue + Stop hook drain。**此时人当注入者**，无 daemon 也能跑真 loop。
+- **第 2 步**：加 ④ idle-arrival 唤醒 → 循环自动化。
+- **第 3 步**：加 ②③⑤ liveness/tick/看板。
+
+## 11. 增量落地
 
 ```
 1. queue.jsonl + peer report 追加 event + sentinel codec（与契约第 1 步合并）
@@ -285,14 +382,15 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
 ---
 
-## 11. 待定（下一步讨论）
+## 12. 待定（下一步讨论）
 
 已定：
 - ~~**idle 判定**~~ → hook 权威：`UserPromptSubmit`=busy、`Stop`=idle，`Stop` 一招排除 mid-turn 与权限弹窗；抓屏只剩输入框草稿守卫（见 §1）。
 - ~~**注入退避**~~ → Stop 便车为首选（零竞态）、send-keys 仅用于 idle-arrival 且带草稿守卫；一切不确定 hold，不误发（见 §1）。
 - ~~**汇报攒批 + 升级判定**~~ → 三档 + 可逆性主轴决策树 + UX/安全解耦（见 §5）。
+- ~~**tick 默认开关**~~ → 按轮次免费常开；按时间默认开但"长周期 + 仅活跃 + 静默"（见 §10）。
+- ~~**daemon 降级边界**~~ → 纯增强项，死了退回 MVP 反应式且不丢事件/状态，daemon 死本身被检测并上浮（见 §9、§10）。
+- ~~**daemon 实现形态**~~ → pane 内 bash poll loop + 文件契约 + cursor/flock 投递协调（见 §10）。
 
 仍待讨论：
-- **tick 默认开关**：长超时 tick（如 30min）默认开 → supervisor 主动做 direction checkpoint；默认关 → 纯被动最省。倾向"开、但周期长"。
-- **daemon 降级边界**：哪些功能丢了仍算可用。
 - **Approval Broker 的 hook 化**：用 `PreToolUse`/`PermissionRequest` 在 worker session 上机械放行/拒绝（替代 roadmap 原"抓屏+回车"方案），细节待 MVP 1/2 设计。
