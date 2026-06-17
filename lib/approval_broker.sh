@@ -332,10 +332,25 @@ ab_bash_hits_deny() { # <segment> <whole>
 }
 
 ab_bash_requires_escalation() { # <segment>
-  local text="$1"
+  local text="$1" stripped
+  # Command/process substitution is opaque (runs other commands) -> always escalate.
   case "$text" in
-    *'>'*|*'<'*|*'`'*|*'$('*)
-      printf 'bash.shell_syntax'
+    *'$('*|*'`'*|*'<('*|*'>('*)
+      printf 'bash.command_substitution'
+      return 0
+      ;;
+  esac
+  # Output redirects: auto-allow only the two provably-safe token shapes — fd duplication
+  # (2>&1, 1>&2, >&2) and redirects to /dev/null. A *file* target is escalated: a regex
+  # cannot safely resolve a destination that may involve $VARS, ~, quoting, or the >&file
+  # form, and guessing wrong silently escapes the worktree. Strip the safe shapes; if any
+  # output redirect remains, escalate. Input redirects (<) are ignored — reading a file is
+  # no more dangerous than an allowlisted command's own path arguments.
+  stripped="$(printf '%s' "$text" | sed -E 's/[0-9]*>&[0-9]+//g')"                                 # fd dup: n>&n, >&n
+  stripped="$(printf '%s' "$stripped" | sed -E 's/(&|[0-9]*)>>?[[:space:]]*\/dev\/null//g')"        # to /dev/null
+  case "$stripped" in
+    *'>'*)
+      printf 'bash.redirect'
       return 0
       ;;
   esac
@@ -348,8 +363,11 @@ ab_bash_segment_allowed() {
   [[ -z "$text" ]] && { printf 'allow.empty'; return 0; }
   if ab_match "$text" '^pwd([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
   if ab_match "$text" '^ls([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
-  if ab_match "$text" '^(cat|head|tail|wc|rg|grep|awk)([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
-  if ab_match "$text" '^find[[:space:]]' && ! ab_match "$text" '(-delete|-exec)'; then printf 'allow.inspect'; return 0; fi
+  if ab_match "$text" '^(cat|head|tail|wc|rg|grep)([[:space:]]|$)'; then printf 'allow.inspect'; return 0; fi
+  # awk/find/sed are intentionally NOT auto-allowed: awk can exec via system()/print>,
+  # find can write/exec via -f*/-exec/-delete. The segment splitter is quote-naive, so it
+  # cannot be trusted to neutralize their embedded programs. Escalate them until worktree
+  # isolation is a real FS sandbox (MVP 4). See approval-broker design §诚实定位.
   if ab_match "$text" '^git[[:space:]]+(status|diff|show|log|branch|rev-parse|ls-files|grep)([[:space:]]|$)'; then printf 'allow.git_read'; return 0; fi
   if ab_match "$text" '^(bash|sh)[[:space:]]+test/run\.sh([[:space:]]|$)'; then printf 'allow.test'; return 0; fi
   if ab_match "$text" '^\./test/run\.sh([[:space:]]|$)'; then printf 'allow.test'; return 0; fi
@@ -522,13 +540,26 @@ ab_append_audit() {
   ab_append_jsonl "$(ab_logs_dir "$root")/approvals.jsonl" "$line"
 }
 
+ab_blocked_event_seen() { # <queue> <agent> <round> <summary>
+  local queue="$1" agent="$2" round="$3" summary="$4"
+  [[ -f "$queue" ]] || return 1
+  jq -e --arg agent "$agent" --arg summary "$summary" --argjson round "$round" '
+    select(.type == "blocked" and .agent == $agent and .round == $round and .summary == $summary)
+  ' "$queue" >/dev/null 2>&1
+}
+
 ab_append_blocked_event() {
-  local root="$1" approval="$2" id agent round summary ref line
+  local root="$1" approval="$2" id agent round summary ref line queue
   id="$(ab_json_get_string "$approval" id)"
   agent="$(ab_json_get_string "$approval" agent)"
   round="$(ab_json_get_int "$approval" round)"
   summary="$(ab_json_get_string "$approval" summary)"
   ref="$(ab_json_get_string "$approval" ref)"
+  queue="$(ab_events_dir "$root")/queue.jsonl"
+  # Idempotent: a worker that retries the same blocked tool call must not flood the queue.
+  if ab_blocked_event_seen "$queue" "$agent" "$round" "$summary"; then
+    return 0
+  fi
   line="{\"id\":\"e$(date -u '+%Y%m%dT%H%M%SZ')-$(ab_json_escape "$id")\","
   line="${line}\"ts\":\"$(ab_iso_ts)\",\"agent\":\"$(ab_json_escape "$agent")\",\"type\":\"blocked\","
   line="${line}\"round\":$round,\"summary\":\"$(ab_json_escape "$summary")\",\"ref\":\"$(ab_json_escape "$ref")\"}"
