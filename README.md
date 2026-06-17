@@ -127,9 +127,14 @@ Claude will run `peer tell` → `peer wait` → `peer peek` and report back. The
 ## Requirements
 
 - macOS / Linux with `tmux` ≥ 3.2 (`brew install tmux`)
-- `python3` for codec JSON writing and fsync durability (`brew install python`)
 - [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex) on PATH
 - iTerm2 recommended for the native-tab experience (`tmux -CC`); any terminal works with plain `tmux attach`
+
+> **Durability note:** the codec writes report/event files with a pure-bash JSON
+> encoder and atomic `rename` (readers never see a torn file). It does **not**
+> `fsync` — dropping the former Python runtime dependency also dropped cross-crash
+> durability, so a power loss / kernel crash could lose an already-acknowledged
+> report. This is an intentional trade-off for a single-machine dev tool.
 
 ## FAQ
 

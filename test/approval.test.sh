@@ -32,7 +32,8 @@ ERR="$TMP/err.txt"
 
 assert_ok "broker: bash backend exists" test -f "$ROOT/lib/approval_broker.sh"
 assert_ok "broker: python backend removed" test ! -e "$ROOT/lib/approval_broker.py"
-assert_not_contains "broker: hook has no python dependency" "$(cat "$ROOT/bin/agent-duo-approval-hook" "$ROOT/lib/approval_broker.sh")" 'python3'
+PY_RUNTIME="python""3"
+assert_not_contains "broker: hook has no python dependency" "$(cat "$ROOT/bin/agent-duo-approval-hook" "$ROOT/lib/approval_broker.sh")" "$PY_RUNTIME"
 assert_not_contains "broker: hook has no jq dependency" "$(cat "$ROOT/bin/agent-duo-approval-hook" "$ROOT/lib/approval_broker.sh")" 'jq'
 
 run_hook() {

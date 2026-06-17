@@ -145,13 +145,6 @@ is_report_status() {
   esac
 }
 
-require_python3() {
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "错误: 该 peer 子命令需要 python3 来写入 JSON 并 fsync。" >&2
-    exit 1
-  fi
-}
-
 run_approval_broker() {
   bash "$APPROVAL_BROKER" "$@"
 }
@@ -179,21 +172,6 @@ sha256_file() { # <file>
     echo "错误: 需要 shasum 或 sha256sum 计算 report sha。" >&2
     exit 1
   fi
-}
-
-fsync_dir() { # <dir>
-  require_python3
-  python3 - "$1" <<'PY'
-import os
-import sys
-
-path = sys.argv[1]
-fd = os.open(path, os.O_RDONLY)
-try:
-    os.fsync(fd)
-finally:
-    os.close(fd)
-PY
 }
 
 random_hex_tag() {
@@ -252,94 +230,90 @@ event_type_for_report() { # <report_type> <status>
   fi
 }
 
-write_report_json() {
-  require_python3
-  python3 - "$@" <<'PY'
-import json
-import os
-import sys
-
-(
-    path,
-    round_s,
-    agent_id,
-    role,
-    report_type,
-    status,
-    goal_ref,
-    step_ref,
-    delta,
-    drift,
-    next_text,
-    evidence_cmd,
-    evidence_result,
-    evidence_ref,
-) = sys.argv[1:15]
-
-def nullable(value):
-    return None if value == "" else value
-
-evidence = []
-if evidence_cmd or evidence_result or evidence_ref:
-    evidence.append({
-        "cmd": evidence_cmd,
-        "result": evidence_result,
-        "ref": evidence_ref,
-    })
-
-report = {
-    "protocol": "1",
-    "round": int(round_s),
-    "agent_id": agent_id,
-    "role": role,
-    "type": report_type,
-    "status": status,
-    "goal_ref": nullable(goal_ref),
-    "step_ref": nullable(step_ref),
-    "delta": delta,
-    "drift": nullable(drift),
-    "evidence": evidence,
-    "needs": [],
-    "next": next_text,
+json_escape() {
+  local s="${1:-}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
+  # 其余 < 0x20 控制字符按 JSON 规范转为 \u00XX，否则会产出非法 JSON 让下游 jq 解析失败。
+  # 极少见(NUL 无法存于 bash 变量);多字节 UTF-8 字符码 > 0x1f，原样保留。
+  if [[ "$s" == *[$'\x01'-$'\x1f']* ]]; then
+    local out="" i ch code
+    for (( i=0; i<${#s}; i++ )); do
+      ch="${s:i:1}"
+      printf -v code '%d' "'$ch"
+      if (( code >= 1 && code <= 31 )); then
+        printf -v ch '\\u%04x' "$code"
+      fi
+      out+="$ch"
+    done
+    s="$out"
+  fi
+  printf '%s' "$s"
 }
 
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(report, f, ensure_ascii=False, separators=(",", ":"))
-    f.write("\n")
-    f.flush()
-    os.fsync(f.fileno())
-PY
+json_str() {
+  printf '"'
+  json_escape "${1:-}"
+  printf '"'
+}
+
+json_nullable_str() {
+  if [[ -z "${1:-}" ]]; then
+    printf 'null'
+  else
+    json_str "$1"
+  fi
+}
+
+write_report_json() {
+  local path="$1" round_s="$2" agent_id="$3" role="$4" report_type="$5" status="$6"
+  local goal_ref="$7" step_ref="$8" delta="$9" drift="${10}" next_text="${11}"
+  local evidence_cmd="${12}" evidence_result="${13}" evidence_ref="${14}"
+  {
+    printf '{"protocol":"1","round":%s,' "$round_s"
+    printf '"agent_id":'; json_str "$agent_id"; printf ','
+    printf '"role":'; json_str "$role"; printf ','
+    printf '"type":'; json_str "$report_type"; printf ','
+    printf '"status":'; json_str "$status"; printf ','
+    printf '"goal_ref":'; json_nullable_str "$goal_ref"; printf ','
+    printf '"step_ref":'; json_nullable_str "$step_ref"; printf ','
+    printf '"delta":'; json_str "$delta"; printf ','
+    printf '"drift":'; json_nullable_str "$drift"; printf ','
+    printf '"evidence":'
+    if [[ -n "$evidence_cmd" || -n "$evidence_result" || -n "$evidence_ref" ]]; then
+      printf '[{"cmd":'; json_str "$evidence_cmd"
+      printf ',"result":'; json_str "$evidence_result"
+      printf ',"ref":'; json_str "$evidence_ref"
+      printf '}]'
+    else
+      printf '[]'
+    fi
+    printf ',"needs":[],"next":'; json_str "$next_text"
+    printf '}\n'
+  } > "$path"
 }
 
 append_event_json() {
-  require_python3
-  python3 - "$@" <<'PY'
-import json
-import os
-import sys
-
-queue, event_id, ts, agent, event_type, round_s, summary, ref = sys.argv[1:9]
-event = {
-    "id": event_id,
-    "ts": ts,
-    "agent": agent,
-    "type": event_type,
-    "round": int(round_s),
-    "summary": summary,
-    "ref": ref,
-}
-with open(queue, "a", encoding="utf-8") as f:
-    json.dump(event, f, ensure_ascii=False, separators=(",", ":"))
-    f.write("\n")
-    f.flush()
-    os.fsync(f.fileno())
-
-dir_fd = os.open(os.path.dirname(queue), os.O_RDONLY)
-try:
-    os.fsync(dir_fd)
-finally:
-    os.close(dir_fd)
-PY
+  local queue="$1" event_id="$2" ts="$3" agent="$4" event_type="$5" round_s="$6" summary="$7" ref="$8"
+  # 先把整行拼好，再单次 printf 追加：queue.jsonl 是多进程共享(loopd / 各 agent /
+  # approval broker)，多次 printf 共享 append 重定向会在并发下交错损坏行。
+  local line
+  line="$(
+    printf '{"id":'; json_str "$event_id"
+    printf ',"ts":'; json_str "$ts"
+    printf ',"agent":'; json_str "$agent"
+    printf ',"type":'; json_str "$event_type"
+    printf ',"round":%s' "$round_s"
+    printf ',"summary":'; json_str "$summary"
+    printf ',"ref":'; json_str "$ref"
+    printf '}'
+  )"
+  printf '%s\n' "$line" >> "$queue"
 }
 
 screen_has_round_sentinel() { # <screen> <round> <agent_id>
@@ -760,6 +734,9 @@ case "$cmd" in
       exit 1
     fi
 
+    # 写临时文件 + rename：保证读者只看到完整文件(原子可见性)。
+    # 注意:不再 fsync —— 去掉 Python 运行时依赖后放弃了跨崩溃耐久性。单机断电/内核崩溃
+    # 极端情形下，已返回成功的 report/event 可能丢失;原子性与正常读写不受影响。
     tmp_report="$state_dir/.r${round}.json.$$"
     write_report_json "$tmp_report" "$round" "$ME" "$role" "$report_type" "$effective_status" \
       "$goal_ref" "$step_ref" "$delta" "$drift" "$next_text" \
@@ -770,7 +747,6 @@ case "$cmd" in
     rm -f "$tmp_latest"
     ln -s "r${round}.json" "$tmp_latest"
     mv -f "$tmp_latest" "$latest_file"
-    fsync_dir "$state_dir"
 
     sha="$(sha256_file "$report_file")"
     ts="$(iso_ts)"

@@ -194,6 +194,11 @@ run_peer_without_agent() {
   )
 }
 
+# 运行时和安装路径不应再依赖额外 Python 运行时。
+PY_RUNTIME="python""3"
+assert_not_contains "dependency: no Python runtime in peer/install docs" \
+  "$(cat "$ROOT/bin/peer" "$ROOT/install.sh" "$ROOT/README.md" "$ROOT/README.zh-CN.md")" "$PY_RUNTIME"
+
 # 身份:从 $TMUX_PANE 的 @agent_id 自识别(而非 AGENT_NAME)。
 setup
 TEST_TMUX_PANE="%1" assert_ok "identity: self from tmux pane" run_peer status
@@ -381,6 +386,30 @@ assert_contains "report: sentinel file" "$sentinel" 'file=.agent-duo/state/worke
 assert_contains "report: event agent" "$event_json" '"agent":"worker"'
 assert_contains "report: event type" "$event_json" '"type":"checkpoint"'
 assert_contains "report: event ref" "$event_json" '"ref":".agent-duo/state/worker/r7.json"'
+teardown
+
+# report:纯 Bash codec 仍要正确 JSON 转义常见特殊字符。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: json escaping succeeds" \
+  run_peer report --type checkpoint --status in_progress --round 2 \
+    --delta $'quote " backslash \\ tab\t' \
+    --next $'line 1\nline 2'
+escaped_report="$(cat "$PROJECT/.agent-duo/state/worker/r2.json")"
+assert_contains "report: escapes quote" "$escaped_report" 'quote \"'
+assert_contains "report: escapes backslash" "$escaped_report" 'backslash \\'
+assert_contains "report: escapes tab" "$escaped_report" 'tab\t'
+assert_contains "report: escapes newline" "$escaped_report" 'line 1\nline 2'
+teardown
+
+# report:其余 < 0x20 控制字符转为 \u00XX，且多字节 UTF-8 原样保留(否则下游 jq 会崩)。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: control char escaping succeeds" \
+  run_peer report --type checkpoint --status in_progress --round 3 \
+    --delta $'esc\x1bvt\x0b中文'
+ctrl_report="$(cat "$PROJECT/.agent-duo/state/worker/r3.json")"
+assert_contains "report: escapes ESC control char" "$ctrl_report" 'esc\u001bvt'
+assert_contains "report: escapes vtab control char" "$ctrl_report" 'vt\u000b中文'
+assert_contains "report: preserves UTF-8" "$ctrl_report" '中文'
 teardown
 
 # report:done/partial 没有 evidence 时按契约降级为 unknown。

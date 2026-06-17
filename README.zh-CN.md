@@ -82,22 +82,20 @@ agent-duo/
 brew install fovecifer/agent-duo/agent-duo
 ```
 
-会安装 `peer` 与 `agent-duo-start` 命令，并自动装上 `tmux` 与 `python3`。
-`python3` 用于 codec 的 JSON 写入与 fsync 耐久性。
+会安装 `peer` 与 `agent-duo-start` 命令，并自动装上 `tmux`。
 Claude Code 与 Codex CLI 仍需你自行安装并登录。
 
 ### 从源码安装
 
 1. `brew install tmux`(如已安装可跳过)
-2. `brew install python`(如已有 `python3` 可跳过)
-3. 获取本仓库并安装命令:
+2. 获取本仓库并安装命令:
 
    ```bash
    git clone https://github.com/<you>/agent-duo && cd agent-duo
    ./install.sh
    ```
 
-4. `agent-duo-start` 在某个项目里**首次运行**时会询问一次,再启动两个 agent：
+3. `agent-duo-start` 在某个项目里**首次运行**时会询问一次,再启动两个 agent：
 
    - **Claude**：通过启动参数 `--append-system-prompt` 传入协作说明 —— **不写任何文件**,会话结束即消失。
    - **Codex**：没有等价的启动参数,因此说明会以带标记、可撤销的块写入项目的 `AGENTS.md`（`<!-- agent-duo:start -->` … `<!-- agent-duo:end -->`）。`CLAUDE.md` 不会被改动。
@@ -106,6 +104,11 @@ Claude Code 与 Codex CLI 仍需你自行安装并登录。
 
    - 非交互环境(CI、管道)默认跳过注入 —— 加 `-y` 或设 `AGENT_DUO_AUTO_INJECT=1` 可无提示自动注入。
    - 更喜欢手动操作?把 `docs/AGENT-INSTRUCTIONS.md` 的正文追加到项目的 `CLAUDE.md` 和 `AGENTS.md` 即可。两个文件用同一段内容,`peer` 会从 `$AGENT_NAME` 自动识别"自己"和"对方"。
+
+> **耐久性说明:** codec 用纯 Bash 的 JSON 编码器加原子 `rename` 写 report/event
+> 文件(读者永远不会读到半截文件),但**不再 `fsync`** —— 去掉 Python 运行时依赖的同时
+> 也放弃了跨崩溃耐久性:断电 / 内核崩溃可能丢失一条已返回成功的 report。对单机开发
+> 工具而言这是有意的取舍,原子性与正常读写不受影响。
 
 ## 日常使用
 
