@@ -321,6 +321,21 @@ printf 'line 1\n`quoted`\n' > "$SCENARIO_TMP/expected-stdin-buffer"
 assert_ok "tell: stdin buffer content" cmp -s "$SCENARIO_TMP/expected-stdin-buffer" "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker"
 teardown
 
+# gate resolve:把 human gate 决策格式化为下行 decision verb。
+setup
+assert_ok "gate resolve: sends decision" run_peer gate resolve --choice staging-db --note "use staging"
+printf '«AGENTDUO verb=decision choice=staging-db»\nuse staging' > "$SCENARIO_TMP/expected-gate-buffer"
+assert_ok "gate resolve: buffer content" cmp -s "$SCENARIO_TMP/expected-gate-buffer" "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker-gate"
+assert_contains "gate resolve: paste" "$(cat "$TMUX_STUB_LOG")" 'paste-buffer -b peer-supervisor2worker-gate -t %2 -d -p'
+assert_contains "gate resolve: enter" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %2 Enter'
+teardown
+
+# gate resolve:choice 是结构化字段，含空白的解释放到 --note。
+setup
+assert_not_ok "gate resolve: rejects spaced choice" run_peer gate resolve --choice "staging db"
+assert_contains "gate resolve: rejects spaced choice error" "$(cat "$ERR")" '--choice 只能包含'
+teardown
+
 # esc:向目标 pane 发送 Escape。
 setup
 assert_ok "esc: succeeds" run_peer esc
@@ -418,6 +433,15 @@ TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: done without e
   run_peer report --type result --status done --round 1 --delta "claimed done"
 assert_contains "report: done without evidence downgraded" "$(cat "$PROJECT/.agent-duo/state/worker/r1.json")" '"status":"unknown"'
 assert_contains "report: downgraded sentinel status" "$(cat "$OUT")" 'status=unknown'
+teardown
+
+# report:runtime event 追加失败时不得先打印 sentinel，避免屏幕/队列分裂。
+setup
+mkdir -p "$PROJECT/.agent-duo/events/queue.jsonl"
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_not_ok "report: queue append failure fails" \
+  run_peer report --type checkpoint --status in_progress --round 4 --delta "cannot enqueue"
+assert_eq "report: queue append failure no sentinel" "$(cat "$OUT")" ""
+assert_contains "report: queue append failure error" "$(cat "$ERR")" 'Is a directory'
 teardown
 
 # wait --round:等待指定 round 的 sentinel,不再靠屏幕稳定猜测回合边界。

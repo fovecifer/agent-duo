@@ -90,6 +90,16 @@ assert_ok "hook: sed backup inplace hard-denies" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"sed -i.bak s/a/b/ file"},"round":6}'
 assert_contains "hook: sed backup inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 
+assert_ok "hook: sed long inplace hard-denies" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"sed --in-place s/a/b/ file"},"round":6}'
+assert_contains "hook: sed long inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
+assert_not_contains "hook: sed long inplace not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+assert_ok "hook: sed long backup inplace hard-denies" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"sed --in-place=.bak s/a/b/ file"},"round":6}'
+assert_contains "hook: sed long backup inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
+assert_not_contains "hook: sed long backup inplace not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
 assert_ok "hook: bash redirection escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo pwn > /tmp/agent-duo-pwn"},"round":6}'
 assert_contains "hook: bash redirection pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'

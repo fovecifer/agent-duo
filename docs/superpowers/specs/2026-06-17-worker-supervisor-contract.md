@@ -238,7 +238,7 @@ Sentinel = 架在「文件(payload)」与「TUI 现实(在跑 / 已停 / 卡在 
 
 ```
 worker 调用：  peer report --type checkpoint --status in_progress --step s2 --file r3.json
-             └─ 命令内部：① 写文件 ② 打印带 sha+tag 的 sentinel（原子）
+             └─ 命令内部：① 写文件 ② 追加 runtime event ③ 打印带 sha+tag 的 sentinel
 ```
 
 即 **CLI 就是 codec**：模型永不手写 marker（不会格式错、不漏 sha），下行 `peer tell/reframe` 同理负责格式化指令前缀。worker 只管"调命令"，framing 是工具的事。

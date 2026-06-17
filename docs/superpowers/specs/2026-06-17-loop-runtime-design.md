@@ -258,7 +258,7 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
 1. report 文件放**固定可 watch 路径**：`.agent-duo/state/<agent_id>/rN.json` + `report.json`（latest）。
 2. sentinel **自带入队所需字段**：`agent_id round type status file sha`——不读文件即可入队。
-3. `peer report` 一次干三件事：**写文件 + 打 sentinel + 追加 event 到 `queue.jsonl`**。event 是给 runtime 的可靠触发，sentinel 是给人 / `peer wait` 的镜像。
+3. `peer report` 一次干三件事：**写文件 + 追加 event 到 `queue.jsonl` + 打 sentinel**。event 是给 runtime 的可靠触发，sentinel 是给人 / `peer wait` 的镜像；因此实现必须先确认 event 追加成功，再把 sentinel 暴露到屏幕。
 4. 新增 `.agent-duo/events/` 目录与队列格式。
 5. **hook 安装**：supervisor session 需挂 `UserPromptSubmit`/`Stop`（busy/idle + Stop 便车），worker session 后续挂 `PreToolUse`/`PermissionRequest`（Approval Broker）。agent-duo 自带这些 hook 脚本，`start.sh` / `peer add` 创建 session 时注入对应 settings（Codex 侧注意托管/信任要求）。
 

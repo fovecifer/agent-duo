@@ -22,6 +22,8 @@
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
 #                           拒绝一次待审批请求
+#   peer gate resolve [<id>] --choice <choice> [--note "..."]
+#                           向 worker 答复 human gate 决策
 #   peer loopd              在当前 pane 运行 loop daemon 看板/轮询
 #   peer status             显示自己/默认目标的身份与会话内全员
 #   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
@@ -783,8 +785,6 @@ case "$cmd" in
     ts="$(iso_ts)"
     tag="$(codec_tag)"
     ref=".agent-duo/state/$ME/r${round}.json"
-    printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
-      "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"
 
     queue="$events_dir/queue.jsonl"
     event_type="$(event_type_for_report "$report_type" "$effective_status")"
@@ -793,6 +793,58 @@ case "$cmd" in
     if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
     event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
     append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"
+
+    printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
+      "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"
+    ;;
+
+  gate)
+    subcmd="${1:-}"
+    if [[ "$subcmd" != "resolve" ]]; then
+      echo "用法: peer gate resolve [<id>] --choice <choice> [--note \"...\"]" >&2
+      exit 1
+    fi
+    shift
+    maybe_id=""
+    if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+      maybe_id="$1"
+      shift
+    fi
+    choice=""
+    note=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --choice) choice="${2:-}"; shift 2 ;;
+        --note) note="${2:-}"; shift 2 ;;
+        *) echo "用法: peer gate resolve [<id>] --choice <choice> [--note \"...\"]" >&2; exit 1 ;;
+      esac
+    done
+    if [[ -z "$choice" ]]; then
+      echo "错误: peer gate resolve 需要 --choice。" >&2
+      exit 1
+    fi
+    if [[ ! "$choice" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+      echo "错误: --choice 只能包含字母、数字、点、下划线、冒号和连字符；补充说明请用 --note。" >&2
+      exit 1
+    fi
+    ensure_session
+    target="$(resolve_target_pane "$maybe_id")"
+    if [[ -n "$maybe_id" ]]; then
+      target_id="$maybe_id"
+    else
+      target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+    fi
+    check_safe_to_send_keys "$target"
+    buf="peer-${ME}2${target_id}-gate"
+    gate_text="«AGENTDUO verb=decision choice=${choice}»"
+    if [[ -n "$note" ]]; then
+      gate_text="${gate_text}"$'\n'"$note"
+    fi
+    printf '%s' "$gate_text" | tmux load-buffer -b "$buf" -
+    tmux paste-buffer -b "$buf" -t "$target" -d -p
+    sleep 0.5
+    tmux send-keys -t "$target" Enter
+    echo "已发送 gate decision(choice=$choice)。"
     ;;
 
   approvals)

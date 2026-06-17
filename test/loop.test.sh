@@ -128,6 +128,19 @@ assert_eq "hook stop: marks idle" "$(cat "$PROJECT/.agent-duo/state/supervisor.t
 assert_eq "hook stop: no block output" "$(cat "$OUT")" ""
 teardown
 
+# Stop hook surfaces a stale loopd heartbeat once, so liveness loss is not silent.
+setup
+printf '%s\n' "$(( $(date +%s) - 999 ))" > "$PROJECT/.agent-duo/state/daemon.heartbeat"
+assert_ok "hook stop: stale daemon blocks" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_contains "hook stop: stale daemon decision" "$(cat "$OUT")" '"decision":"block"'
+assert_contains "hook stop: stale daemon message" "$(cat "$OUT")" '运行时监控离线'
+assert_ok "hook stop: stale daemon dedupes" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_eq "hook stop: stale daemon no repeat" "$(cat "$OUT")" ""
+printf '%s\n' "$(date +%s)" > "$PROJECT/.agent-duo/state/daemon.heartbeat"
+assert_ok "hook stop: fresh daemon clears marker" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_ok "hook stop: offline marker cleared" test ! -f "$PROJECT/.agent-duo/state/daemon.offline.notified"
+teardown
+
 # Stop hook drains exactly one pending event, emits a block decision, and advances cursor.
 setup
 write_event e1 worker blocked 3 "needs approval" ".agent-duo/state/worker/r3.json"

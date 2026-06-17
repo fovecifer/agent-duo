@@ -240,10 +240,47 @@ ad_loop_mark_supervisor_turn() { # <root> <busy|idle>
   printf '%s\n' "$state" > "$(ad_loop_state_dir "$root")/supervisor.turn"
 }
 
+ad_loop_daemon_heartbeat_file() { # <root>
+  printf '%s/daemon.heartbeat' "$(ad_loop_state_dir "$1")"
+}
+
+ad_loop_daemon_offline_marker() { # <root>
+  printf '%s/daemon.offline.notified' "$(ad_loop_state_dir "$1")"
+}
+
+ad_loop_daemon_heartbeat_stale() { # <root> <now>
+  local root="$1" now="$2" ttl heartbeat_file heartbeat
+  ttl="${LOOPD_HEARTBEAT_TTL:-10}"
+  ad_loop_is_nonnegative_int "$ttl" || ttl="10"
+  heartbeat_file="$(ad_loop_daemon_heartbeat_file "$root")"
+  [[ -f "$heartbeat_file" ]] || return 1
+  heartbeat="$(sed -n '1p' "$heartbeat_file" 2>/dev/null || true)"
+  ad_loop_is_nonnegative_int "$heartbeat" || return 0
+  (( now - heartbeat > ttl ))
+}
+
+ad_loop_maybe_block_daemon_offline() { # <root>
+  local root="$1" now marker message
+  now="$(ad_loop_now_epoch)"
+  marker="$(ad_loop_daemon_offline_marker "$root")"
+  if ad_loop_daemon_heartbeat_stale "$root" "$now"; then
+    [[ -f "$marker" ]] && return 1
+    printf '%s\n' "$now" > "$marker"
+    message="运行时监控离线，失去 worker 存活/卡死检测，建议重启 loopd。"
+    ad_loop_print_block_decision "$message"
+    return 0
+  fi
+  rm -f "$marker"
+  return 1
+}
+
 ad_loop_stop_drain() { # <root>
   local root="$1"
   ad_loop_mark_supervisor_turn "$root" idle
-  ad_loop_with_cursor_lock "$root" ad_loop_deliver_next_event_locked "$root" block || true
+  if ad_loop_with_cursor_lock "$root" ad_loop_deliver_next_event_locked "$root" block; then
+    return 0
+  fi
+  ad_loop_maybe_block_daemon_offline "$root" || true
 }
 
 ad_loop_user_prompt_submit() { # <root>
@@ -484,7 +521,7 @@ ad_loop_once() { # <root> <session>
   local root="$1" session="$2" now silent_t tick_t heartbeat
   ad_loop_ensure_dirs "$root"
   now="$(ad_loop_now_epoch)"
-  heartbeat="$(ad_loop_state_dir "$root")/daemon.heartbeat"
+  heartbeat="$(ad_loop_daemon_heartbeat_file "$root")"
   printf '%s\n' "$now" > "$heartbeat"
   silent_t="${LOOPD_SILENT_T:-180}"
   tick_t="${LOOPD_TICK_T:-1800}"
