@@ -295,7 +295,8 @@ daemon 不是神秘服务——它是**一个跑在可见 tmux pane 里的 bash 
 ```
 .agent-duo/
   events/queue.jsonl       # append-only 事件流（生产者: peer report、daemon）
-  events/cursor (+ .lock)  # "已投递到哪"的游标 + flock 锁
+  events/cursor (+ .lock)  # 已投递数量 + flock 锁
+  events/delivered         # 已投递 queue 行号集合（支持优先级投递）
   state/supervisor.turn    # "busy"/"idle"，由 supervisor 的 hook 写
   state/<id>/report.json   # 各 worker 最新报告（peer report 写）
   state/daemon.heartbeat   # daemon 自己的心跳时间戳
@@ -331,11 +332,11 @@ while true; do
 done
 ```
 
-`emit_event` = 往 `queue.jsonl` 追加一行 JSON；`deliver_pending` = 读 cursor 之后的待投递事件、`peer tell supervisor "«AGENTDUO event» …"`、推进 cursor。
+`emit_event` = 往 `queue.jsonl` 追加一行 JSON；`deliver_pending` = 扫描未出现在 `delivered` 中的事件，按优先级选择下一条，`peer tell supervisor "«AGENTDUO event» …"`，记录 delivered 行号并更新 cursor count。
 
 ### 投递不能重复（唯一要小心处）
 
-事件有**两个投递者**——busy 时是 supervisor 的 **Stop hook**（Stop 便车），idle 时是 **daemon**（send-keys 唤醒）。**cursor 是"已投递到哪"的唯一真相**：两边投递前都 `flock cursor.lock`，读 cursor 之后的待办、投递、推进 cursor、解锁。两种情况实际互斥（Stop hook 在 turn 结束=刚离 busy 时跑；daemon 仅在 state=idle 时投），flock 把那条窄缝也焊死，保证一条事件最多投一次。
+事件有**两个投递者**——busy 时是 supervisor 的 **Stop hook**（Stop 便车），idle 时是 **daemon**（send-keys 唤醒）。`delivered` 是"哪些 queue 行已投递"的唯一真相，`cursor` 只是兼容旧线性游标和看板 pending count 的已投递数量：两边投递前都 `flock cursor.lock`，扫描未投递事件、投递、记录 delivered、更新 cursor count、解锁。两种情况实际互斥（Stop hook 在 turn 结束=刚离 busy 时跑；daemon 仅在 state=idle 时投），flock 把那条窄缝也焊死，保证一条事件最多投一次。
 
 ### hook 那一侧（配合 daemon 的两行）
 
@@ -344,9 +345,9 @@ done
 ```jsonc
 // supervisor session settings
 "UserPromptSubmit": [{ "hooks":[{ "type":"command",
-   "command":"echo busy > .agent-duo/state/supervisor.turn" }]}],
+   "command":"scripts/supervisor-user-prompt-submit-hook" }]}],
 "Stop":            [{ "hooks":[{ "type":"command",
-   "command":"node stop-drain.mjs" }]}]   // 写 idle + Stop 便车 drain 队列
+   "command":"scripts/supervisor-stop-drain-hook" }]}]   // 写 idle + Stop 便车 drain 队列
 ```
 
 `stop-drain` 仿照 codex 插件的 `stop-review-gate-hook.mjs`：写 `idle`，再 `flock` 读队列，有待办就 `decision:block`+事件文本让 supervisor 续处理，没有就放行。

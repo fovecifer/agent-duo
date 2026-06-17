@@ -221,13 +221,13 @@ Sentinel = 架在「文件(payload)」与「TUI 现实(在跑 / 已停 / 卡在 
 
 ### 格式
 
-一行，罕见定界符 + **每会话随机 tag**（防碰撞、防伪造）+ 指向文件的指针与校验：
+一行，罕见定界符 + **pane 上懒初始化的随机 tag**（防碰撞）+ 指向文件的指针与校验：
 
 ```
 «AGENTDUO:7f3a» round=3 type=checkpoint status=in_progress file=.agent-duo/state/worker-impl/r3.json sha=ab12cd… ts=2026-06-17T…
 ```
 
-- `7f3a` 在 `assign` 时分配给该会话，worker 无法伪造他人的 sentinel，正常输出也几乎不可能撞上。
+- `7f3a` 由 `peer report` 首次运行时写到 tmux pane 的 `@agentduo_codec_tag`，后续复用；正常输出几乎不可能撞上。
 - `sha` 是刚写文件的哈希，让屏幕截断 / 篡改**可检测**（同 roadmap 的 `prompt_hash` 思路）。
 
 ### 顺序与谁来发
@@ -256,7 +256,7 @@ supervisor 可额外 poll 目录，但替代不了 sentinel：文件系统告诉
 
 - **sentinel 在、文件缺 / sha 不符** → 视为损坏，supervisor 重新 peek 或要求重发。
 - **sentinel 滚出 scrollback** → `report.json` 始终是 latest 指针，按 round 直接读文件兜底；peek 开大窗口。
-- **worker 在散文里"描述"sentinel 而非真发** → 因 CLI 发、带会话 tag，描述出来的不带正确 tag/sha，自动失效。
+- **worker 在散文里"描述"sentinel 而非真发** → `peer wait --round` 会按字段精确匹配目标 `agent_id` / `round`，并在 pane tag 可用时校验 tag；文件侧仍用 sha 兜底检测不一致。
 
 ---
 

@@ -24,6 +24,8 @@ AUTO=0
 [[ "${AGENT_DUO_AUTO_INJECT:-0}" == "1" ]] && AUTO=1
 SUPERVISOR_PROVIDER="claude"
 WITH_SPEC=""   # 形如 codex:worker
+WITH_PROVIDER=""
+WITH_ROLE=""
 _args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -69,6 +71,22 @@ source "$LIB_DIR/registry.sh"
 if ! reg_validate_provider "$SUPERVISOR_PROVIDER"; then
   echo "错误: --supervisor 必须是 claude 或 codex,当前为 '$SUPERVISOR_PROVIDER'。" >&2
   exit 1
+fi
+if [[ -n "$WITH_SPEC" ]]; then
+  if [[ "$WITH_SPEC" != *:* ]]; then
+    echo "错误: --with 必须形如 <provider>:<role>,当前为 '$WITH_SPEC'。" >&2
+    exit 1
+  fi
+  WITH_PROVIDER="${WITH_SPEC%%:*}"
+  WITH_ROLE="${WITH_SPEC#*:}"
+  if ! reg_validate_provider "$WITH_PROVIDER"; then
+    echo "错误: --with 的 provider 必须是 claude 或 codex,当前为 '$WITH_PROVIDER'。" >&2
+    exit 1
+  fi
+  if [[ -z "$WITH_ROLE" ]]; then
+    echo "错误: --with 必须指定非空 role,当前为 '$WITH_SPEC'。" >&2
+    exit 1
+  fi
 fi
 
 if ! command -v tmux >/dev/null; then
@@ -227,12 +245,8 @@ tmux send-keys -t "$LOOPD_PANE" \
 
 # --with <provider>:<role> → 立即再起一个 worker(等价 peer add)。
 if [[ -n "$WITH_SPEC" ]]; then
-  W_PROVIDER="${WITH_SPEC%%:*}"
-  W_ROLE="${WITH_SPEC#*:}"
-  if ! reg_validate_provider "$W_PROVIDER"; then
-    echo "错误: --with 的 provider 必须是 claude 或 codex,当前为 '$W_PROVIDER'。" >&2
-    exit 1
-  fi
+  W_PROVIDER="$WITH_PROVIDER"
+  W_ROLE="$WITH_ROLE"
   W_PANE="$(tmux new-window -t "$SESSION" -n "$W_ROLE" -c "$WORKDIR" -P -F '#{pane_id}')"
   tmux set-option -p -t "$W_PANE" @agent_id "$W_ROLE"
   tmux set-option -p -t "$W_PANE" @agent_role "$W_ROLE"

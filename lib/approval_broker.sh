@@ -118,6 +118,33 @@ ab_sha256_string() {
   fi
 }
 
+ab_normalize_abs_path() { # <absolute_path>
+  local path="$1" part out idx
+  local -a parts stack
+  IFS='/' read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ""|.)
+        ;;
+      ..)
+        if (( ${#stack[@]} > 0 )); then
+          idx=$(( ${#stack[@]} - 1 ))
+          unset "stack[$idx]"
+        fi
+        ;;
+      *)
+        stack[${#stack[@]}]="$part"
+        ;;
+    esac
+  done
+  out=""
+  for part in "${stack[@]}"; do
+    out="$out/$part"
+  done
+  [[ -n "$out" ]] || out="/"
+  printf '%s' "$out"
+}
+
 ab_abs_path() { # <raw> <cwd>
   local raw="$1" cwd="$2" path dir base canon_dir search suffix parent
   case "$raw" in
@@ -129,12 +156,12 @@ ab_abs_path() { # <raw> <cwd>
   dir="${path%/*}"
   base="${path##*/}"
   if [[ -z "$dir" || "$dir" == "$path" ]]; then
-    printf '%s' "$path"
+    ab_normalize_abs_path "$path"
     return 0
   fi
   canon_dir="$(cd -P "$dir" 2>/dev/null && pwd -P || true)"
   if [[ -n "$canon_dir" ]]; then
-    printf '%s/%s' "$canon_dir" "$base"
+    ab_normalize_abs_path "$canon_dir/$base"
   else
     search="$dir"
     suffix="/$base"
@@ -146,11 +173,11 @@ ab_abs_path() { # <raw> <cwd>
     done
     canon_dir="$(cd -P "$search" 2>/dev/null && pwd -P || true)"
     if [[ -n "$canon_dir" ]]; then
-      printf '%s%s' "$canon_dir" "$suffix"
+      ab_normalize_abs_path "$canon_dir$suffix"
     else
       while [[ "$path" == *'//'* ]]; do path="${path//\/\//\/}"; done
       path="${path//\/.\//\/}"
-      printf '%s' "$path"
+      ab_normalize_abs_path "$path"
     fi
   fi
 }
@@ -269,7 +296,7 @@ ab_match() { # <text> <extended-regex>
 }
 
 ab_bash_hits_deny() { # <segment> <whole>
-  local segment whole
+  local segment whole word
   segment="$(ab_lower "$1")"
   whole="$(ab_lower "$2")"
   if ab_match "$segment" '(^|[;&|()[:space:]])sudo([;&|()[:space:]]|$)'; then printf 'deny.sudo'; return 0; fi
@@ -284,13 +311,34 @@ ab_bash_hits_deny() { # <segment> <whole>
   if ab_match "$segment" '(^|[;&|()[:space:]])docker[[:space:]]+push([;&|()[:space:]]|$)'; then printf 'deny.publish'; return 0; fi
   if ab_match "$segment" '(^|[;&|()[:space:]])npm[[:space:]]+publish([;&|()[:space:]]|$)'; then printf 'deny.publish'; return 0; fi
   if ab_match "$segment" '(^|[;&|()[:space:]])gh[[:space:]]+(pr[[:space:]]+merge|release[[:space:]]+create)([;&|()[:space:]]|$)'; then printf 'deny.github_mutation'; return 0; fi
-  if ab_match "$segment" '(^|[;&|()[:space:]])sed[[:space:]][^;&|()]*[[:space:]]-i([;&|()[:space:]]|$)'; then printf 'deny.in_place_edit'; return 0; fi
+  if ab_match "$segment" '(^|[;&|()[:space:]])sed([[:space:]]|$)'; then
+    for word in $segment; do
+      case "$word" in
+        -i|-i*) printf 'deny.in_place_edit'; return 0 ;;
+      esac
+    done
+  fi
   if ab_match "$segment" '(^|[;&|()[:space:]])find[[:space:]][^;&|()]*(-delete|-exec)([;&|()[:space:]]|$)'; then printf 'deny.find_mutation'; return 0; fi
-  if ab_match "$segment" '(^|[;&|()[:space:]])rm[[:space:]][^;&|()]*-[a-z]*r[a-z]*f'; then printf 'deny.rm_rf'; return 0; fi
-  if ab_match "$segment" '(^|[;&|()[:space:]])rm[[:space:]][^;&|()]*-[a-z]*f[a-z]*r'; then printf 'deny.rm_rf'; return 0; fi
+  if ab_match "$segment" '(^|[;&|()[:space:]])rm([[:space:]]|$)' &&
+     { ab_match "$segment" '(^|[[:space:]])-[^[:space:]]*r[^[:space:]]*([[:space:]]|$)' || ab_match "$segment" '(^|[[:space:]])--recursive([=[:space:]]|$)'; } &&
+     { ab_match "$segment" '(^|[[:space:]])-[^[:space:]]*f[^[:space:]]*([[:space:]]|$)' || ab_match "$segment" '(^|[[:space:]])--force([=[:space:]]|$)'; }; then
+    printf 'deny.rm_rf'
+    return 0
+  fi
   if ab_match "$whole" '(curl|wget|fetch)[^|;]*\|[[:space:]]*(sh|bash|zsh)([[:space:]]|$)'; then printf 'deny.curl_pipe_shell'; return 0; fi
   if ab_match "$whole" '(^|[/[:space:]"'"'"'])\.(ssh|aws)([/[:space:]"'"'"']|$)'; then printf 'deny.secret_path'; return 0; fi
   if ab_match "$whole" '(^|[/[:space:]"'"'"'])\.env([/[:space:]"'"'"']|$)'; then printf 'deny.secret_path'; return 0; fi
+  return 1
+}
+
+ab_bash_requires_escalation() { # <segment>
+  local text="$1"
+  case "$text" in
+    *'>'*|*'<'*|*'`'*|*'$('*)
+      printf 'bash.shell_syntax'
+      return 0
+      ;;
+  esac
   return 1
 }
 
@@ -510,6 +558,15 @@ ab_evaluate_policy() {
       [[ -n "$trimmed" ]] || continue
       if matched="$(ab_bash_hits_deny "$trimmed" "$command")"; then
         AB_OUTCOME="hard-deny"; AB_MATCHED="$matched"; AB_REASON="$HARD_DENY_REASON"; return 0
+      fi
+    done <<EOF
+$(ab_split_segments "$command")
+EOF
+    while IFS= read -r segment; do
+      trimmed="$(ab_trim "$segment")"
+      [[ -n "$trimmed" ]] || continue
+      if matched="$(ab_bash_requires_escalation "$trimmed")"; then
+        AB_OUTCOME="escalate"; AB_MATCHED="$matched"; AB_REASON="$ESCALATE_REASON"; return 0
       fi
     done <<EOF
 $(ab_split_segments "$command")

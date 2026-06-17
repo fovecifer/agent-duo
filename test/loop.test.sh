@@ -225,4 +225,19 @@ LOOPD_TICK_T=1 assert_ok "loopd: tick emitted with active worker" run_loopd_once
 assert_contains "loopd: tick event" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"tick"'
 teardown
 
+# Existing tick detection must aggregate JSONL as one stream, not one max per line.
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{}\n' > "$PROJECT/.agent-duo/state/worker/report.json"
+touch -t 202001010000 "$PROJECT/.agent-duo/state/worker/report.json"
+write_event e1 worker blocked 1 "blocked" ".agent-duo/state/worker/r1.json"
+jq -cn '{id:"tick-future",ts:"2999-01-01T00:00:00Z",agent:"-",type:"tick",round:0,summary:"loop tick",ref:""}' \
+  >> "$PROJECT/.agent-duo/events/queue.jsonl"
+write_event e2 worker checkpoint 2 "progress" ".agent-duo/state/worker/r2.json"
+LOOPD_TICK_T=1 assert_ok "loopd: existing tick suppresses duplicate" run_loopd_once
+tick_count="$(grep -c '"type":"tick"' "$PROJECT/.agent-duo/events/queue.jsonl" || true)"
+assert_eq "loopd: tick still once" "$tick_count" "1"
+teardown
+
 exit "$ADK_FAIL"

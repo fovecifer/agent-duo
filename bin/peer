@@ -330,10 +330,20 @@ append_event_json() {
   printf '%s\n' "$line" >> "$queue"
 }
 
-screen_has_round_sentinel() { # <screen> <round> <agent_id>
-  local screen="$1" round="$2" agent_id="$3"
-  printf '%s\n' "$screen" | awk -v r="round=${round}" -v a="agent_id=${agent_id}" '
-    index($0, "«AGENTDUO:") && index($0, r) && index($0, a) { found=1 }
+screen_has_round_sentinel() { # <screen> <round> <agent_id> [codec_tag]
+  local screen="$1" round="$2" agent_id="$3" tag="${4:-}"
+  printf '%s\n' "$screen" | awk -v r="round=${round}" -v a="agent_id=${agent_id}" -v tag="$tag" '
+    index($0, "«AGENTDUO:") {
+      if (tag != "" && index($0, "«AGENTDUO:" tag "»") == 0) next
+      has_round=0; has_agent=0; has_file=0; has_sha=0
+      for (i = 1; i <= NF; i++) {
+        if ($i == r) has_round=1
+        if ($i == a) has_agent=1
+        if (index($i, "file=") == 1 && length($i) > 5) has_file=1
+        if (index($i, "sha=") == 1 && length($i) > 4) has_sha=1
+      }
+      if (has_round && has_agent && has_file && has_sha) found=1
+    }
     END { exit found ? 0 : 1 }
   '
 }
@@ -591,10 +601,11 @@ case "$cmd" in
         echo "错误: PEER_WAIT_ROUND_LINES 必须是正整数。" >&2
         exit 1
       fi
+      target_tag="$(tmux display-message -p -t "$target" '#{@agentduo_codec_tag}' 2>/dev/null || true)"
       elapsed=0
       while (( elapsed < round_timeout )); do
         cur="$(capture "$target" "$lines")"
-        if screen_has_round_sentinel "$cur" "$round_wait" "$target_id"; then
+        if screen_has_round_sentinel "$cur" "$round_wait" "$target_id" "$target_tag"; then
           echo "已看到 round=${round_wait} 的 sentinel。"
           exit 0
         fi

@@ -441,6 +441,26 @@ TMUX_STUB_CAPTURE_MODE=sentinel assert_not_ok "wait round: wrong agent ignored" 
 assert_contains "wait round: wrong agent timeout" "$(cat "$ERR")" '等待 round=7 的 sentinel 超时(1s)'
 teardown
 
+# wait --round:字段必须精确匹配,不能把 round=70/worker2 当成目标。
+setup
+TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=worker round=70 type=checkpoint status=in_progress file=.agent-duo/state/worker/r70.json sha=abc ts=2026-06-17T00:00:00Z'
+TMUX_STUB_CAPTURE_MODE=sentinel assert_not_ok "wait round: round boundary ignored" run_peer wait worker --round 7 --timeout 1 --interval 1
+assert_contains "wait round: round boundary timeout" "$(cat "$ERR")" '等待 round=7 的 sentinel 超时(1s)'
+teardown
+
+setup
+TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=worker2 round=7 type=checkpoint status=in_progress file=.agent-duo/state/worker2/r7.json sha=abc ts=2026-06-17T00:00:00Z'
+TMUX_STUB_CAPTURE_MODE=sentinel assert_not_ok "wait round: agent boundary ignored" run_peer wait worker --round 7 --timeout 1 --interval 1
+assert_contains "wait round: agent boundary timeout" "$(cat "$ERR")" '等待 round=7 的 sentinel 超时(1s)'
+teardown
+
+setup
+TMUX_STUB_CODEC_TAG=expected
+TMUX_STUB_SENTINEL='«AGENTDUO:other» agent_id=worker round=7 type=checkpoint status=in_progress file=.agent-duo/state/worker/r7.json sha=abc ts=2026-06-17T00:00:00Z'
+TMUX_STUB_CAPTURE_MODE=sentinel assert_not_ok "wait round: tag mismatch ignored" run_peer wait worker --round 7 --timeout 1 --interval 1
+assert_contains "wait round: tag mismatch timeout" "$(cat "$ERR")" '等待 round=7 的 sentinel 超时(1s)'
+teardown
+
 # 非法输入。
 setup
 assert_not_ok "invalid: missing identity" run_peer_without_agent status

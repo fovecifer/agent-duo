@@ -50,10 +50,10 @@ tmux list-panes -s -t agents \
 
 ## 启动模型
 
-开局只拉起**一个** agent，打成 supervisor，provider 可配、默认 claude。`tmux -CC` 集成把它渲染为那唯一的 iTerm2 tab。
+开局拉起一个 supervisor agent 和一个可见 loopd pane，supervisor provider 可配、默认 claude。`tmux -CC` 集成把它们渲染为 iTerm2 tab。
 
 ```sh
-start.sh                      # 默认 claude 当 supervisor，单 tab
+start.sh                      # 默认 claude 当 supervisor，另起 loopd 看板
 start.sh --supervisor codex   # 改用 codex 当 supervisor
 start.sh --with codex:worker  # 便捷：同时再 add 一个 codex worker（demo 平价）
 ```

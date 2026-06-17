@@ -81,6 +81,20 @@ assert_ok "hook: escaped quote does not hide deny segment" run_hook \
 assert_contains "hook: escaped quote deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 assert_not_contains "hook: escaped quote not auto-allowed" "$(cat "$OUT")" '"decision":"allow"'
 
+# Dangerous Bash variants must not slip through auto-allow.
+assert_ok "hook: split rm flags hard-deny" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"rm -r -f .agent-duo"},"round":6}'
+assert_contains "hook: split rm flags deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
+
+assert_ok "hook: sed backup inplace hard-denies" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"sed -i.bak s/a/b/ file"},"round":6}'
+assert_contains "hook: sed backup inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
+
+assert_ok "hook: bash redirection escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"echo pwn > /tmp/agent-duo-pwn"},"round":6}'
+assert_contains "hook: bash redirection pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: bash redirection not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
 # Unknown Bash commands escalate into a pending approval file and blocked event.
 assert_ok "hook: bash unknown escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":7}'
@@ -120,6 +134,11 @@ assert_contains "hook: write inside decision" "$(cat "$OUT")" '"decision":"allow
 assert_ok "hook: write outside worktree escalates" run_hook \
   "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$outside\"},\"round\":11}"
 assert_contains "hook: write outside pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+
+assert_ok "hook: unresolved dotdot write escapes worktree" run_hook \
+  '{"tool_name":"Write","tool_input":{"file_path":"missing/../../outside.txt"},"round":11}'
+assert_contains "hook: unresolved dotdot write pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: unresolved dotdot write not allowed" "$(cat "$OUT")" '"decision":"allow"'
 
 assert_ok "hook: secret path hard-denies" run_hook \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$WORKTREE/.env\"},\"round\":12}"

@@ -405,7 +405,7 @@ ad_loop_last_tick_epoch() { # <root>
   local queue
   queue="$(ad_loop_queue_file "$1")"
   [[ -f "$queue" ]] || { printf '0'; return 0; }
-  jq -r '[select(.type == "tick") | (.ts | fromdateiso8601? // 0)] | max // 0' "$queue" 2>/dev/null || printf '0'
+  jq -sr '[.[] | select(.type == "tick") | (.ts | fromdateiso8601? // 0)] | max // 0' "$queue" 2>/dev/null || printf '0'
 }
 
 ad_loop_maybe_tick() { # <root> <session> <now> <tick_t>
