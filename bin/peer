@@ -12,6 +12,12 @@
 #   ... | peer tell [<id>]  从 stdin 投递多行消息(经 tmux buffer + bracketed paste,引号换行安全)
 #   peer wait [<id>] [超时秒] [采样间隔秒] [连续稳定次数]
 #                           等待目标屏幕输出稳定(认为它已完成当前任务),默认最长 300s
+#   peer wait <id> --round N [--timeout 秒] [--interval 秒]
+#                           等待目标屏幕出现指定 round 的 agent-duo sentinel
+#   peer report --type <plan|checkpoint|request|result>
+#               --status <in_progress|blocked|partial|done|failed|unknown>
+#               [--step sN] [--round N] [--delta ...] [--next ...]
+#                           写结构化 report、打印 sentinel、追加 runtime event
 #   peer status             显示自己/默认目标的身份与会话内全员
 #   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
 #   peer --force tell/esc   跳过权限弹窗检测并强制发送
@@ -35,6 +41,8 @@ PEER_ROOT="$(cd "$(dirname "$PEER_SRC")/.." && pwd)"
 source "$PEER_ROOT/lib/registry.sh"
 
 PEER_INSTR="$PEER_ROOT/docs/AGENT-INSTRUCTIONS.md"
+AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
+AGENT_DUO_DIR="$AGENT_DUO_ROOT/.agent-duo"
 
 SELF_PANE="${TMUX_PANE:-}"
 
@@ -48,6 +56,17 @@ self_id() {
     id="${AGENT_NAME:-}"
   fi
   printf '%s' "$id"
+}
+
+self_role() {
+  local role=""
+  if [[ -n "$SELF_PANE" ]]; then
+    role="$(tmux display-message -p -t "$SELF_PANE" '#{@agent_role}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$role" ]]; then
+    role="${AGENT_ROLE:-worker}"
+  fi
+  printf '%s' "$role"
 }
 
 ME="$(self_id)"
@@ -103,6 +122,211 @@ resolve_target_pane() {
 
 is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_report_type() {
+  case "$1" in
+    plan|checkpoint|request|result) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_report_status() {
+  case "$1" in
+    in_progress|blocked|partial|done|failed|unknown) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_python3() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "错误: peer report 需要 python3 来写入 JSON 并 fsync。" >&2
+    exit 1
+  fi
+}
+
+iso_ts() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+sha256_file() { # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    echo "错误: 需要 shasum 或 sha256sum 计算 report sha。" >&2
+    exit 1
+  fi
+}
+
+fsync_dir() { # <dir>
+  require_python3
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
+random_hex_tag() {
+  local tag
+  tag="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
+  if [[ -z "$tag" ]]; then
+    tag="$(printf '%04x' "$$")"
+  fi
+  printf '%s' "$tag"
+}
+
+codec_tag() {
+  local tag=""
+  if [[ -n "$SELF_PANE" ]]; then
+    tag="$(tmux display-message -p -t "$SELF_PANE" '#{@agentduo_codec_tag}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$tag" ]]; then
+    tag="$(random_hex_tag)"
+    if [[ -n "$SELF_PANE" ]]; then
+      tmux set-option -p -t "$SELF_PANE" @agentduo_codec_tag "$tag" 2>/dev/null || true
+    fi
+  fi
+  printf '%s' "$tag"
+}
+
+next_report_round() { # <state_dir>
+  local dir="$1" max=0 f base n
+  for f in "$dir"/r*.json; do
+    [[ -e "$f" ]] || continue
+    base="${f##*/}"
+    base="${base#r}"
+    base="${base%.json}"
+    if is_positive_int "$base"; then
+      n="$base"
+      if (( n > max )); then max="$n"; fi
+    fi
+  done
+  printf '%s' "$(( max + 1 ))"
+}
+
+one_line() {
+  printf '%s' "$1" | tr '\r\n' '  '
+}
+
+event_type_for_report() { # <report_type> <status>
+  local report_type="$1" status="$2"
+  if [[ "$report_type" == "request" || "$status" == "blocked" ]]; then
+    printf 'blocked'
+  else
+    case "$report_type" in
+      plan)       printf 'plan' ;;
+      result)     printf 'result' ;;
+      checkpoint) printf 'checkpoint' ;;
+      *)          printf '%s' "$report_type" ;;
+    esac
+  fi
+}
+
+write_report_json() {
+  require_python3
+  python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+(
+    path,
+    round_s,
+    agent_id,
+    role,
+    report_type,
+    status,
+    goal_ref,
+    step_ref,
+    delta,
+    drift,
+    next_text,
+    evidence_cmd,
+    evidence_result,
+    evidence_ref,
+) = sys.argv[1:15]
+
+def nullable(value):
+    return None if value == "" else value
+
+evidence = []
+if evidence_cmd or evidence_result or evidence_ref:
+    evidence.append({
+        "cmd": evidence_cmd,
+        "result": evidence_result,
+        "ref": evidence_ref,
+    })
+
+report = {
+    "protocol": "1",
+    "round": int(round_s),
+    "agent_id": agent_id,
+    "role": role,
+    "type": report_type,
+    "status": status,
+    "goal_ref": nullable(goal_ref),
+    "step_ref": nullable(step_ref),
+    "delta": delta,
+    "drift": nullable(drift),
+    "evidence": evidence,
+    "needs": [],
+    "next": next_text,
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(report, f, ensure_ascii=False, separators=(",", ":"))
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+PY
+}
+
+append_event_json() {
+  require_python3
+  python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+queue, event_id, ts, agent, event_type, round_s, summary, ref = sys.argv[1:9]
+event = {
+    "id": event_id,
+    "ts": ts,
+    "agent": agent,
+    "type": event_type,
+    "round": int(round_s),
+    "summary": summary,
+    "ref": ref,
+}
+with open(queue, "a", encoding="utf-8") as f:
+    json.dump(event, f, ensure_ascii=False, separators=(",", ":"))
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+
+dir_fd = os.open(os.path.dirname(queue), os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+}
+
+screen_has_round_sentinel() { # <screen> <round> <agent_id>
+  local screen="$1" round="$2" agent_id="$3"
+  printf '%s\n' "$screen" | awk -v r="round=${round}" -v a="agent_id=${agent_id}" '
+    index($0, "«AGENTDUO:") && index($0, r) && index($0, a) { found=1 }
+    END { exit found ? 0 : 1 }
+  '
 }
 
 ensure_session() {
@@ -295,8 +519,71 @@ case "$cmd" in
   wait)
     ensure_session
     maybe_id=""
-    if [[ -n "${1:-}" ]] && ! is_positive_int "$1"; then maybe_id="$1"; shift; fi
+    if [[ -n "${1:-}" && "${1:-}" != "--round" && "${1:-}" != "--timeout" && "${1:-}" != "--interval" ]] && ! is_positive_int "$1"; then maybe_id="$1"; shift; fi
     target="$(resolve_target_pane "$maybe_id")"
+
+    round_wait=""
+    round_timeout="${PEER_WAIT_TIMEOUT:-300}"
+    round_interval="${PEER_WAIT_INTERVAL:-5}"
+    if [[ "${1:-}" == --* ]]; then
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --round)
+            round_wait="${2:-}"
+            shift 2
+            ;;
+          --timeout)
+            round_timeout="${2:-}"
+            shift 2
+            ;;
+          --interval)
+            round_interval="${2:-}"
+            shift 2
+            ;;
+          *)
+            echo "用法: peer wait [<id>] --round N [--timeout 秒] [--interval 秒]" >&2
+            exit 1
+            ;;
+        esac
+      done
+    fi
+
+    if [[ -n "$round_wait" ]]; then
+      target_id="$maybe_id"
+      if [[ -z "$target_id" ]]; then
+        target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+      fi
+      if ! is_positive_int "$round_wait"; then
+        echo "错误: peer wait --round 必须是正整数。" >&2
+        exit 1
+      fi
+      if ! is_positive_int "$round_timeout"; then
+        echo "错误: peer wait --timeout 必须是正整数。" >&2
+        exit 1
+      fi
+      if ! is_positive_int "$round_interval"; then
+        echo "错误: peer wait --interval 必须是正整数。" >&2
+        exit 1
+      fi
+      lines="${PEER_WAIT_ROUND_LINES:-200}"
+      if ! is_positive_int "$lines"; then
+        echo "错误: PEER_WAIT_ROUND_LINES 必须是正整数。" >&2
+        exit 1
+      fi
+      elapsed=0
+      while (( elapsed < round_timeout )); do
+        cur="$(capture "$target" "$lines")"
+        if screen_has_round_sentinel "$cur" "$round_wait" "$target_id"; then
+          echo "已看到 round=${round_wait} 的 sentinel。"
+          exit 0
+        fi
+        sleep "$round_interval"
+        (( elapsed += round_interval ))
+      done
+      echo "等待 round=${round_wait} 的 sentinel 超时(${round_timeout}s)。可稍后再 peer peek。" >&2
+      exit 2
+    fi
+
     if [[ $# -gt 3 ]]; then
       echo "用法: peer wait [<id>] [超时秒] [采样间隔秒] [连续稳定次数]" >&2
       exit 1
@@ -342,6 +629,136 @@ case "$cmd" in
     done
     echo "等待超时(${timeout}s),目标仍在输出。可稍后再 peer peek。" >&2
     exit 2
+    ;;
+
+  report)
+    report_type=""
+    report_status=""
+    step_ref=""
+    round=""
+    delta=""
+    next_text=""
+    goal_ref=""
+    drift=""
+    evidence_cmd=""
+    evidence_result=""
+    evidence_ref=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type)
+          report_type="${2:-}"
+          shift 2
+          ;;
+        --status)
+          report_status="${2:-}"
+          shift 2
+          ;;
+        --step|--step-ref)
+          step_ref="${2:-}"
+          shift 2
+          ;;
+        --round)
+          round="${2:-}"
+          shift 2
+          ;;
+        --delta)
+          delta="${2:-}"
+          shift 2
+          ;;
+        --next)
+          next_text="${2:-}"
+          shift 2
+          ;;
+        --goal|--goal-ref)
+          goal_ref="${2:-}"
+          shift 2
+          ;;
+        --drift)
+          drift="${2:-}"
+          shift 2
+          ;;
+        --evidence-cmd)
+          evidence_cmd="${2:-}"
+          shift 2
+          ;;
+        --evidence-result)
+          evidence_result="${2:-}"
+          shift 2
+          ;;
+        --evidence-ref)
+          evidence_ref="${2:-}"
+          shift 2
+          ;;
+        *)
+          echo "用法: peer report --type <plan|checkpoint|request|result> --status <in_progress|blocked|partial|done|failed|unknown> [--step sN] [--round N] [--delta ...] [--next ...]" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if ! is_report_type "$report_type"; then
+      echo "错误: --type 必须是 plan、checkpoint、request 或 result。" >&2
+      exit 1
+    fi
+    if ! is_report_status "$report_status"; then
+      echo "错误: --status 必须是 in_progress、blocked、partial、done、failed 或 unknown。" >&2
+      exit 1
+    fi
+    if [[ -n "$round" ]] && ! is_positive_int "$round"; then
+      echo "错误: --round 必须是正整数。" >&2
+      exit 1
+    fi
+
+    role="$(self_role)"
+    state_dir="$AGENT_DUO_DIR/state/$ME"
+    events_dir="$AGENT_DUO_DIR/events"
+    mkdir -p "$state_dir" "$events_dir"
+
+    if [[ -z "$round" ]]; then
+      round="$(next_report_round "$state_dir")"
+    fi
+
+    effective_status="$report_status"
+    if [[ "$report_status" == "done" || "$report_status" == "partial" ]]; then
+      if [[ -z "$evidence_cmd" && -z "$evidence_result" && -z "$evidence_ref" ]]; then
+        effective_status="unknown"
+      fi
+    fi
+
+    report_file="$state_dir/r${round}.json"
+    latest_file="$state_dir/report.json"
+    if [[ -e "$report_file" ]]; then
+      echo "错误: report round 已存在: .agent-duo/state/$ME/r${round}.json" >&2
+      exit 1
+    fi
+
+    tmp_report="$state_dir/.r${round}.json.$$"
+    write_report_json "$tmp_report" "$round" "$ME" "$role" "$report_type" "$effective_status" \
+      "$goal_ref" "$step_ref" "$delta" "$drift" "$next_text" \
+      "$evidence_cmd" "$evidence_result" "$evidence_ref"
+    mv "$tmp_report" "$report_file"
+
+    tmp_latest="$state_dir/.report.json.$$"
+    rm -f "$tmp_latest"
+    ln -s "r${round}.json" "$tmp_latest"
+    mv -f "$tmp_latest" "$latest_file"
+    fsync_dir "$state_dir"
+
+    sha="$(sha256_file "$report_file")"
+    ts="$(iso_ts)"
+    tag="$(codec_tag)"
+    ref=".agent-duo/state/$ME/r${round}.json"
+    printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
+      "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"
+
+    queue="$events_dir/queue.jsonl"
+    event_type="$(event_type_for_report "$report_type" "$effective_status")"
+    summary="$(one_line "$delta")"
+    if [[ -z "$summary" ]]; then summary="$(one_line "$next_text")"; fi
+    if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
+    event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
+    append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"
     ;;
 
   status)

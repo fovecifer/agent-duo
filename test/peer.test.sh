@@ -36,6 +36,7 @@ assert_exit_code() {
 setup() {
   SCENARIO_TMP="$(make_tmp)"
   STUB_BIN="$SCENARIO_TMP/bin"; mkdir -p "$STUB_BIN"
+  PROJECT="$SCENARIO_TMP/project"; mkdir -p "$PROJECT"
   TMUX_STUB_LOG="$SCENARIO_TMP/tmux.log"; : > "$TMUX_STUB_LOG"
   TMUX_STUB_BUFFER_DIR="$SCENARIO_TMP/buffers"; mkdir -p "$TMUX_STUB_BUFFER_DIR"
   TMUX_STUB_CAPTURE_COUNT="$SCENARIO_TMP/capture-count"; : > "$TMUX_STUB_CAPTURE_COUNT"
@@ -67,6 +68,13 @@ case "$cmd" in
       set -- $*
       while [[ $# -gt 0 ]]; do [[ "$1" == "-t" ]] && { pane="$2"; break; }; shift; done
       awk -F'\t' -v p="$pane" '$1==p{print $2}' "$TMUX_STUB_REGISTRY"
+    elif [[ "$*" == *'@agent_role'* ]]; then
+      pane=""
+      set -- $*
+      while [[ $# -gt 0 ]]; do [[ "$1" == "-t" ]] && { pane="$2"; break; }; shift; done
+      awk -F'\t' -v p="$pane" '$1==p{print $3}' "$TMUX_STUB_REGISTRY"
+    elif [[ "$*" == *'@agentduo_codec_tag'* ]]; then
+      printf '%s\n' "${TMUX_STUB_CODEC_TAG:-}"
     else
       printf '%s\n' "${TMUX_STUB_PANE_SESSION:-${AGENT_SESSION:-agents}}"
     fi
@@ -102,6 +110,10 @@ case "$cmd" in
       normal_prompt)
         printf 'Review complete: no issues found.\n'
         printf '❯ \n'
+        ;;
+      sentinel)
+        printf 'prior output\n'
+        printf '%s\n' "$TMUX_STUB_SENTINEL"
         ;;
       changing) printf 'screen-%s\n' "$count" ;;
       *)        printf 'screen-stable\n' ;;
@@ -157,7 +169,10 @@ run_peer() {
     TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" \
     TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
     TMUX_STUB_CAPTURE_MODE="${TMUX_STUB_CAPTURE_MODE:-stable}" \
+    TMUX_STUB_SENTINEL="${TMUX_STUB_SENTINEL:-}" \
+    TMUX_STUB_CODEC_TAG="${TMUX_STUB_CODEC_TAG:-}" \
     PEER_FORCE="${TEST_PEER_FORCE:-0}" \
+    AGENT_DUO_ROOT="${TEST_AGENT_DUO_ROOT:-$PROJECT}" \
     TMUX_STUB_HAS_SESSION="${TMUX_STUB_HAS_SESSION:-1}" \
     TMUX_STUB_PANE_EXISTS="${TMUX_STUB_PANE_EXISTS:-1}" \
     TMUX_STUB_PANE_SESSION="${TMUX_STUB_PANE_SESSION:-${TEST_AGENT_SESSION:-agents}}" \
@@ -339,6 +354,62 @@ teardown
 setup
 TMUX_STUB_CAPTURE_MODE=changing assert_not_ok "wait: times out on changing output" run_peer wait 1 1 2
 assert_contains "wait: timeout message" "$(cat "$ERR")" '等待超时(1s)'
+teardown
+
+# report:写 rN.json、更新 latest 指针、打印 sentinel、追加极小 event。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: succeeds" \
+  run_peer report --type checkpoint --status in_progress --round 7 --step s1 --delta "tests added" --next "implement codec"
+STATE="$PROJECT/.agent-duo/state/worker"
+QUEUE="$PROJECT/.agent-duo/events/queue.jsonl"
+assert_ok "report: rN exists" test -f "$STATE/r7.json"
+assert_eq "report: latest symlink" "$(readlink "$STATE/report.json")" "r7.json"
+assert_ok "report: queue exists" test -f "$QUEUE"
+report_json="$(cat "$STATE/r7.json")"
+event_json="$(cat "$QUEUE")"
+sentinel="$(cat "$OUT")"
+assert_contains "report: protocol" "$report_json" '"protocol":"1"'
+assert_contains "report: agent id" "$report_json" '"agent_id":"worker"'
+assert_contains "report: role" "$report_json" '"role":"worker"'
+assert_contains "report: type" "$report_json" '"type":"checkpoint"'
+assert_contains "report: status" "$report_json" '"status":"in_progress"'
+assert_contains "report: step" "$report_json" '"step_ref":"s1"'
+assert_contains "report: sentinel delimiter" "$sentinel" '«AGENTDUO:7f3a»'
+assert_contains "report: sentinel agent" "$sentinel" 'agent_id=worker'
+assert_contains "report: sentinel round" "$sentinel" 'round=7'
+assert_contains "report: sentinel file" "$sentinel" 'file=.agent-duo/state/worker/r7.json'
+assert_contains "report: event agent" "$event_json" '"agent":"worker"'
+assert_contains "report: event type" "$event_json" '"type":"checkpoint"'
+assert_contains "report: event ref" "$event_json" '"ref":".agent-duo/state/worker/r7.json"'
+teardown
+
+# report:done/partial 没有 evidence 时按契约降级为 unknown。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: done without evidence succeeds" \
+  run_peer report --type result --status done --round 1 --delta "claimed done"
+assert_contains "report: done without evidence downgraded" "$(cat "$PROJECT/.agent-duo/state/worker/r1.json")" '"status":"unknown"'
+assert_contains "report: downgraded sentinel status" "$(cat "$OUT")" 'status=unknown'
+teardown
+
+# wait --round:等待指定 round 的 sentinel,不再靠屏幕稳定猜测回合边界。
+setup
+TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=worker round=7 type=checkpoint status=in_progress file=.agent-duo/state/worker/r7.json sha=abc ts=2026-06-17T00:00:00Z'
+TMUX_STUB_CAPTURE_MODE=sentinel assert_ok "wait round: sentinel found" run_peer wait worker --round 7
+assert_contains "wait round: success message" "$(cat "$OUT")" '已看到 round=7 的 sentinel'
+teardown
+
+# wait --round:指定回合一直没出现时超时。
+setup
+TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=worker round=6 type=checkpoint status=in_progress file=.agent-duo/state/worker/r6.json sha=abc ts=2026-06-17T00:00:00Z'
+TMUX_STUB_CAPTURE_MODE=sentinel assert_not_ok "wait round: timeout" run_peer wait worker --round 7 --timeout 1 --interval 1
+assert_contains "wait round: timeout message" "$(cat "$ERR")" '等待 round=7 的 sentinel 超时(1s)'
+teardown
+
+# wait --round:同 round 但 agent_id 不同不能误判成功。
+setup
+TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=reviewer round=7 type=checkpoint status=in_progress file=.agent-duo/state/reviewer/r7.json sha=abc ts=2026-06-17T00:00:00Z'
+TMUX_STUB_CAPTURE_MODE=sentinel assert_not_ok "wait round: wrong agent ignored" run_peer wait worker --round 7 --timeout 1 --interval 1
+assert_contains "wait round: wrong agent timeout" "$(cat "$ERR")" '等待 round=7 的 sentinel 超时(1s)'
 teardown
 
 # 非法输入。
