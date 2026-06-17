@@ -115,6 +115,62 @@ assert_ok "hook: bash redirection escalates" run_hook \
 assert_contains "hook: bash redirection pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
 assert_not_contains "hook: bash redirection not allowed" "$(cat "$OUT")" '"decision":"allow"'
 
+# Benign redirects on allowlisted commands stay auto-allowed (fd-dup, /dev/null, in-worktree).
+assert_ok "hook: redirect stderr-to-stdout allowed" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"npm test 2>&1"},"round":6}'
+assert_contains "hook: redirect 2>&1 decision" "$(cat "$OUT")" '"decision":"allow"'
+
+assert_ok "hook: redirect to /dev/null allowed" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"npm test > /dev/null"},"round":6}'
+assert_contains "hook: redirect devnull decision" "$(cat "$OUT")" '"decision":"allow"'
+
+# File-target redirects escalate (regex can't safely resolve $VARS / ~ / >&file forms).
+assert_ok "hook: file-target redirect escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"npm test > out.log"},"round":6}'
+assert_not_contains "hook: file-target redirect not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+# Redirect bypasses that look relative but escape at runtime must NOT auto-allow.
+assert_ok "hook: redirect to \$HOME escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"echo pwn > $HOME/.bashrc"},"round":6}'
+assert_not_contains "hook: redirect \$HOME not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+assert_ok "hook: redirect-and-dup to file escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"echo pwn >& /etc/passwd"},"round":6}'
+assert_not_contains "hook: redirect-and-dup not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+# Command/process substitution is opaque and must escalate even on allowlisted heads.
+assert_ok "hook: command substitution escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"echo $(whoami)"},"round":6}'
+assert_contains "hook: command substitution pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: command substitution not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+assert_ok "hook: process substitution escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"diff <(ls) <(ls)"},"round":6}'
+assert_not_contains "hook: process substitution not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+# awk/find are not auto-allowed (can exec/write); they escalate until worktree isolation lands.
+assert_ok "hook: awk escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"awk \"{print}\" file"},"round":6}'
+assert_not_contains "hook: awk not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+assert_ok "hook: find escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"find . -name x"},"round":6}'
+assert_not_contains "hook: find not allowed" "$(cat "$OUT")" '"decision":"allow"'
+
+# A retried blocked tool call must not flood the queue with duplicate blocked events.
+DEDUP_PROJECT="$TMP/dedup"
+mkdir -p "$DEDUP_PROJECT"
+dedup_hook() {
+  printf '%s' "$1" | \
+    AGENT_DUO_ROOT="$DEDUP_PROJECT" AGENT_DUO_AGENT_ID="worker" AGENT_DUO_WORKTREE="$DEDUP_PROJECT" \
+    "$ROOT/bin/agent-duo-approval-hook" >/dev/null 2>&1
+}
+dedup_hook '{"tool_name":"Bash","tool_input":{"command":"python migrate.py"},"round":3}'
+dedup_hook '{"tool_name":"Bash","tool_input":{"command":"python migrate.py"},"round":3}'
+dedup_hook '{"tool_name":"Bash","tool_input":{"command":"python migrate.py"},"round":3}'
+assert_eq "hook: blocked event emitted once per pending call" \
+  "$(grep -c '"type":"blocked"' "$DEDUP_PROJECT/.agent-duo/events/queue.jsonl")" "1"
+
 # Unknown Bash commands escalate into a pending approval file and blocked event.
 assert_ok "hook: bash unknown escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":7}'
