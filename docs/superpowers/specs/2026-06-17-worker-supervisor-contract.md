@@ -2,7 +2,7 @@
 
 日期：2026-06-17
 状态：设计稿，待实现
-关联：[supervisor-loop roadmap](../../../agent-duo-supervisor-loop-roadmap.md)、[loop runtime 设计](./2026-06-17-loop-runtime-design.md)、[registry MVP 3 design](./2026-06-16-registry-mvp3-design.md)
+关联：[supervisor-loop roadmap](../../../agent-duo-supervisor-loop-roadmap.md)、[loop runtime 设计](./2026-06-17-loop-runtime-design.md)、[Approval Broker 设计](./2026-06-17-approval-broker-design.md)、[registry MVP 3 design](./2026-06-16-registry-mvp3-design.md)
 
 > 本契约是**水线以下**的内部协议（worker↔supervisor）。人这一层永远只说自然语言，见 [loop runtime 设计 §水线](./2026-06-17-loop-runtime-design.md#第一原则水线凌驾于所有机制之上)。
 

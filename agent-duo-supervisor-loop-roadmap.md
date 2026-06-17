@@ -995,13 +995,15 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 
 第一阶段不需要一下子做完整多 Agent 平台，可以做一个小而硬的版本：
 
+> **更新（2026-06-17）：MVP 1 / 2 已细化为 hook 方案，见 [Approval Broker 设计](docs/superpowers/specs/2026-06-17-approval-broker-design.md)。** 下面要点中"检查 prompt hash / 抓屏"已被 worker session 的 `PreToolUse` hook 取代（工具执行前进程内 allow/deny/ask，不再抓屏）。
+
 ### MVP 1：安全 approve
 
 - 增加 `peer approvals`。
 - 增加 `peer approve --once`。
 - 只处理当前对方 Agent。
 - 仅支持 allowlist 命令。
-- 检查 prompt hash。
+- ~~检查 prompt hash~~ → 改为 `PreToolUse` hook 决策（见上）。
 - 写 `approvals.jsonl`。
 
 目标：解决 80% 的低风险确认打断问题。
