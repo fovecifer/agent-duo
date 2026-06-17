@@ -1,72 +1,120 @@
 #!/usr/bin/env bash
-# peer — 让同一 tmux 会话里的两个编码 agent(claude / codex)互相观察和发送指令
+# peer — 让同一 tmux 会话里的多个编码 agent(claude / codex)互相观察和发送指令
 #
 # 用法:
-#   peer peek [行数]        查看对方终端最近 N 行输出(默认 80)
-#   peer tell [--force] "消息"
-#                           发送单行消息到对方输入框并回车
-#   ... | peer tell        从 stdin 投递多行消息(经 tmux buffer + bracketed paste,引号换行安全)
-#   peer wait [超时秒] [采样间隔秒] [连续稳定次数]
-#                           等待对方屏幕输出稳定(认为它已完成当前任务),默认最长 300s
-#   peer status             显示自己/对方的身份与 pane 状态
-#   peer esc [--force]      向对方发送 Escape(打断它当前的生成)
+#   peer ls                 列出本会话所有 agent(id / role / provider / pane)
+#   peer add --provider claude|codex --role <role> [--id <id>]
+#                           新建并注册一个可见队友(新窗口),返回其 id
+#   peer rm <id>            移除一个队友(关闭其窗口)
+#   peer peek [<id>] [行数]  查看某个 agent 终端最近 N 行输出(默认 80)
+#   peer tell [--force] [<id>] "消息"
+#                           发送单行消息到目标输入框并回车
+#   ... | peer tell [<id>]  从 stdin 投递多行消息(经 tmux buffer + bracketed paste,引号换行安全)
+#   peer wait [<id>] [超时秒] [采样间隔秒] [连续稳定次数]
+#                           等待目标屏幕输出稳定(认为它已完成当前任务),默认最长 300s
+#   peer status             显示自己/默认目标的身份与会话内全员
+#   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
 #   peer --force tell/esc   跳过权限弹窗检测并强制发送
 #
+# 寻址:正好两个 agent 时可省略 <id>(默认发给"另一个");三个及以上必须显式指定 id。
+#
 # 依赖环境变量:
-#   AGENT_NAME     当前 agent 的身份: claude 或 codex(由 start.sh 注入)
 #   AGENT_SESSION  tmux 会话名,默认 agents
-#   AGENT_CLAUDE_PANE / AGENT_CODEX_PANE
-#                 start.sh 捕获的 pane ID;存在时优先用于定位,避免窗口重命名后错路由
+#   AGENT_NAME     迁移兼容:当 pane @agent_id 缺失时回退为自身身份
 #   PEER_FORCE=1   跳过 tell/esc 的权限弹窗检测
 
 set -euo pipefail
 
 SESSION="${AGENT_SESSION:-agents}"
-ME="${AGENT_NAME:-}"
 
+# 定位仓库根,source 纯函数库。
+PEER_SRC="${BASH_SOURCE[0]}"
+while [ -L "$PEER_SRC" ]; do PEER_SRC="$(readlink "$PEER_SRC")"; done
+PEER_ROOT="$(cd "$(dirname "$PEER_SRC")/.." && pwd)"
+# shellcheck source=lib/registry.sh
+source "$PEER_ROOT/lib/registry.sh"
+
+PEER_INSTR="$PEER_ROOT/docs/AGENT-INSTRUCTIONS.md"
+
+SELF_PANE="${TMUX_PANE:-}"
+
+# 自识别:优先读自己 pane 的 @agent_id;缺失则回退 AGENT_NAME(迁移兼容)。
+self_id() {
+  local id=""
+  if [[ -n "$SELF_PANE" ]]; then
+    id="$(tmux display-message -p -t "$SELF_PANE" '#{@agent_id}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$id" ]]; then
+    id="${AGENT_NAME:-}"
+  fi
+  printf '%s' "$id"
+}
+
+ME="$(self_id)"
 if [[ -z "$ME" ]]; then
-  echo "错误: 未设置 AGENT_NAME(应为 claude 或 codex)。请通过 start.sh 启动。" >&2
+  echo "错误: 无法确定自身身份(既无 pane @agent_id 也无 AGENT_NAME)。请通过 start.sh 启动。" >&2
   exit 1
 fi
 
-case "$ME" in
-  claude) OTHER="codex"; OTHER_PANE="${AGENT_CODEX_PANE:-}" ;;
-  codex)  OTHER="claude"; OTHER_PANE="${AGENT_CLAUDE_PANE:-}" ;;
-  *) echo "错误: AGENT_NAME 必须是 claude 或 codex,当前为 '$ME'" >&2; exit 1 ;;
-esac
+# list_agents → 每行: pane_id<TAB>agent_id<TAB>role<TAB>provider(原样来自 tmux)。
+list_agents() {
+  tmux list-panes -s -t "$SESSION" \
+    -F '#{pane_id}	#{@agent_id}	#{@agent_role}	#{@agent_provider}' 2>/dev/null
+}
 
-TARGET="${OTHER_PANE:-${SESSION}:${OTHER}}"
+# agent_ids → 已注册(@agent_id 非空)的 id,每行一个。
+agent_ids() {
+  list_agents | awk -F'\t' '$2 != "" { print $2 }'
+}
+
+# pane_for_id <id> → 打印该 id 的 pane;找不到返回 1。
+pane_for_id() {
+  local want="$1"
+  list_agents | awk -F'\t' -v w="$want" '$2==w { print $1; found=1 } END{ exit found?0:1 }'
+}
+
+# resolve_target_pane <maybe_id> → 打印目标 pane,出错时写 stderr 并 exit。
+#   maybe_id 非空 → 必须是已注册 id;否则报错。
+#   maybe_id 为空 → reg_pick_other(self, ids):两人取另一个;0 人/≥2 候选报错。
+resolve_target_pane() {
+  local maybe_id="$1"
+  local pane other ids rc
+  if [[ -n "$maybe_id" ]]; then
+    if ! pane="$(pane_for_id "$maybe_id")"; then
+      echo "错误: 找不到 agent '$maybe_id'。用 'peer ls' 查看在线 agent。" >&2
+      exit 1
+    fi
+    printf '%s' "$pane"
+    return 0
+  fi
+  ids="$(agent_ids)"
+  if other="$(reg_pick_other "$ME" "$ids")"; then
+    pane_for_id "$other"
+    return 0
+  fi
+  rc=$?
+  if [[ "$rc" == "2" ]]; then
+    echo "错误: 会话里没有其他 agent 可作为目标。" >&2
+  else
+    echo "错误: 会话内有多个 agent,请指定目标。可用: $(printf '%s ' $(printf '%s\n' "$ids" | grep -vx "$ME"))" >&2
+  fi
+  exit 1
+}
 
 is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
-ensure_target() {
+ensure_session() {
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
     exit 1
   fi
-  if [[ -n "$OTHER_PANE" ]]; then
-    local pane_session
-    if ! pane_session="$(tmux display-message -p -t "$OTHER_PANE" '#{session_name}' 2>/dev/null)"; then
-      echo "错误: 找不到对方 pane '$OTHER_PANE'。" >&2
-      exit 1
-    fi
-    if [[ "$pane_session" != "$SESSION" ]]; then
-      echo "错误: 对方 pane '$OTHER_PANE' 不属于 tmux 会话 '$SESSION'。" >&2
-      exit 1
-    fi
-    return 0
-  fi
-  if ! tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$OTHER"; then
-    echo "错误: 会话中找不到名为 '$OTHER' 的窗口。" >&2
-    exit 1
-  fi
 }
 
-capture() {
-  local lines="${1:-80}"
-  tmux capture-pane -p -J -t "$TARGET" -S "-$lines"
+capture() { # <pane> <lines>
+  local pane="$1" lines="${2:-80}"
+  tmux capture-pane -p -J -t "$pane" -S "-$lines"
 }
 
 matches_screen() {
@@ -108,7 +156,8 @@ PATTERNS
   return 1
 }
 
-check_safe_to_send_keys() {
+check_safe_to_send_keys() { # <pane>
+  local pane="$1"
   if [[ "$FORCE_SEND" == "1" || "${PEER_FORCE:-0}" == "1" ]]; then
     echo "提示: 已跳过对方权限弹窗检测(--force / PEER_FORCE=1)。" >&2
     return 0
@@ -121,9 +170,9 @@ check_safe_to_send_keys() {
   fi
 
   local screen
-  screen="$(capture "$lines")"
+  screen="$(capture "$pane" "$lines")"
   if looks_like_prompt "$screen"; then
-    echo "错误: 对方 [$OTHER] 疑似正在等待权限确认/弹窗,peer 未发送按键。请人工查看并处理;如确认要强制发送,使用 --force 或 PEER_FORCE=1。" >&2
+    echo "错误: 目标 agent 疑似正在等待权限确认/弹窗,peer 未发送按键。请人工查看;如确认强制发送,用 --force 或 PEER_FORCE=1。" >&2
     exit 3
   fi
 }
@@ -138,50 +187,118 @@ cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
+  ls)
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+      echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
+      exit 1
+    fi
+    printf '%-3s %-16s %-12s %-10s %s\n' '' 'ID' 'ROLE' 'PROVIDER' 'PANE'
+    while IFS=$'\t' read -r pane id role provider; do
+      [[ -z "$pane" ]] && continue
+      mark=' '
+      [[ "$pane" == "$SELF_PANE" ]] && mark='*'
+      if [[ -z "$id" ]]; then
+        printf '%-3s %-16s %-12s %-10s %s\n' "$mark" '(unregistered)' '-' '-' "$pane"
+      else
+        printf '%-3s %-16s %-12s %-10s %s\n' "$mark" "$id" "$role" "$provider" "$pane"
+      fi
+    done < <(list_agents)
+    ;;
+
+  add)
+    ensure_session
+    provider=""; role=""; want_id=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --provider) provider="${2:-}"; shift 2 ;;
+        --role)     role="${2:-}"; shift 2 ;;
+        --id)       want_id="${2:-}"; shift 2 ;;
+        *) echo "错误: 未知参数 '$1'。用法: peer add --provider claude|codex --role <role> [--id <id>]" >&2; exit 1 ;;
+      esac
+    done
+    if ! reg_validate_provider "$provider"; then
+      echo "错误: provider 必须是 claude 或 codex,当前为 '$provider'。" >&2; exit 1
+    fi
+    if [[ -z "$role" ]]; then
+      echo "错误: 必须用 --role 指定角色。" >&2; exit 1
+    fi
+    new_id="$want_id"
+    if [[ -z "$new_id" ]]; then
+      new_id="$(reg_derive_id "$role" "$(agent_ids)")"
+    elif agent_ids | grep -qx "$new_id"; then
+      echo "错误: id '$new_id' 已被占用。" >&2; exit 1
+    fi
+    # 新建 window(裸 shell),捕获 pane;按 start.sh 模式 send-keys 导出环境并启动 provider。
+    new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$PWD" -P -F '#{pane_id}')"
+    tmux set-option -p -t "$new_pane" @agent_id "$new_id"
+    tmux set-option -p -t "$new_pane" @agent_role "$role"
+    tmux set-option -p -t "$new_pane" @agent_provider "$provider"
+    launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
+    bin_dir="$(dirname "$PEER_SRC")"
+    tmux send-keys -t "$new_pane" \
+      "export AGENT_SESSION=$(printf '%q' "$SESSION") PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
+    echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
+    ;;
+
   peek)
-    ensure_target
+    ensure_session
+    maybe_id=""
+    if [[ -n "${1:-}" ]] && ! is_positive_int "$1"; then maybe_id="$1"; shift; fi
     lines="${1:-80}"
     if ! is_positive_int "$lines"; then
       echo "错误: peer peek 的行数必须是正整数。" >&2
       exit 1
     fi
-    echo "===== [$OTHER] 终端最近输出 ====="
-    capture "$lines"
+    target="$(resolve_target_pane "$maybe_id")"
+    echo "===== 终端最近输出 ====="
+    capture "$target" "$lines"
     echo "===== 输出结束 ====="
     ;;
 
   tell)
-    ensure_target
+    ensure_session
     if [[ "${1:-}" == "--force" ]]; then
       FORCE_SEND=1
       shift
     fi
-    check_safe_to_send_keys
-    # 两种输入方式:
-    #   peer tell "单行消息"
-    #   peer tell < 文件   /   cat <<'EOF' | peer tell   (多行、含引号反引号均安全)
-    buf="peer-${ME}2${OTHER}"
+    # 首参若精确匹配某已注册 id → 作为目标消费掉。
+    maybe_id=""
+    if [[ -n "${1:-}" ]] && agent_ids | grep -qx "$1"; then
+      maybe_id="$1"; shift
+    fi
+    target="$(resolve_target_pane "$maybe_id")"
+    # 目标 id(用于 buffer 命名);两人默认时回查 other。
+    if [[ -n "$maybe_id" ]]; then
+      target_id="$maybe_id"
+    else
+      target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+    fi
+    check_safe_to_send_keys "$target"
+    buf="peer-${ME}2${target_id}"
     if [[ $# -gt 0 ]]; then
       printf '%s' "$*" | tmux load-buffer -b "$buf" -
     elif [[ ! -t 0 ]]; then
       tmux load-buffer -b "$buf" -
     else
-      echo "用法: peer tell \"消息\"  或  echo \"消息\" | peer tell" >&2
+      echo "用法: peer tell [<id>] \"消息\"  或  echo \"消息\" | peer tell [<id>]" >&2
       exit 1
     fi
     # -p: bracketed paste,TUI 将其识别为一次完整粘贴(多行不会被逐行提交)
     # -d: 粘贴后删除缓冲区
-    tmux paste-buffer -b "$buf" -t "$TARGET" -d -p
+    tmux paste-buffer -b "$buf" -t "$target" -d -p
     # 给 TUI 一点处理粘贴的时间,立刻回车可能被吞掉
     sleep 0.5
-    tmux send-keys -t "$TARGET" Enter
-    echo "已投递给 [$OTHER]。(提示: 用 'peer wait' 等它完成,再 'peer peek' 查看回复)"
+    tmux send-keys -t "$target" Enter
+    echo "已投递。(提示: 'peer wait' 等它完成,再 'peer peek' 查看回复)"
     ;;
 
   wait)
-    ensure_target
+    ensure_session
+    maybe_id=""
+    if [[ -n "${1:-}" ]] && ! is_positive_int "$1"; then maybe_id="$1"; shift; fi
+    target="$(resolve_target_pane "$maybe_id")"
     if [[ $# -gt 3 ]]; then
-      echo "用法: peer wait [超时秒] [采样间隔秒] [连续稳定次数]" >&2
+      echo "用法: peer wait [<id>] [超时秒] [采样间隔秒] [连续稳定次数]" >&2
       exit 1
     fi
     timeout="${1:-${PEER_WAIT_TIMEOUT:-300}}"
@@ -206,16 +323,16 @@ case "$cmd" in
     fi
     elapsed=0
     stable_seen=0
-    prev="$(capture "$lines")"
+    prev="$(capture "$target" "$lines")"
     while (( elapsed < timeout )); do
       # 先给对方一点启动时间,避免它还没开始输出就被判定为"稳定"
       sleep "$interval"
       (( elapsed += interval ))
-      cur="$(capture "$lines")"
+      cur="$(capture "$target" "$lines")"
       if [[ "$cur" == "$prev" ]]; then
         (( stable_seen += 1 ))
         if (( stable_seen >= stable_needed )); then
-          echo "[$OTHER] 输出已稳定(连续 ${stable_seen} 次采样一致),它可能已完成。"
+          echo "目标输出已稳定(连续 ${stable_seen} 次采样一致),它可能已完成。"
           exit 0
         fi
       else
@@ -223,31 +340,48 @@ case "$cmd" in
       fi
       prev="$cur"
     done
-    echo "等待超时(${timeout}s),[$OTHER] 仍在输出。可稍后再 peer peek。" >&2
+    echo "等待超时(${timeout}s),目标仍在输出。可稍后再 peer peek。" >&2
     exit 2
     ;;
 
   status)
-    echo "我是: $ME    对方: $OTHER    会话: $SESSION"
-    echo "目标: $TARGET"
-    if ! tmux list-windows -t "$SESSION" -F '窗口: #{window_name}  pane:#{pane_id}  尺寸:#{pane_width}x#{pane_height}' 2>/dev/null; then
-      echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
-      exit 1
+    ensure_session
+    target="$(resolve_target_pane "" 2>/dev/null || true)"
+    echo "我是: $ME    会话: $SESSION"
+    [[ -n "$target" ]] && echo "目标(默认): $target"
+    printf '%s\n' "--- agents ---"
+    "$0" ls
+    ;;
+
+  rm)
+    ensure_session
+    rm_id="${1:-}"
+    if [[ -z "$rm_id" ]]; then
+      echo "用法: peer rm <id>" >&2; exit 1
     fi
+    if [[ "$rm_id" == "$ME" ]]; then
+      echo "错误: 不能移除自己。" >&2; exit 1
+    fi
+    if ! rm_pane="$(pane_for_id "$rm_id")"; then
+      echo "错误: 找不到 agent '$rm_id'。" >&2; exit 1
+    fi
+    tmux kill-window -t "$rm_pane"
+    echo "已移除 agent '$rm_id'(pane=$rm_pane)。"
     ;;
 
   esc)
-    ensure_target
-    if [[ "${1:-}" == "--force" ]]; then
-      FORCE_SEND=1
-      shift
-    fi
-    check_safe_to_send_keys
-    tmux send-keys -t "$TARGET" Escape
-    echo "已向 [$OTHER] 发送 Escape。"
+    ensure_session
+    if [[ "${1:-}" == "--force" ]]; then FORCE_SEND=1; shift; fi
+    maybe_id=""
+    if [[ -n "${1:-}" && "${1:-}" != "--force" ]]; then maybe_id="$1"; shift; fi
+    if [[ "${1:-}" == "--force" ]]; then FORCE_SEND=1; shift; fi
+    target="$(resolve_target_pane "$maybe_id")"
+    check_safe_to_send_keys "$target"
+    tmux send-keys -t "$target" Escape
+    echo "已发送 Escape。"
     ;;
 
   help|*)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

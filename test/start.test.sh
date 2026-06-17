@@ -22,14 +22,14 @@ setup() {
   PROJECT="$SCENARIO_TMP/project"; mkdir -p "$PROJECT"
   SENDLOG="$SCENARIO_TMP/sendkeys.log"; : > "$SENDLOG"
 
-  # tmux stub:has-session 返回 1(无会话),new-* 返回 pane ID,send-keys 记录参数。
+  # tmux stub:记录所有调用;has-session 返回 1(无会话),new-* 返回 pane ID。
   cat > "$STUB_BIN/tmux" <<STUB
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SENDLOG"
 case "\$1" in
   has-session) exit 1 ;;
   new-session) printf '%%1\n'; exit 0 ;;
   new-window)  printf '%%2\n'; exit 0 ;;
-  send-keys)   printf '%s\n' "\$*" >> "$SENDLOG"; exit 0 ;;
   *)           exit 0 ;;
 esac
 STUB
@@ -43,6 +43,7 @@ teardown() {
   if [[ -n "${SCENARIO_TMP:-}" && -d "$SCENARIO_TMP" && "$SCENARIO_TMP" != "/" ]]; then
     rm -rf "$SCENARIO_TMP"
   fi
+  unset TEST_PATH
 }
 
 run_start() { # 在 stub PATH + 指定 stdin/env 下运行 start.sh
@@ -67,7 +68,6 @@ AGENT_DUO_AUTO_INJECT=1 run_start </dev/null
 assert_ok        "A: AGENTS.md created" test -f "$PROJECT/AGENTS.md"
 assert_contains  "A: block written"     "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
 assert_contains  "A: claude got flag"   "$(cat "$SENDLOG")" '--append-system-prompt'
-assert_contains  "A: pane ids exported"  "$(cat "$SENDLOG")" 'AGENT_CLAUDE_PANE=%1 AGENT_CODEX_PANE=%2'
 teardown
 
 # 场景 B:已有块 → 友好提示,不重复块,claude 仍带参数
@@ -108,8 +108,44 @@ if run_start </dev/null; then
 else
   printf 'ok   E: missing codex fails before launch\n'
 fi
-assert_eq        "E: no panes launched" "$(cat "$SENDLOG")" ""
+assert_not_contains "E: no panes launched" "$(cat "$SENDLOG")" 'send-keys'
 assert_contains  "E: error mentions codex" "$(cat "$SCENARIO_TMP/out.txt")" '找不到 codex'
+teardown
+
+# 场景 F:默认 → 单 supervisor 窗口(claude),打 @agent_* 标签,不创建第二个窗口。
+# 注意:不设 AGENT_SESSION,以验证默认会话名 "agents"。
+setup
+PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
+  bash "$ROOT/start.sh" "$PROJECT" \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+assert_contains     "F: single supervisor window"   "$(cat "$SENDLOG")" 'new-session -d -s agents -n supervisor'
+assert_contains     "F: tags supervisor id"          "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_id supervisor'
+assert_contains     "F: tags supervisor provider"    "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
+assert_contains     "F: launches claude"             "$(cat "$SENDLOG")" 'send-keys -t %1'
+assert_not_contains "F: no second window by default" "$(cat "$SENDLOG")" 'new-window'
+teardown
+
+# 场景 G:--supervisor codex → supervisor provider 为 codex,且不带 --append-system-prompt。
+# 注意:不设 AGENT_SESSION,以验证默认会话名 "agents"。
+setup
+PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
+  bash "$ROOT/start.sh" "$PROJECT" --supervisor codex \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+assert_contains     "G: tags supervisor provider codex" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider codex'
+assert_contains     "G: launches codex"                 "$(cat "$SENDLOG")" 'send-keys -t %1 export AGENT_SESSION=agents PATH='
+assert_not_contains "G: no second window"                "$(cat "$SENDLOG")" 'new-window'
+teardown
+
+# 场景 H:--with codex:worker → 额外创建一个 worker 窗口,打 @agent_* 标签,启动 codex。
+setup
+PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
+  bash "$ROOT/start.sh" "$PROJECT" --with codex:worker \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+assert_contains  "H: supervisor still claude" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
+assert_contains  "H: creates worker window"   "$(cat "$SENDLOG")" 'new-window'
+assert_contains  "H: tags worker id"          "$(cat "$SENDLOG")" '@agent_id worker'
+assert_contains  "H: tags worker provider"    "$(cat "$SENDLOG")" '@agent_provider codex'
+assert_contains  "H: launches worker"         "$(cat "$SENDLOG")" 'send-keys -t %2'
 teardown
 
 # 说明:prompt 分支(无块 + 无 AUTO + 有 TTY)需要伪终端才能驱动,本无依赖测试框架无法模拟;
