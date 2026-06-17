@@ -1,7 +1,7 @@
 # agent-duo Registry (MVP 3) 设计
 
 日期：2026-06-16
-状态：已通过 brainstorm，待实现
+状态：已实现（命令名落地为 `peer add` / `peer rm`）
 
 ## 目标
 
@@ -16,7 +16,7 @@
 ## 非目标（YAGNI）
 
 - 不做 budget / capabilities / policy 等元数据（属于后续 MVP）。
-- 不做角色再分配 `reassign`（spawn 时定角色即可，先不支持运行中改角色）。
+- 不做角色再分配 `reassign`（add 时定角色即可，先不支持运行中改角色）。
 - 不做跨 session、跨机器的 registry。
 - 不做 worktree 隔离（MVP 4）。
 
@@ -55,11 +55,11 @@ tmux list-panes -s -t agents \
 ```sh
 start.sh                      # 默认 claude 当 supervisor，单 tab
 start.sh --supervisor codex   # 改用 codex 当 supervisor
-start.sh --with codex:worker  # 便捷：同时再 spawn 一个 codex worker（demo 平价）
+start.sh --with codex:worker  # 便捷：同时再 add 一个 codex worker（demo 平价）
 ```
 
 - 这**替换**掉现在"claude+codex 双人固定"的启动逻辑，只保留一条代码路径。
-- `--with <provider>:<role>` 是便捷糖：起完 supervisor 后立即执行一次等价于 `peer spawn` 的动作，保住 README demo"开箱即两个 tab"的体验，但走的是新模型（两个 pane 都正确打上 supervisor / worker 标签）。
+- `--with <provider>:<role>` 是便捷糖：起完 supervisor 后立即执行一次等价于 `peer add` 的动作，保住 README demo"开箱即有 worker"的体验，但走的是新模型（supervisor / worker / loopd 都正确打上标签或角色）。
 - `start.sh` 是唯一能**创建 session** 的入口（因为 `peer` 运行在已存在的 session 内部）。
 
 ## 命令面（单一入口 `peer`）
@@ -69,18 +69,18 @@ start.sh --with codex:worker  # 便捷：同时再 spawn 一个 codex worker（d
 ### 团队生命周期
 
 ```sh
-peer spawn --provider codex --role worker [--id NAME]
-peer kill <id>
+peer add --provider codex --role worker [--id NAME]
+peer rm <id>
 peer ls
 ```
 
-- `peer spawn` 干三件原子事：
+- `peer add` 干三件原子事：
   1. `tmux new-window -P -F '#{pane_id}' -n <id> -t <session> '<provider 启动命令>'` 捕获新 pane id；
   2. 在该 pane 上 `set-option -p` 写三个 `@agent_*` 标签；
   3. 打印分配的 id。
   省略 `--id` 时由 `--role` 派生（`worker`），撞名追加 `-2`、`-3`。
 - `<provider 启动命令>` 复用 `start.sh` 已有的 claude / codex 启动片段，抽成 `provider_launch_cmd <provider>` 辅助函数共享。
-- `peer kill <id>` = `tmux kill-window`（按 `@agent_id` 定位其 pane 所在 window）。
+- `peer rm <id>` = `tmux kill-window`（按 `@agent_id` 定位其 pane 所在 window）。
 - 执行者是 supervisor（Claude Code）用 Bash 跑这些命令——它现在已经在跑 `peer`，无新机制。
 
 ### Agent 间通信（泛化为 N-agent 寻址）
@@ -102,46 +102,46 @@ peer esc    [<id>]
 
 ## 自我身份发现（`peer` 改造要点）
 
-- 当前 `peer` 靠注入的 `AGENT_NAME` 环境变量推导 `OTHER`（`bin/peer:32-38`）。
-- 新方式：`peer` 用 `$TMUX_PANE` 定位自己的 pane，读自己的 `@agent_id`——**移除一类注入脆弱性**，agent 不必再被注入身份环境变量。
+- 旧实现里 `peer` 靠注入的 `AGENT_NAME` 环境变量推导 `OTHER`（原 `bin/peer:32-38`）。
+- 当前方式：`peer` 用 `$TMUX_PANE` 定位自己的 pane，读自己的 `@agent_id`——**移除一类注入脆弱性**，agent 不必再被注入身份环境变量。
 - 过渡兼容：若 `@agent_id` 未设置但 `AGENT_NAME` 存在，回退到旧推导，保证迁移期老路径仍可用。
 - 未打标签的 pane（用户手动开的窗口）在 `peer ls` 中显示为 `(unregistered)`，使其可见而非隐形。
 
 ## 数据流（目标场景）
 
 ```
-开 iTerm2 → start.sh → tab1: claude(supervisor)
+开 iTerm2 → start.sh → tab1: claude(supervisor), tab2: loopd
 人: "起一个 codex worker"
-supervisor: peer spawn --provider codex --role worker
-            → 新 window 跑 codex + 打 @agent_* 标签 → tab2 出现
+supervisor: peer add --provider codex --role worker
+            → 新 window 跑 codex + 打 @agent_* 标签 → worker tab 出现
 supervisor: peer tell "review internal/auth"   # 两人局，默认发给 worker
             peer wait
             peer peek
 ```
 
-人决定团队构成（自然语言指示 supervisor），supervisor（AI）执行 spawn。决定权在人，执行在 AI。
+人决定团队构成（自然语言指示 supervisor），supervisor（AI）执行 add。决定权在人，执行在 AI。
 
 ## 代码影响面
 
 - `bin/peer`
-  - 替换 `AGENT_NAME → OTHER` 推导（32-38 行）为：`$TMUX_PANE` 自我发现 + N-agent 目标解析（含 2-agent 默认、≥3 强制指名、self 守卫）。
+  - 已将 `AGENT_NAME → OTHER` 推导替换为：`$TMUX_PANE` 自我发现 + N-agent 目标解析（含 2-agent 默认、≥3 强制指名、self 守卫）。
   - `capture` / `ensure_target` 改为按解析出的目标 pane 工作，不再假设只有"对方"一个。
-  - 新增子命令：`spawn`、`kill`、`ls`。
+  - 新增子命令：`add`、`rm`、`ls`。
   - `peek/tell/wait/status/esc` 接受可选前置 `<id>` 参数。
 - `start.sh`
   - 改为单 supervisor bootstrap；新增 `--supervisor <provider>` 与 `--with <provider>:<role>`。
-  - 抽出 `provider_launch_cmd <provider>` 供 `peer spawn` 复用（消除重复的启动知识）。
+  - 抽出 `provider_launch_cmd <provider>` 供 `peer add` 复用（消除重复的启动知识）。
 - `lib/inject.sh`：若仍负责注入环境，调整为给 supervisor pane 打 `@agent_*` 标签（或由 start.sh 直接 set-option）。
 
 ## 测试（沿用现有约定：bash + tmux stub + `test/run.sh`）
 
 新增/扩展用例，stub `tmux` 记录 `set-option` / `new-window` / `send-keys` 调用并断言：
 
-- `peer spawn`：调用 `new-window`，并对返回 pane 写齐三个 `@agent_*` 标签；省略 `--id` 时 id 由 role 派生、撞名加后缀。
+- `peer add`：调用 `new-window`，并对返回 pane 写齐三个 `@agent_*` 标签；省略 `--id` 时 id 由 role 派生、撞名加后缀。
 - `peer ls`：枚举 session 内 panes，正确解析 id/role/provider；未打标签的 pane 显示 `(unregistered)`。
 - 寻址：2-agent 省略 `<id>` 默认"另一个"；≥3 省略时报错并列候选；显式 `<id>` 不存在时报错；解析"另一个"排除自身。
-- `peer kill <id>`：按 id 定位并 `kill-window`。
-- `start.sh --with codex:worker`：起 supervisor 后执行一次 spawn 等价动作，两个 pane 标签正确。
+- `peer rm <id>`：按 id 定位并 `kill-window`。
+- `start.sh --with codex:worker`：起 supervisor 后执行一次 add 等价动作，worker pane 标签正确。
 - 兼容回退：`@agent_id` 缺失但 `AGENT_NAME` 存在时仍能路由。
 
 ## 开放风险 / 后续

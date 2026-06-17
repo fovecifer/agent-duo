@@ -26,6 +26,10 @@ if ! command -v tmux >/dev/null; then
   echo "⚠️  tmux not found. Install it first:  brew install tmux" >&2
 fi
 
+if ! command -v jq >/dev/null; then
+  echo "⚠️  jq not found. Install it first:  brew install jq" >&2
+fi
+
 link_command() {
   local src="$1" dest="$2" current=""
   if [[ -e "$dest" || -L "$dest" ]]; then

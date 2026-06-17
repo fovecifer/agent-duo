@@ -63,15 +63,25 @@ ab_json_unescape() {
   printf '%s' "$s"
 }
 
+ab_require_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '{"decision":"deny","reason":"DENIED-BY-POLICY: approval broker requires jq for safe JSON parsing."}\n'
+  exit 0
+}
+
 ab_json_get_string() { # <json> <key>
   local json="$1" key="$2" value
-  value="$(printf '%s\n' "$json" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')"
-  ab_json_unescape "$value"
+  ab_require_jq
+  value="$(printf '%s' "$json" | jq -er --arg key "$key" '[.. | objects | .[$key]? | select(type == "string")][0] // empty' 2>/dev/null || true)"
+  printf '%s' "$value"
 }
 
 ab_json_get_int() { # <json> <key>
   local json="$1" key="$2" value
-  value="$(printf '%s\n' "$json" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | sed -n '1p')"
+  ab_require_jq
+  value="$(printf '%s' "$json" | jq -er --arg key "$key" '[.. | objects | .[$key]? | select(type == "number" or type == "string")][0] // empty' 2>/dev/null || true)"
   [[ "$value" =~ ^[0-9]+$ ]] || value="0"
   printf '%s' "$value"
 }

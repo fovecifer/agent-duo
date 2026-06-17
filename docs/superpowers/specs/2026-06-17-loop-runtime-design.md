@@ -37,7 +37,7 @@ worker↔supervisor 契约定义了**消息长什么样**，但没定义**谁来
 它:  好，我打算用一个 codex worker 实现、一个 claude worker review，
      范围只限错误文案、不动 auth 流程。可以吗?          ← 确认几个点
 人:  可以
-它:  (peer spawn ×2 → 出现两个新 tab) 开始了
+它:  (peer add ×2 → 出现两个 worker tab) 开始了
         … workers 在各自 tab 干活，supervisor 替你盯着 …
 它:  worker-impl 改完测试过了；worker-review 提了个 blocking 问题:
      401/403 文案写反了。我让它改?                       ← 用人话汇报
@@ -142,9 +142,9 @@ durable、append、带单 owner cursor：`.agent-duo/events/queue.jsonl`。
 
 - `type` ∈ `plan | blocked | result | checkpoint | stuck | silent | dead | budget_low | tick`
 - **极小**：只带 agent / type / 一行摘要 / report 文件 ref。supervisor 自己决定要不要花 token 去读完整 report —— 这是 budget 的杠杆。
-- **合并规则**：notify 类（`checkpoint`）按 agent 合并到最新；`blocked`/`result`/gate 类逐条保留，**绝不丢**。
-- **优先级**：`blocked`/gate > `result` > `stuck` > `budget_low` > `checkpoint`。阻塞 worker 的事优先解，别让它干等。
-- **cursor 落盘**：supervisor 重启 / handoff 能从断点续，未处理的 gate 还在。双 supervisor 抢同队列 → cursor 单 owner 加锁（registry MVP 3 本就是单 supervisor）。
+- **当前投递规则**：队列 append-only；投递端从未投递事件中按优先级选择下一条。`blocked`/gate > `result` > `stuck`/`dead` > `budget_low` > `checkpoint` > `tick`。阻塞 worker 的事优先解，别让它干等。
+- **待增强的合并规则**：notify 类（`checkpoint`）后续可按 agent 合并到最新；当前实现逐条保留，避免误丢事件。
+- **cursor / delivered 落盘**：supervisor 重启 / handoff 能从断点续，未处理的 gate 还在。投递端用 cursor lock 串行化，并记录 delivered line，保证一条事件最多投一次。
 
 ---
 
@@ -232,8 +232,8 @@ worker 事件分三档，决定"立刻打断人 / 喂给 supervisor 自处理 / 
 
 ## 6. 团队按需生长（启动即普通模式）
 
-- **不预先声明团队**。开 agent-duo = 一个 tab，直接开聊；worker 按需 spawn。对齐 registry MVP 3 的"单 supervisor + 按需生长"。
-- **创建 worker 前轻确认**：spawn = 冒出新 tab，是可见副作用，所以"确认几个点（provider、几个 worker、scope）再建"是对的——恰好对应契约的 plan/assign，只是用对话表达。
+- **不预先声明团队**。开 agent-duo = supervisor tab + loopd tab，直接开聊；worker 按需 `peer add`。对齐 registry MVP 3 的"单 supervisor + 按需生长"。
+- **创建 worker 前轻确认**：`peer add` 会冒出新 tab，是可见副作用，所以"确认几个点（provider、几个 worker、scope）再建"是对的——恰好对应契约的 plan/assign，只是用对话表达。
 
 ---
 
@@ -260,7 +260,7 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 2. sentinel **自带入队所需字段**：`agent_id round type status file sha`——不读文件即可入队。
 3. `peer report` 一次干三件事：**写文件 + 打 sentinel + 追加 event 到 `queue.jsonl`**。event 是给 runtime 的可靠触发，sentinel 是给人 / `peer wait` 的镜像。
 4. 新增 `.agent-duo/events/` 目录与队列格式。
-5. **hook 安装**：supervisor session 需挂 `UserPromptSubmit`/`Stop`（busy/idle + Stop 便车），worker session 后续挂 `PreToolUse`/`PermissionRequest`（Approval Broker）。agent-duo 自带这些 hook 脚本，spawn 时注入对应 session 的 settings（Codex 侧注意托管/信任要求）。
+5. **hook 安装**：supervisor session 需挂 `UserPromptSubmit`/`Stop`（busy/idle + Stop 便车），worker session 后续挂 `PreToolUse`/`PermissionRequest`（Approval Broker）。agent-duo 自带这些 hook 脚本，`start.sh` / `peer add` 创建 session 时注入对应 settings（Codex 侧注意托管/信任要求）。
 
 ---
 
@@ -358,7 +358,7 @@ done
 
 ### 启停 / 重启 / 自我暴露
 
-- **启**：`start.sh` 起完 supervisor 后 spawn 一个 loopd pane（类似 `--with` 的糖）。
+- **启**：`start.sh` 起完 supervisor 后创建一个 loopd pane（类似 `--with` 的糖）。
 - **停**：随 tmux session 消亡。
 - **重启**：无状态，任何人或 supervisor（用 Bash）`agent-duo loopd` 重新拉起即可。
 - **daemon 死的自我暴露**：supervisor 的 hook（或下个 turn）读 `daemon.heartbeat`，过期就用人话告诉人"运行时监控离线，失去存活/卡死检测，建议重启"——堵上"安全网静默消失"的洞（见 §9）。

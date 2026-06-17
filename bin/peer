@@ -230,6 +230,20 @@ event_type_for_report() { # <report_type> <status>
   fi
 }
 
+toml_string() { # <value>
+  jq -Rn --arg s "$1" '$s | @json'
+}
+
+codex_hook_config() { # <event> <command> [matcher]
+  local event="$1" command="$2" matcher="${3:-}" command_toml
+  command_toml="$(toml_string "$command")"
+  if [[ -n "$matcher" ]]; then
+    printf 'hooks.%s=[{matcher="%s",hooks=[{type="command",command=%s}]}]' "$event" "$matcher" "$command_toml"
+  else
+    printf 'hooks.%s=[{hooks=[{type="command",command=%s}]}]' "$event" "$command_toml"
+  fi
+}
+
 json_escape() {
   local s="${1:-}"
   s="${s//\\/\\\\}"
@@ -454,6 +468,12 @@ case "$cmd" in
     tmux set-option -p -t "$new_pane" @agent_provider "$provider"
     approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$PWD")"
     launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
+    if [[ "$provider" == "claude" ]]; then
+      launch="$launch --settings $(printf '%q' "$approval_settings")"
+    else
+      hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
+      launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
+    fi
     bin_dir="$(dirname "$PEER_SRC")"
     root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
     agent_q="$(printf '%q' "$new_id")"

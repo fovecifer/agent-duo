@@ -43,6 +43,8 @@ SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 BIN_DIR="$SCRIPT_DIR/bin"
 LIB_DIR="$SCRIPT_DIR/lib"
 INSTR="$SCRIPT_DIR/docs/AGENT-INSTRUCTIONS.md"
+APPROVAL_BROKER="$SCRIPT_DIR/lib/approval_broker.sh"
+APPROVAL_HOOK="$SCRIPT_DIR/bin/agent-duo-approval-hook"
 if [[ ! -f "$LIB_DIR/inject.sh" ]]; then
   echo "错误: 找不到 $LIB_DIR/inject.sh,请确认 agent-duo 安装完整。" >&2
   exit 1
@@ -53,6 +55,10 @@ if [[ ! -f "$LIB_DIR/registry.sh" ]]; then
 fi
 if [[ ! -f "$INSTR" ]]; then
   echo "错误: 找不到 $INSTR,请确认 agent-duo 安装完整。" >&2
+  exit 1
+fi
+if [[ ! -f "$APPROVAL_BROKER" || ! -f "$APPROVAL_HOOK" ]]; then
+  echo "错误: 找不到 approval broker 组件,请确认 agent-duo 安装完整。" >&2
   exit 1
 fi
 # shellcheck source=lib/inject.sh
@@ -67,6 +73,11 @@ fi
 
 if ! command -v tmux >/dev/null; then
   echo "请先安装 tmux: brew install tmux" >&2
+  exit 1
+fi
+
+if ! command -v jq >/dev/null; then
+  echo "请先安装 jq: brew install jq" >&2
   exit 1
 fi
 
@@ -145,9 +156,51 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+write_supervisor_session_settings() { # <root>
+  local root="$1" settings_dir settings_path tmp user_hook stop_hook user_cmd stop_cmd
+  settings_dir="$root/.agent-duo/state/supervisor"
+  settings_path="$settings_dir/session-settings.json"
+  mkdir -p "$settings_dir"
+  user_hook="$SCRIPT_DIR/scripts/supervisor-user-prompt-submit-hook"
+  stop_hook="$SCRIPT_DIR/scripts/supervisor-stop-drain-hook"
+  user_cmd="AGENT_DUO_ROOT=$(shell_quote "$root") $(shell_quote "$user_hook")"
+  stop_cmd="AGENT_DUO_ROOT=$(shell_quote "$root") $(shell_quote "$stop_hook")"
+  tmp="$settings_path.$$"
+  jq -cn \
+    --arg user_cmd "$user_cmd" \
+    --arg stop_cmd "$stop_cmd" \
+    '{
+      agent_duo_loop: {version: 1, role: "supervisor"},
+      hooks: {
+        UserPromptSubmit: [{hooks: [{type: "command", command: $user_cmd}]}],
+        Stop: [{hooks: [{type: "command", command: $stop_cmd}]}]
+      }
+    }' > "$tmp"
+  mv -f "$tmp" "$settings_path"
+  printf '%s' "$settings_path"
+}
+
+toml_string() { # <value>
+  jq -Rn --arg s "$1" '$s | @json'
+}
+
+codex_hook_config() { # <event> <command> [matcher]
+  local event="$1" command="$2" matcher="${3:-}" command_toml
+  command_toml="$(toml_string "$command")"
+  if [[ -n "$matcher" ]]; then
+    printf 'hooks.%s=[{matcher="%s",hooks=[{type="command",command=%s}]}]' "$event" "$matcher" "$command_toml"
+  else
+    printf 'hooks.%s=[{hooks=[{type="command",command=%s}]}]' "$event" "$command_toml"
+  fi
+}
+
 SESSION_Q="$(shell_quote "$SESSION")"
 BIN_DIR_Q="$(shell_quote "$BIN_DIR")"
 WORKDIR_Q="$(shell_quote "$WORKDIR")"
+SUP_SETTINGS="$(write_supervisor_session_settings "$WORKDIR")"
+SUP_SETTINGS_Q="$(shell_quote "$SUP_SETTINGS")"
+SUP_USER_CMD="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$SUP_SETTINGS")"
+SUP_STOP_CMD="$(jq -r '.hooks.Stop[0].hooks[0].command' "$SUP_SETTINGS")"
 
 # 单 supervisor 窗口(默认 claude,可用 --supervisor 指定 codex)。
 # 身份走 tmux per-pane 用户选项 @agent_*,不再注入 AGENT_NAME。
@@ -157,12 +210,12 @@ tmux set-option -p -t "$SUP_PANE" @agent_role supervisor
 tmux set-option -p -t "$SUP_PANE" @agent_provider "$SUPERVISOR_PROVIDER"
 
 if [[ "$SUPERVISOR_PROVIDER" == "claude" ]]; then
-  SUP_LAUNCH="$CLAUDE_LAUNCH"
+  SUP_LAUNCH="$CLAUDE_LAUNCH --settings $SUP_SETTINGS_Q"
 else
-  SUP_LAUNCH="codex"
+  SUP_LAUNCH="codex -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
 fi
 tmux send-keys -t "$SUP_PANE" \
-  "export AGENT_SESSION=$SESSION_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH" Enter
+  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH" Enter
 
 # loopd 是可见 pane:负责 cursor 投递、liveness/tick 与看板。
 LOOPD_PANE="$(tmux new-window -t "$SESSION" -n loopd -c "$WORKDIR" -P -F '#{pane_id}')"
@@ -184,9 +237,24 @@ if [[ -n "$WITH_SPEC" ]]; then
   tmux set-option -p -t "$W_PANE" @agent_id "$W_ROLE"
   tmux set-option -p -t "$W_PANE" @agent_role "$W_ROLE"
   tmux set-option -p -t "$W_PANE" @agent_provider "$W_PROVIDER"
+  W_SETTINGS="$(bash "$APPROVAL_BROKER" install \
+    --agent-id "$W_ROLE" \
+    --provider "$W_PROVIDER" \
+    --hook "$APPROVAL_HOOK" \
+    --root "$WORKDIR" \
+    --worktree "$WORKDIR")"
   W_LAUNCH="$(reg_provider_launch_cmd "$W_PROVIDER" "$INSTR")"
+  if [[ "$W_PROVIDER" == "claude" ]]; then
+    W_LAUNCH="$W_LAUNCH --settings $(shell_quote "$W_SETTINGS")"
+  else
+    W_HOOK_CMD="$(jq -r '.codex.managed_hook_command' "$W_SETTINGS")"
+    W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PreToolUse "$W_HOOK_CMD" "*")")"
+  fi
+  W_ID_Q="$(shell_quote "$W_ROLE")"
+  APPROVAL_HOOK_Q="$(shell_quote "$APPROVAL_HOOK")"
+  W_SETTINGS_Q="$(shell_quote "$W_SETTINGS")"
   tmux send-keys -t "$W_PANE" \
-    "export AGENT_SESSION=$SESSION_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
+    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_WORKTREE=$WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
 fi
 
 cat <<EOF

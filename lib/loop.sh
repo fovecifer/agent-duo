@@ -26,6 +26,10 @@ ad_loop_cursor_lock() { # <root>
   printf '%s/cursor.lock' "$(ad_loop_events_dir "$1")"
 }
 
+ad_loop_delivered_file() { # <root>
+  printf '%s/delivered' "$(ad_loop_events_dir "$1")"
+}
+
 ad_loop_ensure_dirs() { # <root>
   local root="$1"
   mkdir -p "$(ad_loop_events_dir "$root")" "$(ad_loop_state_dir "$root")"
@@ -57,6 +61,20 @@ ad_loop_read_cursor() { # <root>
   printf '%s' "$value"
 }
 
+ad_loop_migrate_cursor_to_delivered() { # <root>
+  local root="$1" cursor delivered i
+  delivered="$(ad_loop_delivered_file "$root")"
+  [[ -f "$delivered" ]] && return 0
+  cursor="$(ad_loop_read_cursor "$root")"
+  ad_loop_is_nonnegative_int "$cursor" || cursor="0"
+  (( cursor > 0 )) || return 0
+  i=1
+  while (( i <= cursor )); do
+    printf '%s\n' "$i"
+    i=$(( i + 1 ))
+  done > "$delivered"
+}
+
 ad_loop_write_cursor() { # <root> <line_number>
   local root="$1" value="$2" cursor_file tmp
   ad_loop_ensure_dirs "$root"
@@ -77,6 +95,7 @@ ad_loop_line_count() { # <file>
 
 ad_loop_pending_count() { # <root>
   local root="$1" queue cursor lines
+  ad_loop_migrate_cursor_to_delivered "$root"
   queue="$(ad_loop_queue_file "$root")"
   cursor="$(ad_loop_read_cursor "$root")"
   lines="$(ad_loop_line_count "$queue")"
@@ -85,6 +104,42 @@ ad_loop_pending_count() { # <root>
   else
     printf '0'
   fi
+}
+
+ad_loop_event_priority() { # <event_json>
+  local type
+  type="$(jq -r '.type // "unknown"' <<EOF
+$1
+EOF
+)"
+  case "$type" in
+    blocked|request)     printf '10' ;;
+    result)              printf '20' ;;
+    stuck|dead)          printf '30' ;;
+    budget_low)          printf '40' ;;
+    silent)              printf '50' ;;
+    plan)                printf '60' ;;
+    checkpoint)          printf '90' ;;
+    tick)                printf '95' ;;
+    *)                   printf '80' ;;
+  esac
+}
+
+ad_loop_line_delivered() { # <root> <line_number>
+  local delivered
+  delivered="$(ad_loop_delivered_file "$1")"
+  [[ -f "$delivered" ]] || return 1
+  grep -qx "$2" "$delivered"
+}
+
+ad_loop_mark_delivered() { # <root> <line_number>
+  local root="$1" line="$2" delivered count
+  delivered="$(ad_loop_delivered_file "$root")"
+  if ! ad_loop_line_delivered "$root" "$line"; then
+    printf '%s\n' "$line" >> "$delivered"
+  fi
+  count="$(wc -l < "$delivered" | tr -d ' ')"
+  ad_loop_write_cursor "$root" "$count"
 }
 
 ad_loop_with_cursor_lock() { # <root> <function> [args...]
@@ -133,19 +188,31 @@ ad_loop_inject_event_text() { # <event_text>
 }
 
 ad_loop_deliver_next_event_locked() { # <root> <mode:inject|block|print>
-  local root="$1" mode="$2" queue cursor lines next event text
+  local root="$1" mode="$2" queue lines candidate next event text priority
+  ad_loop_migrate_cursor_to_delivered "$root"
   queue="$(ad_loop_queue_file "$root")"
-  cursor="$(ad_loop_read_cursor "$root")"
   lines="$(ad_loop_line_count "$queue")"
-  if (( cursor >= lines )); then
+  if (( lines == 0 )); then
     return 1
   fi
 
-  next="$(( cursor + 1 ))"
-  event="$(sed -n "${next}p" "$queue")"
-  if [[ -z "$event" ]]; then
+  candidate="$(
+    awk '{ print NR "\t" $0 }' "$queue" | while IFS=$'\t' read -r next event; do
+      [[ -n "$next" && -n "$event" ]] || continue
+      if ad_loop_line_delivered "$root" "$next"; then
+        continue
+      fi
+      priority="$(ad_loop_event_priority "$event")" || continue
+      printf '%s\t%s\t%s\n' "$priority" "$next" "$event"
+    done | sort -n -k1,1 -k2,2 | sed -n '1p'
+  )"
+  if [[ -z "$candidate" ]]; then
     return 1
   fi
+  priority="${candidate%%$'\t'*}"
+  candidate="${candidate#*$'\t'}"
+  next="${candidate%%$'\t'*}"
+  event="${candidate#*$'\t'}"
   text="$(ad_loop_event_text "$event")" || return 1
 
   case "$mode" in
@@ -163,7 +230,7 @@ ad_loop_deliver_next_event_locked() { # <root> <mode:inject|block|print>
       ;;
   esac
 
-  ad_loop_write_cursor "$root" "$next"
+  ad_loop_mark_delivered "$root" "$next"
   return 0
 }
 

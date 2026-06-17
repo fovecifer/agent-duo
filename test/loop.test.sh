@@ -141,6 +141,18 @@ assert_contains "hook stop: second event text" "$(cat "$OUT")" 'id=e2 agent=revi
 assert_eq "hook stop: cursor advanced twice" "$(cat "$PROJECT/.agent-duo/events/cursor")" "2"
 teardown
 
+# Stop hook chooses the highest-priority pending event, not just the first line.
+setup
+write_event e1 worker checkpoint 1 "progress" ".agent-duo/state/worker/r1.json"
+write_event e2 worker blocked 2 "needs approval" ".agent-duo/state/worker/r2.json"
+assert_ok "hook stop priority: first blocks on blocked event" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_contains "hook stop priority: blocked first" "$(cat "$OUT")" 'id=e2 agent=worker type=blocked round=2'
+assert_eq "hook stop priority: cursor count one" "$(cat "$PROJECT/.agent-duo/events/cursor")" "1"
+assert_ok "hook stop priority: then checkpoint" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_contains "hook stop priority: checkpoint second" "$(cat "$OUT")" 'id=e1 agent=worker type=checkpoint round=1'
+assert_eq "hook stop priority: cursor count two" "$(cat "$PROJECT/.agent-duo/events/cursor")" "2"
+teardown
+
 # loopd idle-arrival injects one pending event through peer tell and shares the same cursor.
 setup
 printf 'idle\n' > "$PROJECT/.agent-duo/state/supervisor.turn"

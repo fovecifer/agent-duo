@@ -1,23 +1,21 @@
 # agent-duo
 
-**Make Claude Code and Codex CLI see each other's screens and talk to each other — inside your normal iTerm2 tabs.**
+**Run visible Claude Code / Codex CLI sessions as a supervised coding workbench inside normal iTerm2 tabs.**
 
 [简体中文](README.zh-CN.md)
 
-You say one sentence; Claude delegates to Codex, waits, and reports back — and the whole exchange happens live, in two ordinary tabs, right before your eyes:
+You say one sentence; the supervisor can add or address a worker, wait, and report back — and the exchange happens live in ordinary tabs, right before your eyes:
 
 ```
 ┌─ iTerm2 ───────────────────────────────────────────┐
-│  [ Claude Code ]         [ Codex CLI ]             │
-│ ┌──────────────────────┐  ┌──────────────────────┐ │
-│ │ > Ask Codex to review│  │                      │ │
-│ │   internal/auth      │  │                      │ │
-│ │                      │  │                      │ │
-│ │ $ peer tell "..." ───┼──┼──> Please review     │ │
-│ │                      │  │    internal/auth     │ │
-│ │ $ peer wait          │  │ * Reviewing...       │ │
-│ │ $ peer peek <────────┼──┼── Found 2 issues     │ │
-│ └──────────────────────┘  └──────────────────────┘ │
+│ [ supervisor ]      [ worker ]       [ loopd ]      │
+│ ┌────────────────┐  ┌─────────────┐  ┌───────────┐ │
+│ │ > Ask Codex to │  │             │  │ queue: 0  │ │
+│ │   review auth  │  │             │  │ live      │ │
+│ │ $ peer tell ───┼──┼─> Review    │  │           │ │
+│ │ $ peer wait    │  │ * Reviewing │  │           │ │
+│ │ $ peer peek <──┼──┼─ Found 2    │  │           │ │
+│ └────────────────┘  └─────────────┘  └───────────┘ │
 └────────────────────────────────────────────────────┘
 ```
 
@@ -29,22 +27,26 @@ Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / 
 
 ## How it works
 
-One tmux session, two windows — `claude` and `codex`. iTerm2's native tmux integration (`tmux -CC`) renders them as two ordinary tabs, and the tiny `peer` command gives each agent eyes and a keyboard for the other side:
+One tmux session starts with a supervisor tab and a visible `loopd` dashboard. Add workers with `peer add` or start one immediately with `agent-duo-start --with codex:worker`. iTerm2's native tmux integration (`tmux -CC`) renders tmux windows as ordinary tabs, and `peer` gives each agent eyes and a keyboard for the others:
 
 ```mermaid
 flowchart TB
   You["You"] --> ITerm["one iTerm2 window"]
-  ITerm --> ClaudeTab["tab: Claude Code"]
-  ITerm --> CodexTab["tab: Codex CLI"]
+  ITerm --> SupervisorTab["tab: supervisor"]
+  ITerm --> WorkerTab["tab: worker"]
+  ITerm --> LoopdTab["tab: loopd"]
 
   subgraph Tmux["tmux session: agents"]
-    ClaudeWin["tmux window: claude"]
-    CodexWin["tmux window: codex"]
+    SupervisorWin["tmux window: supervisor"]
+    LoopdWin["tmux window: loopd"]
+    WorkerWin["tmux window: worker"]
   end
 
-  ClaudeTab -.renders.-> ClaudeWin
-  CodexTab -.renders.-> CodexWin
-  ClaudeWin <-->|peer peek / tell / wait| CodexWin
+  SupervisorTab -.renders.-> SupervisorWin
+  WorkerTab -.renders.-> WorkerWin
+  LoopdTab -.renders.-> LoopdWin
+  SupervisorWin <-->|peer peek / tell / wait| WorkerWin
+  LoopdWin -->|events / dashboard| SupervisorWin
 ```
 
 A typical delegation looks like this:
@@ -52,16 +54,16 @@ A typical delegation looks like this:
 ```mermaid
 sequenceDiagram
   participant U as You
-  participant C as Claude tab
+  participant C as supervisor tab
   participant P as peer
-  participant X as Codex tab
+  participant X as worker tab
 
-  U->>C: Ask Codex to review internal/auth
+  U->>C: Ask a worker to review internal/auth
   C->>P: peer tell "Please review internal/auth"
   P->>X: Paste message and press Enter
   C->>P: peer wait
   C->>P: peer peek 120
-  C->>U: Summarize Codex's conclusions
+  C->>U: Summarize the worker's conclusions
 ```
 
 ## Quick start
@@ -72,21 +74,21 @@ sequenceDiagram
 brew install fovecifer/agent-duo/agent-duo
 ```
 
-This installs the `peer` and `agent-duo-start` commands and pulls in `tmux`.
+This installs the `peer` and `agent-duo-start` commands and pulls in `tmux` and `jq`.
 You still need to install and log in to Claude Code and Codex CLI separately.
 
 ### Install from source
 
 ```bash
 git clone https://github.com/<you>/agent-duo && cd agent-duo
-./install.sh                      # symlinks `peer` into ~/.local/bin, checks tmux
+./install.sh                      # symlinks commands into ~/.local/bin, checks tmux/jq
 
 cd ~/your-project
-agent-duo-start                   # spawns tmux session "agents": window claude + window codex
-tmux -CC attach -t agents         # iTerm2 renders the two windows as native tabs
+agent-duo-start --with codex:worker
+tmux -CC attach -t agents         # iTerm2 renders tmux windows as native tabs
 ```
 
-If iTerm2 opens the two tmux windows as separate macOS windows, change this iTerm2 setting:
+If iTerm2 opens tmux windows as separate macOS windows, change this iTerm2 setting:
 `Settings > General > tmux > When attaching, restore windows as... = Tabs in the attaching window`.
 iTerm2 owns that mapping; `agent-duo` creates tmux windows, and iTerm2 decides whether they become native tabs or separate windows.
 
@@ -98,13 +100,15 @@ On first run in a project, `agent-duo-start` asks once before wiring the agents 
 Answer `y` once and it won't ask again (the marker block records your consent); later runs just print a one-line reminder. Decline and it launches without injecting, printing the manual steps.
 
 - Non-interactive shells (CI, pipes) skip injection by default — pass `-y` or set `AGENT_DUO_AUTO_INJECT=1` to inject without the prompt.
-- Prefer to wire it up by hand? Append the body of `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` and `AGENTS.md` yourself. Same snippet for both — `peer` resolves "self" and "the other side" automatically from `$AGENT_NAME`.
+- Prefer to wire it up by hand? Append the body of `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` and `AGENTS.md` yourself. Same snippet for both — `peer` resolves identity from the tmux pane `@agent_id` marker, with `AGENT_NAME` kept only as a migration fallback.
+
+`agent-duo-start` without `--with` creates only the supervisor and loopd; run `peer add --provider codex --role worker` from the supervisor when you want a worker later.
 
 Then just talk naturally:
 
-> *"Ask Codex to review the `internal/auth` package, wait for it to finish, and summarize its conclusions for me."*
+> *"Ask a Codex worker to review the `internal/auth` package, wait for it to finish, and summarize its conclusions for me."*
 
-Claude will run `peer tell` → `peer wait` → `peer peek` and report back. The reverse direction works the same way from the Codex tab.
+The supervisor will run `peer tell` → `peer wait` → `peer peek` and report back. Direct agent-to-agent delegation still stays visible in the worker tabs.
 
 ## The `peer` command
 
@@ -126,7 +130,7 @@ Claude will run `peer tell` → `peer wait` → `peer peek` and report back. The
 
 ## Requirements
 
-- macOS / Linux with `tmux` ≥ 3.2 (`brew install tmux`)
+- macOS / Linux with `tmux` ≥ 3.2 and `jq` (`brew install tmux jq`)
 - [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex) on PATH
 - iTerm2 recommended for the native-tab experience (`tmux -CC`); any terminal works with plain `tmux attach`
 

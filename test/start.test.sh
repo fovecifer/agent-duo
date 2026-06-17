@@ -68,6 +68,9 @@ AGENT_DUO_AUTO_INJECT=1 run_start </dev/null
 assert_ok        "A: AGENTS.md created" test -f "$PROJECT/AGENTS.md"
 assert_contains  "A: block written"     "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
 assert_contains  "A: claude got flag"   "$(cat "$SENDLOG")" '--append-system-prompt'
+assert_ok        "A: supervisor settings created" test -f "$PROJECT/.agent-duo/state/supervisor/session-settings.json"
+assert_contains  "A: supervisor settings has Stop hook" "$(cat "$PROJECT/.agent-duo/state/supervisor/session-settings.json")" 'supervisor-stop-drain-hook'
+assert_contains  "A: claude loads settings" "$(cat "$SENDLOG")" '--settings'
 teardown
 
 # 场景 B:已有块 → 友好提示,不重复块,claude 仍带参数
@@ -135,7 +138,10 @@ PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
   bash "$ROOT/start.sh" "$PROJECT" --supervisor codex \
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_contains     "G: tags supervisor provider codex" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider codex'
-assert_contains     "G: launches codex"                 "$(cat "$SENDLOG")" 'send-keys -t %1 export AGENT_SESSION=agents PATH='
+assert_contains     "G: launches codex"                 "$(cat "$SENDLOG")" 'send-keys -t %1 export AGENT_SESSION=agents'
+assert_contains     "G: codex supervisor gets settings env" "$(cat "$SENDLOG")" 'AGENT_DUO_SUPERVISOR_SETTINGS='
+assert_contains     "G: codex supervisor has user hook config" "$(cat "$SENDLOG")" 'hooks.UserPromptSubmit'
+assert_contains     "G: codex supervisor has stop hook config" "$(cat "$SENDLOG")" 'hooks.Stop'
 assert_contains     "G: creates loopd window"            "$(cat "$SENDLOG")" 'new-window -t agents -n loopd'
 assert_contains     "G: launches loopd"                  "$(cat "$SENDLOG")" 'peer loopd'
 teardown
@@ -152,6 +158,20 @@ assert_contains  "H: creates worker window"   "$(cat "$SENDLOG")" 'new-window -t
 assert_contains  "H: tags worker id"          "$(cat "$SENDLOG")" '@agent_id worker'
 assert_contains  "H: tags worker provider"    "$(cat "$SENDLOG")" '@agent_provider codex'
 assert_contains  "H: launches worker"         "$(cat "$SENDLOG")" 'send-keys -t %2'
+assert_ok        "H: worker settings created" test -f "$PROJECT/.agent-duo/state/worker/session-settings.json"
+assert_contains  "H: worker exports approval settings" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_SETTINGS='
+assert_contains  "H: worker exports approval hook" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_HOOK='
+assert_contains  "H: codex worker has pretool hook config" "$(cat "$SENDLOG")" 'hooks.PreToolUse'
+teardown
+
+# 场景 I:--with claude:reviewer → worker settings 进入 Claude 启动参数。
+setup
+PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
+  bash "$ROOT/start.sh" "$PROJECT" --with claude:reviewer \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+assert_ok        "I: reviewer settings created" test -f "$PROJECT/.agent-duo/state/reviewer/session-settings.json"
+assert_contains  "I: reviewer loads settings" "$(cat "$SENDLOG")" '--settings'
+assert_contains  "I: reviewer settings path" "$(cat "$SENDLOG")" '.agent-duo/state/reviewer/session-settings.json'
 teardown
 
 # 说明:prompt 分支(无块 + 无 AUTO + 有 TTY)需要伪终端才能驱动,本无依赖测试框架无法模拟;
