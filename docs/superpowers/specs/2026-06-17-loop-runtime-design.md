@@ -169,14 +169,75 @@ durable、append、带单 owner cursor：`.agent-duo/events/queue.jsonl`。
 
 ---
 
-## 5. 团队按需生长（启动即普通模式）
+## 5. 汇报攒批与升级判定（何时打扰人）
+
+worker 事件分三档，决定"立刻打断人 / 喂给 supervisor 自处理 / 攒着批量报"。沿用已定的 coalesce 与防饿死（§3）。
+
+| 档 | 典型事件 | 处理 |
+|---|---|---|
+| **① 立即打断人** | 需人拍板的 gate（部署/采购/开网络入口）、`failed` 且无 fallback | 浮到看板顶 + 轻提醒；不处理就停在这 |
+| **② 喂 supervisor，不打断人** | `blocked`(needs=approval/info)、`result(done)`、reviewer verdict | 走 Stop 便车给 supervisor 自处理；人事后在汇总里看到 |
+| **③ 攒着批量报** | `checkpoint` 心跳、`delta`/进度 | 按 agent coalesce，到 tick 或人主动问时一次性汇总 |
+
+最难的是判第①档"需人拍板"。**不要把它当成判断**——判断依赖 supervisor 当下感觉，不可靠。它是一棵基于具体属性的决策树，且"判错也不致命"。
+
+### 换问法：证明"自主做是安全的"，否则升级
+
+默认偏向升级。supervisor 要主动做某事，必须**同时证明**：**可逆 + 命中 policy + 在 mission scope 内**。任一证不出 → 升级。默认值站在安全一边，而非"拿不准就自己上"。
+
+### 主轴：可逆性 = "能不能只用 git 撤销"
+
+> 改动的状态**只活在 worktree / git 里** → 可逆（`git checkout`/`reset` 能回去）→ 倾向自主；
+> 碰到 **git 以外的任何东西**（云资源、网络入口、钱、secret、别人能看到的状态）→ 不可逆 → 升级。
+
+| 动作 | 出 git 了吗 | 归档 |
+|---|---|---|
+| worktree 里 `npm test`、改文件、删生成物 | 否 | 自主（③，常不单独报） |
+| `git push` feature 分支 | 边界（可删/force） | policy 粒度：feature 放行、main 升级 |
+| 买 VM、`terraform apply` | 是（持续花钱） | **硬升级（①）** |
+| 开 `0.0.0.0/0:22` 防火墙 | 是（外网入口） | **硬升级（①）** |
+| 部署 staging/prod | 是 | **硬升级**（除非 contract 预授权 staging） |
+| drop 一张 DB 表 | 是（外部、不可逆） | **硬升级（①）** |
+
+### 决策树
+
+```
+对每个待办动作 / worker request:
+  ① 命中 contract 声明的 human_gate?                        → 升级(硬)
+  ② 出 git 了 / 命中"永不自动"清单(花钱·外网·secret·prod)?  → 升级(硬)
+  ③ 命中 allow policy + 在 scope 内 + 可逆?                 → 自主执行
+  ④ 模糊地带:
+        可逆          → 执行 + 进汇总(第③档)
+        拿不准是否可逆  → 当作不可逆 → 升级
+```
+
+模糊情况全部由**可逆性**收口：可逆的错了能撤，容许自主；拿不准就按不可逆、升级。
+
+### 判错也不致命：UX 分档 ≠ 安全闸门（解耦）
+
+危险的不是 supervisor 的分档判断，而是危险动作**真的被执行**。真正执行有**独立机械闸门**——Approval Broker hook（`PreToolUse`/`PermissionRequest`）：
+
+- supervisor 即使第②步判错、真去跑 `terraform apply` → policy hook 执行前**独立拦下** → 这次拦截**本身变成一个强制升级事件**。
+- 于是：**分档判断管"何时打扰人"(UX)，policy hook 管"什么能真的执行"(安全)。** 解耦后，分档判错最坏只是 UX 不优，不致不可逆后果。
+
+### 升级有三个独立来源（不押注 supervisor 单点）
+
+- **worker** 自己发现要部署/采购 → `request(needs.kind=decision)`
+- **supervisor** 按动作类别匹配 gate
+- **policy hook** 拦下危险命令 → 强制升级
+
+### 边界从日志里长出来
+
+每次升级与自主决定都进 `decisions.jsonl` / `approvals.jsonl`。人事后可调："这类以后别问我"（放宽 policy）/"这类永远问我"（加 gate）。"难判断"的部分交给真实历史收敛，不要求第一版划得完美。
+
+## 6. 团队按需生长（启动即普通模式）
 
 - **不预先声明团队**。开 agent-duo = 一个 tab，直接开聊；worker 按需 spawn。对齐 registry MVP 3 的"单 supervisor + 按需生长"。
 - **创建 worker 前轻确认**：spawn = 冒出新 tab，是可见副作用，所以"确认几个点（provider、几个 worker、scope）再建"是对的——恰好对应契约的 plan/assign，只是用对话表达。
 
 ---
 
-## 6. Liveness：思考 / 阻塞 / 失联 / 死了
+## 7. Liveness：思考 / 阻塞 / 失联 / 死了
 
 纯机械、daemon 计算（LLM 当不了时钟）：
 
@@ -191,7 +252,7 @@ durable、append、带单 owner cursor：`.agent-duo/events/queue.jsonl`。
 
 ---
 
-## 7. 对 codec 第 1 步的约束（接口一次定死）
+## 8. 对 codec 第 1 步的约束（接口一次定死）
 
 runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
@@ -203,7 +264,7 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
 ---
 
-## 8. 失败 / 恢复
+## 9. 失败 / 恢复
 
 - supervisor 中途挂 → 队列 + cursor 落盘，新 supervisor（或人）从 cursor 续，未处理 gate 还在 → 接 budget MVP 的 handoff packet。
 - 队列膨胀 → notify 合并 + 已处理归档。
@@ -211,7 +272,7 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
 ---
 
-## 9. 增量落地
+## 10. 增量落地
 
 ```
 1. queue.jsonl + peer report 追加 event + sentinel codec（与契约第 1 步合并）
@@ -224,14 +285,14 @@ runtime 给契约 codec 加了硬约束，二者**应合并实现**：
 
 ---
 
-## 10. 待定（下一步讨论）
+## 11. 待定（下一步讨论）
 
-已定（见 §1 "事件投递与 idle 判定：基于 hook"）：
-- ~~**idle 判定**~~ → hook 权威：`UserPromptSubmit`=busy、`Stop`=idle，`Stop` 一招排除 mid-turn 与权限弹窗；抓屏只剩输入框草稿守卫。
-- ~~**注入退避**~~ → Stop 便车为首选（零竞态）、send-keys 仅用于 idle-arrival 且带草稿守卫；一切不确定 hold，不误发。
+已定：
+- ~~**idle 判定**~~ → hook 权威：`UserPromptSubmit`=busy、`Stop`=idle，`Stop` 一招排除 mid-turn 与权限弹窗；抓屏只剩输入框草稿守卫（见 §1）。
+- ~~**注入退避**~~ → Stop 便车为首选（零竞态）、send-keys 仅用于 idle-arrival 且带草稿守卫；一切不确定 hold，不误发（见 §1）。
+- ~~**汇报攒批 + 升级判定**~~ → 三档 + 可逆性主轴决策树 + UX/安全解耦（见 §5）。
 
 仍待讨论：
-- **汇报攒批**：什么事立即打扰人、什么事攒着批量汇报，避免把人淹没（"别烦我"策略）。与 §3 的 coalesce、§1 的防饿死相连。
 - **tick 默认开关**：长超时 tick（如 30min）默认开 → supervisor 主动做 direction checkpoint；默认关 → 纯被动最省。倾向"开、但周期长"。
 - **daemon 降级边界**：哪些功能丢了仍算可用。
 - **Approval Broker 的 hook 化**：用 `PreToolUse`/`PermissionRequest` 在 worker session 上机械放行/拒绝（替代 roadmap 原"抓屏+回车"方案），细节待 MVP 1/2 设计。
