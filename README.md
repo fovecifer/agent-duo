@@ -127,6 +127,7 @@ Claude will run `peer tell` → `peer wait` → `peer peek` and report back. The
 ## Requirements
 
 - macOS / Linux with `tmux` ≥ 3.2 (`brew install tmux`)
+- `python3` for codec JSON writing and fsync durability (`brew install python`)
 - [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex) on PATH
 - iTerm2 recommended for the native-tab experience (`tmux -CC`); any terminal works with plain `tmux attach`
 

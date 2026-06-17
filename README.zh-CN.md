@@ -82,20 +82,22 @@ agent-duo/
 brew install fovecifer/agent-duo/agent-duo
 ```
 
-会安装 `peer` 与 `agent-duo-start` 命令，并自动装上 `tmux`。
+会安装 `peer` 与 `agent-duo-start` 命令，并自动装上 `tmux` 与 `python3`。
+`python3` 用于 codec 的 JSON 写入与 fsync 耐久性。
 Claude Code 与 Codex CLI 仍需你自行安装并登录。
 
 ### 从源码安装
 
 1. `brew install tmux`(如已安装可跳过)
-2. 获取本仓库并安装命令:
+2. `brew install python`(如已有 `python3` 可跳过)
+3. 获取本仓库并安装命令:
 
    ```bash
    git clone https://github.com/<you>/agent-duo && cd agent-duo
    ./install.sh
    ```
 
-3. `agent-duo-start` 在某个项目里**首次运行**时会询问一次,再启动两个 agent：
+4. `agent-duo-start` 在某个项目里**首次运行**时会询问一次,再启动两个 agent：
 
    - **Claude**：通过启动参数 `--append-system-prompt` 传入协作说明 —— **不写任何文件**,会话结束即消失。
    - **Codex**：没有等价的启动参数,因此说明会以带标记、可撤销的块写入项目的 `AGENTS.md`（`<!-- agent-duo:start -->` … `<!-- agent-duo:end -->`）。`CLAUDE.md` 不会被改动。
