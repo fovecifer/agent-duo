@@ -566,10 +566,16 @@ ab_append_blocked_event() {
   ab_append_jsonl "$(ab_events_dir "$root")/queue.jsonl" "$line"
 }
 
-ab_output() { # <decision> [reason] [approval_id]
-  local decision="$1" reason="${2:-}" approval_id="${3:-}" out
-  out="{\"decision\":\"$(ab_json_escape "$decision")\""
-  if [[ -n "$reason" ]]; then out="${out},\"reason\":\"$(ab_json_escape "$reason")\""; fi
+ab_output() { # <decision:allow|deny|ask> [reason] [approval_id]
+  local decision="$1" reason="${2:-}" approval_id="${3:-}" inner out
+  # PreToolUse output schema honored by BOTH Claude Code and Codex:
+  # hookSpecificOutput.permissionDecision = allow|deny|ask (+ permissionDecisionReason).
+  # The older top-level {"decision":"allow|deny"} is NOT recognized by Codex (it expects
+  # permissionDecision, or legacy "decision":"block"), so the broker never actually
+  # allowed/denied on Codex. See docs: https://developers.openai.com/codex/hooks
+  inner="\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"$(ab_json_escape "$decision")\""
+  if [[ -n "$reason" ]]; then inner="${inner},\"permissionDecisionReason\":\"$(ab_json_escape "$reason")\""; fi
+  out="{\"hookSpecificOutput\":{${inner}}"
   if [[ -n "$approval_id" ]]; then out="${out},\"approval_id\":\"$(ab_json_escape "$approval_id")\""; fi
   out="${out}}"
   printf '%s\n' "$out"

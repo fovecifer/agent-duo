@@ -59,7 +59,7 @@ latest_approval_id() {
 # Bash allowlist: all command segments must be allowlisted, then audit only.
 assert_ok "hook: bash allowlisted segments pass" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"pwd && git diff --check"},"round":4}'
-assert_contains "hook: bash allow decision" "$(cat "$OUT")" '"decision":"allow"'
+assert_contains "hook: bash allow decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 assert_contains "hook: allow audit" "$(cat "$PROJECT/.agent-duo/logs/approvals.jsonl")" '"decision":"auto-allow"'
 assert_ok "hook: allow does not enqueue event" test ! -f "$PROJECT/.agent-duo/events/queue.jsonl"
 
@@ -79,7 +79,7 @@ assert_contains "hook: curl pipe deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 assert_ok "hook: escaped quote does not hide deny segment" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo \"x\" && rm -rf .agent-duo"},"round":6}'
 assert_contains "hook: escaped quote deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
-assert_not_contains "hook: escaped quote not auto-allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: escaped quote not auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # Dangerous Bash variants must not slip through auto-allow.
 assert_ok "hook: split rm flags hard-deny" run_hook \
@@ -93,69 +93,69 @@ assert_contains "hook: sed backup inplace deny reason" "$(cat "$OUT")" 'DENIED-B
 assert_ok "hook: sed long inplace hard-denies" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"sed --in-place s/a/b/ file"},"round":6}'
 assert_contains "hook: sed long inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
-assert_not_contains "hook: sed long inplace not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: sed long inplace not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: sed long backup inplace hard-denies" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"sed --in-place=.bak s/a/b/ file"},"round":6}'
 assert_contains "hook: sed long backup inplace deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
-assert_not_contains "hook: sed long backup inplace not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: sed long backup inplace not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: sed write command escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"sed -n '\''w /tmp/agent-duo-sed-write'\'' README.md"},"round":6}'
 assert_contains "hook: sed write command pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
-assert_not_contains "hook: sed write command not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: sed write command not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: sed file script escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"sed -f rewrite.sed README.md"},"round":6}'
 assert_contains "hook: sed file script pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
-assert_not_contains "hook: sed file script not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: sed file script not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: bash redirection escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo pwn > /tmp/agent-duo-pwn"},"round":6}'
 assert_contains "hook: bash redirection pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
-assert_not_contains "hook: bash redirection not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: bash redirection not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # Benign redirects on allowlisted commands stay auto-allowed (fd-dup, /dev/null, in-worktree).
 assert_ok "hook: redirect stderr-to-stdout allowed" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"npm test 2>&1"},"round":6}'
-assert_contains "hook: redirect 2>&1 decision" "$(cat "$OUT")" '"decision":"allow"'
+assert_contains "hook: redirect 2>&1 decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: redirect to /dev/null allowed" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"npm test > /dev/null"},"round":6}'
-assert_contains "hook: redirect devnull decision" "$(cat "$OUT")" '"decision":"allow"'
+assert_contains "hook: redirect devnull decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # File-target redirects escalate (regex can't safely resolve $VARS / ~ / >&file forms).
 assert_ok "hook: file-target redirect escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"npm test > out.log"},"round":6}'
-assert_not_contains "hook: file-target redirect not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: file-target redirect not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # Redirect bypasses that look relative but escape at runtime must NOT auto-allow.
 assert_ok "hook: redirect to \$HOME escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo pwn > $HOME/.bashrc"},"round":6}'
-assert_not_contains "hook: redirect \$HOME not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: redirect \$HOME not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: redirect-and-dup to file escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo pwn >& /etc/passwd"},"round":6}'
-assert_not_contains "hook: redirect-and-dup not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: redirect-and-dup not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # Command/process substitution is opaque and must escalate even on allowlisted heads.
 assert_ok "hook: command substitution escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"echo $(whoami)"},"round":6}'
 assert_contains "hook: command substitution pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
-assert_not_contains "hook: command substitution not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: command substitution not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: process substitution escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"diff <(ls) <(ls)"},"round":6}'
-assert_not_contains "hook: process substitution not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: process substitution not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # awk/find are not auto-allowed (can exec/write); they escalate until worktree isolation lands.
 assert_ok "hook: awk escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"awk \"{print}\" file"},"round":6}'
-assert_not_contains "hook: awk not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: awk not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: find escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"find . -name x"},"round":6}'
-assert_not_contains "hook: find not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: find not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # A retried blocked tool call must not flood the queue with duplicate blocked events.
 DEDUP_PROJECT="$TMP/dedup"
@@ -189,7 +189,7 @@ assert_contains "peer approve: file approved" "$(cat "$PROJECT/.agent-duo/approv
 
 assert_ok "hook: approved request allows once" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":8}'
-assert_contains "hook: approved request decision" "$(cat "$OUT")" '"decision":"allow"'
+assert_contains "hook: approved request decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 assert_contains "hook: approved request consumed" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"consumed"'
 
 assert_ok "hook: creates second pending request" run_hook \
@@ -205,7 +205,7 @@ inside="$WORKTREE/src/app.txt"
 outside="$TMP/outside.txt"
 assert_ok "hook: write inside worktree allowed" run_hook \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$inside\"},\"round\":10}"
-assert_contains "hook: write inside decision" "$(cat "$OUT")" '"decision":"allow"'
+assert_contains "hook: write inside decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: write outside worktree escalates" run_hook \
   "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$outside\"},\"round\":11}"
@@ -214,7 +214,7 @@ assert_contains "hook: write outside pending" "$(cat "$OUT")" 'BLOCKED-PENDING-A
 assert_ok "hook: unresolved dotdot write escapes worktree" run_hook \
   '{"tool_name":"Write","tool_input":{"file_path":"missing/../../outside.txt"},"round":11}'
 assert_contains "hook: unresolved dotdot write pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
-assert_not_contains "hook: unresolved dotdot write not allowed" "$(cat "$OUT")" '"decision":"allow"'
+assert_not_contains "hook: unresolved dotdot write not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: secret path hard-denies" run_hook \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$WORKTREE/.env\"},\"round\":12}"
@@ -223,7 +223,7 @@ assert_contains "hook: secret path deny" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 # MCP policy: read/list/get/search style tools are allowlisted, mutating tools are denied.
 assert_ok "hook: mcp read allow" run_hook \
   '{"tool_name":"mcp__github__fetch_file","tool_input":{},"round":13}'
-assert_contains "hook: mcp read decision" "$(cat "$OUT")" '"decision":"allow"'
+assert_contains "hook: mcp read decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 assert_ok "hook: mcp write deny" run_hook \
   '{"tool_name":"mcp__github__merge_pull_request","tool_input":{},"round":14}'
