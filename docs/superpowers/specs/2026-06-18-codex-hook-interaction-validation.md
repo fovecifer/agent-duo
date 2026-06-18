@@ -39,6 +39,8 @@ Approval Broker 原设计假设 Codex 与 Claude Code 的 `PreToolUse` 都能表
 | `PermissionRequest allow` | `-c hooks.PermissionRequest=...` + `-a untrusted` | 交互式 CLI | 生效，原生审批被 hook allow，命令执行 |
 | `PermissionRequest deny` | `-c hooks.PermissionRequest=...` + `-a untrusted` | 交互式 CLI | 生效，原生审批被 hook deny，目标文件未创建 |
 | `PreToolUse apply_patch` | `-c hooks.PreToolUse=...` + `--dangerously-bypass-hook-trust` | 交互式 CLI | 生效，broker 收到 `tool=apply_patch`，worktree 内新增文件 |
+| `PreToolUse deny`（automated smoke） | `-c hooks.PreToolUse=...` + `--dangerously-bypass-hook-trust` | 交互式 CLI（tmux 驱动） | 生效，TUI 显示 `PreToolUse hook (blocked)`，`blocked.txt` 未创建；已固化为 `test/codex-hook-e2e.test.sh` |
+| **hook trust 首启（不带 bypass）** | `-c hooks.PreToolUse=...`，未信任 | 交互式 CLI | 先弹「目录信任」，再弹「Hooks need review」；选「Continue without trusting」后 **hook 不运行，命令照常执行，文件被创建** |
 | `PreToolUse` / `UserPromptSubmit` | 项目配置或 `-c` | `codex exec` | 未观察到 hook 触发；命令直接执行 |
 
 ## 关键实测
@@ -239,6 +241,38 @@ hook deny 返回：
 
 结果：没有人工 prompt，命令未执行，`permission-deny.txt` 未创建，模型收到 `LAB-DENY permission`。
 
+## Hook trust 首启行为（2026-06-18 追加实测，关键缺口）
+
+之前的 deny/allow 实测都带 `--dangerously-bypass-hook-trust`，但**产品启动路径（`peer add` / `start.sh`）并不带这个 flag**（见 `bin/peer` / `start.sh` 的 codex 分支，只注入 `-c hooks...`，不 bypass）。因此单独验证「未信任时 hook 是否生效」。
+
+用全新未信任目录 + 同一个 deny-all hook，**不带** bypass flag 启动交互式 Codex：
+
+```sh
+codex -a never --no-alt-screen -C <fresh-untrusted-dir> -s workspace-write \
+  -c 'hooks.PreToolUse=[{matcher="*",hooks=[{type="command",command="/abs/hook.sh"}]}]'
+```
+
+观察到**两道串行关卡**：
+
+1. `Do you trust the contents of this directory?`（目录信任；`--dangerously-bypass-hook-trust` 只跳过下一道，不跳过这道）。
+2. 选「Yes, continue」后弹 `Hooks need review / 1 hook is new or changed / Hooks can run outside the sandbox after you trust them`，选项：
+   - `1. Review hooks`
+   - `2. Trust all and continue`
+   - `3. Continue without trusting (hooks won't run)`
+
+选 `3. Continue without trusting` 后让 Codex 执行 `printf NOTRUST_RAN > notrust.txt`：
+
+- TUI 显示 `• Ran printf NOTRUST_RAN > notrust.txt`（命令执行，**没有** `blocked`）。
+- hook 的 `events.log` **为空**——hook 根本没被调用。
+- `notrust.txt` **被创建**。
+
+**结论（安全语义）**：未信任 hook 时，Approval Broker 完全缺席——不是 fail-closed，而是 fail-open（工具照常跑）。也就是说，从 worker pane 首次启动到用户在该 pane 内信任 hook 之间，存在一个 broker 不生效的窗口；当前实现只用一条 echo 提醒兜底（`peer add` / `start.sh` 的「Codex hook 提示」），不是强制。
+
+对应设计要求：
+
+- worker 契约 / 文档必须把「未信任 = broker 未生效」当作显式状态，而不是假设 hook 一定在跑。
+- 后续应让 supervisor/runtime 能**探测** broker 是否真的生效（例如启动后做一次 deny 自检），未生效时不要把保护性任务派给该 worker，而不仅是打印提醒。
+
 ## `codex exec` 的验证结果
 
 同样尝试过：
@@ -309,11 +343,12 @@ Approval Broker 中的 `escalate` 对 Codex 应实现为：
 2. `approval_broker` 的 Codex 输出层只生成 `allow` / `deny`，不要输出 `permissionDecision: "ask"`。
 3. 对 unknown / unmanaged / 需要人工判断的请求，Codex 一律 `deny + pending approval record`。
 4. worker 契约里要求：看到 `BLOCKED-PENDING-APPROVAL` 时停下等待，不要换命令绕过；hook 写入的 `blocked` 事件是 supervisor 审批的 canonical 触发。
-5. 后续补一个自动化 smoke：启动真实交互式 Codex session，验证 `-c PreToolUse deny` 能阻止写文件。
+5. ~~后续补一个自动化 smoke：启动真实交互式 Codex session，验证 `-c PreToolUse deny` 能阻止写文件。~~ ✅ 已固化为 `test/codex-hook-e2e.test.sh`（默认 skip，`AGENT_DUO_E2E_CODEX=1` 开启；需 codex + tmux + `~/.codex/auth.json`）。
+6. **hook trust fail-open 缺口**：产品启动路径未信任 hook 时 broker 不生效（见上节）。需把它当显式状态处理，并加 broker 生效自检，而非仅靠 echo 提醒。
 
 ## 待补验证
 
-- `apply_patch` 的 worktree 外路径、secret 路径交互式阻断实测。
+- `apply_patch` 的 worktree 外路径、secret 路径交互式阻断实测（逻辑已由 `test/approval.test.sh` 单测覆盖，缺交互式实证）。
 - MCP 工具名 matcher：需要用一个低风险 MCP 工具做一次实测。
-- 不使用 `--dangerously-bypass-hook-trust` 时，Codex hook trust 的真实首次确认体验。
+- ~~不使用 `--dangerously-bypass-hook-trust` 时，Codex hook trust 的真实首次确认体验。~~ ✅ 已实测：两道关卡（目录信任 + Hooks need review），未信任时 fail-open（见「Hook trust 首启行为」一节）。
 - Stop hook continuation 行为对 supervisor loop 的可用性。
