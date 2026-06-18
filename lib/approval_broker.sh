@@ -597,8 +597,19 @@ ab_output() { # <decision:allow|deny> [reason] [approval_id]
     allow|deny) ;;
     *) decision="deny"; [[ -n "$reason" ]] || reason="$ESCALATE_REASON" ;;
   esac
-  inner="\"hookEventName\":\"$(ab_json_escape "$event")\",\"permissionDecision\":\"$(ab_json_escape "$decision")\""
-  if [[ -n "$reason" ]]; then inner="${inner},\"permissionDecisionReason\":\"$(ab_json_escape "$reason")\""; fi
+  # Schema differs per event (verified against developers.openai.com/codex/hooks):
+  #   PreToolUse  -> hookSpecificOutput.permissionDecision (+ permissionDecisionReason)
+  #   PermissionRequest -> hookSpecificOutput.decision.behavior (+ message); it does NOT
+  #     honor permissionDecision, so emitting it there is a silent no-op (= fail-open on deny).
+  inner="\"hookEventName\":\"$(ab_json_escape "$event")\""
+  if [[ "$event" == "PermissionRequest" ]]; then
+    inner="${inner},\"decision\":{\"behavior\":\"$(ab_json_escape "$decision")\""
+    if [[ -n "$reason" ]]; then inner="${inner},\"message\":\"$(ab_json_escape "$reason")\""; fi
+    inner="${inner}}"
+  else
+    inner="${inner},\"permissionDecision\":\"$(ab_json_escape "$decision")\""
+    if [[ -n "$reason" ]]; then inner="${inner},\"permissionDecisionReason\":\"$(ab_json_escape "$reason")\""; fi
+  fi
   out="{\"hookSpecificOutput\":{${inner}}"
   if [[ -n "$approval_id" ]]; then out="${out},\"approval_id\":\"$(ab_json_escape "$approval_id")\""; fi
   out="${out}}"
