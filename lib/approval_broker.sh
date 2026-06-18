@@ -936,13 +936,29 @@ ab_cmd_install() {
 }
 
 ab_cmd_status() { # <root> <agent>
-  local root="$1" agent="$2" data
+  local root="$1" agent="$2" data status epoch now ttl age out
   data="$(ab_read_file "$(ab_broker_marker_path "$root" "$agent")")"
   if [[ -z "$data" ]]; then
     printf '{"agent":"%s","status":"unverified"}\n' "$(ab_json_escape "$agent")"
-  else
-    printf '%s\n' "$data"
+    return 0
   fi
+  status="$(ab_json_get_string "$data" status)"
+  # Freshness only ever downgrades a "ready" marker; fail-open/unverified pass through.
+  if [[ "$status" != "ready" ]]; then
+    printf '%s\n' "$data"
+    return 0
+  fi
+  ttl="${AGENT_DUO_BROKER_TTL:-60}"
+  [[ "$ttl" =~ ^-?[0-9]+$ ]] || ttl=60
+  now="$(date +%s)"
+  epoch="$(ab_json_get_int "$data" updated_epoch)"   # missing/invalid → "0" → stale
+  age=$(( now - epoch ))
+  if (( age > ttl )); then
+    out="$(printf '%s' "$data" | sed 's/"status":"ready"/"status":"stale"/')"
+  else
+    out="$data"
+  fi
+  printf '%s\n' "${out%\}},\"age_seconds\":${age}}"
 }
 
 ab_cmd_mark() { # <root> <agent> <status>
