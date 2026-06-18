@@ -516,7 +516,12 @@ case "$cmd" in
         echo "用法: peer broker-status <id>(多于两人时必须指定 id)" >&2; exit 1; }
     fi
     agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
-    run_approval_broker status --agent-id "$maybe_id" --root "$AGENT_DUO_ROOT"
+    bs_json="$(run_approval_broker status --agent-id "$maybe_id" --root "$AGENT_DUO_ROOT")"
+    printf '%s\n' "$bs_json"
+    case "$bs_json" in
+      *'"status":"ready"'*) ;;
+      *) echo "提示: '$maybe_id' broker 非 fresh ready,派发需 broker 保护的任务前请先 'peer broker-check $maybe_id'。" >&2 ;;
+    esac
     ;;
 
   broker-check)
