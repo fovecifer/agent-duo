@@ -300,6 +300,13 @@ assert_contains "hook: selfcheck probe reason" "$(cat "$OUT")" 'BROKER-SELFCHECK
 assert_not_contains "hook: selfcheck probe not pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
 assert_contains "broker: selfcheck marker records nonce" "$(broker_status)" '"nonce":"probe42"'
 assert_contains "broker: selfcheck marker is ready" "$(broker_status)" '"status":"ready"'
+
+# ① Marker carries session_id (forensic) and updated_epoch (for freshness).
+MARKER_FILE="$PROJECT/.agent-duo/state/worker/broker.json"
+run_hook '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"round":30,"session_id":"sess-abc123"}'
+assert_contains "broker: marker records session_id" "$(cat "$MARKER_FILE")" '"session_id":"sess-abc123"'
+assert_contains "broker: marker records updated_epoch" "$(cat "$MARKER_FILE")" '"updated_epoch":'
+
 APPROVALS_AFTER="$(ls "$PROJECT/.agent-duo/approvals"/*.json 2>/dev/null | wc -l | tr -d ' ')"
 assert_eq "hook: selfcheck creates no approval record" "$APPROVALS_AFTER" "$APPROVALS_BEFORE"
 assert_not_contains "hook: selfcheck enqueues no blocked event" \
