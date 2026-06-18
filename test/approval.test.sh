@@ -269,6 +269,16 @@ assert_ok "hook: permission request escalates with matching event" run_hook \
   '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"python permission-request.py"},"round":19}'
 assert_contains "hook: permission request output event" "$(cat "$OUT")" '"hookEventName":"PermissionRequest"'
 assert_contains "hook: permission request pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+# Codex honors only decision.behavior for PermissionRequest (permissionDecision is a no-op
+# there, unlike PreToolUse) — so a PermissionRequest deny must use the nested schema.
+assert_contains "hook: permission request deny uses decision.behavior" "$(cat "$OUT")" '"decision":{"behavior":"deny"'
+assert_not_contains "hook: permission request deny no permissionDecision" "$(cat "$OUT")" '"permissionDecision"'
+
+# And a PermissionRequest auto-allow must use decision.behavior=allow, not permissionDecision.
+assert_ok "hook: permission request allow path" run_hook \
+  '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls -la"},"round":19}'
+assert_contains "hook: permission request allow uses decision.behavior" "$(cat "$OUT")" '"decision":{"behavior":"allow"}'
+assert_not_contains "hook: permission request allow no permissionDecision" "$(cat "$OUT")" '"permissionDecision"'
 
 # Broker readiness marker (#9): proves the hook actually fired so the broker can be
 # gated fail-closed instead of silently fail-open when Codex hooks are untrusted.

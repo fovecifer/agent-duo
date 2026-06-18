@@ -329,6 +329,8 @@ Approval Broker 中的 `escalate` 对 Codex 应实现为：
 - `PermissionRequest` 作为 native approval prompt 的二级兜底。
 - 两者共用同一套 policy/lease/approval 状态，避免决策分叉。
 
+> **更新（2026-06-18）：两事件输出 schema 不同，曾发错 → 已修。** `PreToolUse` 用 `hookSpecificOutput.permissionDecision`，但 `PermissionRequest` **只认** `hookSpecificOutput.decision.behavior`（+ `message`）。broker 的 `ab_output` 原先对所有事件都发 `permissionDecision`，导致 PermissionRequest 的 deny 是 silent no-op（= 原生审批路径 fail-open）。已按事件分 schema 修复，并在 `test/approval.test.sh` 加回归。详见 [Codex hook 投递方案决策](./2026-06-18-codex-hook-delivery-decision.md) 的「⑥」节及 A 硬化 backlog。
+
 ### 4. `-c` 注入路线可以保留
 
 本次验证确认 `codex -c hooks...` 在交互式 CLI 中可用。因此 `start.sh` / `peer add` 暂时不必改成写项目 `.codex/config.toml`。
