@@ -51,3 +51,5 @@
 5. `peer add` 创建的是**可见的、长期存活的 peer 队友**(在新 tab 里,用户看得见,
    用 `peer ls`/`peer tell <id>` 与之交互),与第 2 条"派生无头子 agent(codex exec)"
    完全不同——前者是 agent-duo 工作台的一等成员,后者是临时零工。
+
+安全边界：Approval Broker 只覆盖由 `peer add` / `agent-duo-start --with` 注册的交互式 worker pane。当前验证下不要假设无头 `codex exec` 会触发 agent-duo 的 hook；如果任务需要 broker 保护，应派给可见 peer worker，而不是 spawn 无头 Codex。

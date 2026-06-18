@@ -265,6 +265,7 @@ if [[ -n "$WITH_SPEC" ]]; then
   else
     W_HOOK_CMD="$(jq -r '.codex.managed_hook_command' "$W_SETTINGS")"
     W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PreToolUse "$W_HOOK_CMD" "*")")"
+    W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PermissionRequest "$W_HOOK_CMD" "*")")"
   fi
   W_ID_Q="$(shell_quote "$W_ROLE")"
   APPROVAL_HOOK_Q="$(shell_quote "$APPROVAL_HOOK")"
@@ -288,3 +289,8 @@ cat <<EOF
 结束会话:
     tmux kill-session -t $SESSION
 EOF
+
+if [[ "$SUPERVISOR_PROVIDER" == "codex" || "${WITH_PROVIDER:-}" == "codex" ]]; then
+  echo
+  echo "Codex hook 提示: 若 Codex 启动时提示 hooks need review，请在该 Codex pane 内运行 /hooks 并信任 agent-duo hook；未信任前不要假设 Approval Broker 已生效。"
+fi

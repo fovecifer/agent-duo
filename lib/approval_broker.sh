@@ -67,7 +67,7 @@ ab_require_jq() {
   if command -v jq >/dev/null 2>&1; then
     return 0
   fi
-  printf '{"decision":"deny","reason":"DENIED-BY-POLICY: approval broker requires jq for safe JSON parsing."}\n'
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DENIED-BY-POLICY: approval broker requires jq for safe JSON parsing."}}\n'
   exit 0
 }
 
@@ -226,6 +226,14 @@ ab_payload_cwd() {
   cwd="$(ab_json_get_string "$payload" cwd)"
   if [[ -z "$cwd" ]]; then cwd="$PWD"; fi
   ab_abs_path "$cwd" "$PWD"
+}
+
+ab_payload_event_name() {
+  local payload="$1" event
+  event="$(ab_json_get_string "$payload" hook_event_name)"
+  if [[ -z "$event" ]]; then event="$(ab_json_get_string "$payload" hookEventName)"; fi
+  if [[ -z "$event" ]]; then event="PreToolUse"; fi
+  printf '%s' "$event"
 }
 
 ab_agent_id() {
@@ -417,6 +425,8 @@ ab_request_summary() {
   local tool="$1" command="$2" path="$3"
   if [[ "$tool" == "Bash" ]]; then
     printf 'Bash: %s' "$(ab_oneline "$command")"
+  elif [[ "$tool" == "apply_patch" ]]; then
+    printf 'apply_patch: %s' "$(ab_oneline "$command")"
   elif [[ -n "$path" ]]; then
     printf '%s: %s' "$tool" "$(ab_oneline "$path")"
   else
@@ -426,7 +436,7 @@ ab_request_summary() {
 
 ab_fingerprint() {
   local agent="$1" tool="$2" cwd="$3" command="$4" raw_path="$5" mcp="$6" resolved
-  if [[ "$tool" == "Bash" ]]; then
+  if [[ "$tool" == "Bash" || "$tool" == "apply_patch" ]]; then
     ab_sha256_string "agent=$agent|tool=$tool|cwd=$cwd|command=$command"
   elif [[ -n "$raw_path" ]]; then
     resolved="$(ab_abs_path "$raw_path" "$cwd")"
@@ -469,7 +479,7 @@ ab_approval_id() {
 
 ab_tool_input_json() { # <tool> <command> <cwd> <raw_path>
   local tool="$1" command="$2" cwd="$3" raw_path="$4" resolved
-  if [[ "$tool" == "Bash" ]]; then
+  if [[ "$tool" == "Bash" || "$tool" == "apply_patch" ]]; then
     printf '{'
     ab_json_field command "$command"
     printf ','
@@ -526,7 +536,7 @@ ab_append_audit() {
   local line
   line="{\"ts\":\"$(ab_iso_ts)\",\"agent\":\"$(ab_json_escape "$agent")\",\"tool\":\"$(ab_json_escape "$tool")\","
   line="${line}\"cmd\":"
-  if [[ "$tool" == "Bash" ]]; then line="${line}$(ab_json_str "$command")"; else line="${line}null"; fi
+  if [[ "$tool" == "Bash" || "$tool" == "apply_patch" ]]; then line="${line}$(ab_json_str "$command")"; else line="${line}null"; fi
   line="${line},\"path\":"
   if [[ -n "$raw_path" ]]; then line="${line}$(ab_json_str "$raw_path")"; else line="${line}null"; fi
   line="${line},\"cwd\":\"$(ab_json_escape "$cwd")\",\"decision\":\"$(ab_json_escape "$decision")\","
@@ -566,19 +576,57 @@ ab_append_blocked_event() {
   ab_append_jsonl "$(ab_events_dir "$root")/queue.jsonl" "$line"
 }
 
-ab_output() { # <decision:allow|deny|ask> [reason] [approval_id]
-  local decision="$1" reason="${2:-}" approval_id="${3:-}" inner out
-  # PreToolUse output schema honored by BOTH Claude Code and Codex:
-  # hookSpecificOutput.permissionDecision = allow|deny|ask (+ permissionDecisionReason).
+ab_output() { # <decision:allow|deny> [reason] [approval_id]
+  local decision="$1" reason="${2:-}" approval_id="${3:-}" event inner out
+  event="${AB_HOOK_EVENT_NAME:-PreToolUse}"
+  # Codex output schema:
+  # hookSpecificOutput.permissionDecision = allow|deny (+ permissionDecisionReason).
   # The older top-level {"decision":"allow|deny"} is NOT recognized by Codex (it expects
   # permissionDecision, or legacy "decision":"block"), so the broker never actually
   # allowed/denied on Codex. See docs: https://developers.openai.com/codex/hooks
-  inner="\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"$(ab_json_escape "$decision")\""
+  # Codex parses permissionDecision=ask but currently treats it as unsupported, reports
+  # a hook failure, and continues the tool call. Unknown cases must therefore escalate
+  # as deny instead of ask.
+  case "$decision" in
+    allow|deny) ;;
+    *) decision="deny"; [[ -n "$reason" ]] || reason="$ESCALATE_REASON" ;;
+  esac
+  inner="\"hookEventName\":\"$(ab_json_escape "$event")\",\"permissionDecision\":\"$(ab_json_escape "$decision")\""
   if [[ -n "$reason" ]]; then inner="${inner},\"permissionDecisionReason\":\"$(ab_json_escape "$reason")\""; fi
   out="{\"hookSpecificOutput\":{${inner}}"
   if [[ -n "$approval_id" ]]; then out="${out},\"approval_id\":\"$(ab_json_escape "$approval_id")\""; fi
   out="${out}}"
   printf '%s\n' "$out"
+}
+
+ab_apply_patch_policy() { # <patch-command> <cwd> <worktree-root>; sets AB_OUTCOME AB_MATCHED AB_REASON
+  local patch="$1" cwd="$2" wt_root="$3" line raw_path resolved any
+  any=0
+  while IFS= read -r line; do
+    raw_path=""
+    case "$line" in
+      '*** Add File: '*) raw_path="${line#'*** Add File: '}" ;;
+      '*** Update File: '*) raw_path="${line#'*** Update File: '}" ;;
+      '*** Delete File: '*) raw_path="${line#'*** Delete File: '}" ;;
+      '*** Move to: '*) raw_path="${line#'*** Move to: '}" ;;
+      *) continue ;;
+    esac
+    any=1
+    if [[ -z "$raw_path" ]]; then AB_OUTCOME="escalate"; AB_MATCHED="path.missing"; AB_REASON="$ESCALATE_REASON"; return 0; fi
+    if ab_path_mentions_secret "$raw_path"; then AB_OUTCOME="hard-deny"; AB_MATCHED="deny.secret_path"; AB_REASON="$HARD_DENY_REASON"; return 0; fi
+    resolved="$(ab_abs_path "$raw_path" "$cwd")"
+    if ab_path_mentions_secret "$resolved"; then AB_OUTCOME="hard-deny"; AB_MATCHED="deny.secret_path"; AB_REASON="$HARD_DENY_REASON"; return 0; fi
+    if ! ab_is_inside "$resolved" "$wt_root"; then
+      AB_OUTCOME="escalate"; AB_MATCHED="path.outside_worktree"; AB_REASON="$ESCALATE_REASON"; return 0
+    fi
+  done <<EOF
+$patch
+EOF
+  if [[ "$any" == "1" ]]; then
+    AB_OUTCOME="auto-allow"; AB_MATCHED="allow.worktree_patch"; AB_REASON="allow"
+  else
+    AB_OUTCOME="escalate"; AB_MATCHED="path.missing"; AB_REASON="$ESCALATE_REASON"
+  fi
 }
 
 ab_evaluate_policy() {
@@ -587,7 +635,7 @@ ab_evaluate_policy() {
   AB_OUTCOME=""
   AB_MATCHED=""
   AB_REASON=""
-  if [[ -z "$tool" ]]; then AB_OUTCOME="ask"; AB_MATCHED="tool.unknown"; AB_REASON="ask"; return 0; fi
+  if [[ -z "$tool" ]]; then AB_OUTCOME="escalate"; AB_MATCHED="tool.unknown"; AB_REASON="$ESCALATE_REASON"; return 0; fi
   if [[ "$tool" == "Bash" ]]; then
     while IFS= read -r segment; do
       trimmed="$(ab_trim "$segment")"
@@ -628,6 +676,10 @@ EOF
   fi
 
   case "$tool" in
+    apply_patch)
+      ab_apply_patch_policy "$command" "$cwd" "$wt_root"
+      return 0
+      ;;
     Edit|Write|MultiEdit)
       if [[ -z "$raw_path" ]]; then AB_OUTCOME="escalate"; AB_MATCHED="path.missing"; AB_REASON="$ESCALATE_REASON"; return 0; fi
       if ab_path_mentions_secret "$raw_path"; then AB_OUTCOME="hard-deny"; AB_MATCHED="deny.secret_path"; AB_REASON="$HARD_DENY_REASON"; return 0; fi
@@ -646,7 +698,7 @@ EOF
     ab_mcp_policy "$tool"
     return 0
   fi
-  AB_OUTCOME="ask"; AB_MATCHED="tool.unmanaged"; AB_REASON="ask"
+  AB_OUTCOME="escalate"; AB_MATCHED="tool.unmanaged"; AB_REASON="$ESCALATE_REASON"
 }
 
 ab_set_approval_fields() { # <root> <id> <status> [extra-json-fragment-with-leading-comma]
@@ -666,6 +718,7 @@ ab_set_approval_fields() { # <root> <id> <status> [extra-json-fragment-with-lead
 ab_run_hook() {
   local payload root agent tool command raw_path cwd wt_root round fingerprint existing_status summary
   payload="$(cat)"
+  AB_HOOK_EVENT_NAME="$(ab_payload_event_name "$payload")"
   root="$(ab_root)"
   agent="$(ab_agent_id "$payload")"
   tool="$(ab_payload_tool "$payload")"
@@ -719,8 +772,13 @@ ab_run_hook() {
     return 0
   fi
 
-  ab_append_audit "$root" "$agent" "$tool" "$command" "$raw_path" "$cwd" "ask" "$AB_MATCHED" "" "" ""
-  ab_output ask
+  AB_MATCHED="${AB_MATCHED:-policy.unexpected}"
+  AB_REASON="${AB_REASON:-$ESCALATE_REASON}"
+  summary="$(ab_request_summary "$tool" "$command" "$raw_path")"
+  ab_create_or_reuse_approval "$root" "$agent" "$round" "pending" "escalate" "$AB_MATCHED" "$AB_REASON" "$tool" "$command" "$cwd" "$raw_path" "$fingerprint" "$summary"
+  ab_append_blocked_event "$root" "$AB_APPROVAL_DATA"
+  ab_append_audit "$root" "$agent" "$tool" "$command" "$raw_path" "$cwd" "escalate" "$AB_MATCHED" "$AB_REASON" "$AB_APPROVAL_ID" ""
+  ab_output deny "$AB_REASON" "$AB_APPROVAL_ID"
 }
 
 ab_cmd_list() {
@@ -806,7 +864,8 @@ ab_cmd_install() {
   settings="${settings}\"provider\":\"$(ab_json_escape "$provider")\",\"hook\":\"$(ab_json_escape "$hook")\","
   settings="${settings}\"worktree\":\"$(ab_json_escape "$worktree")\","
   settings="${settings}\"positioning\":\"allowlist=UX; safety=worktree+denylist+escalate\"},"
-  settings="${settings}\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"$(ab_json_escape "$command")\"}]}]},"
+  settings="${settings}\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"$(ab_json_escape "$command")\"}]}],"
+  settings="${settings}\"PermissionRequest\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"$(ab_json_escape "$command")\"}]}]},"
   settings="${settings}\"codex\":{\"managed_hook_command\":\"$(ab_json_escape "$command")\","
   settings="${settings}\"trust_note\":\"Project-local testable hook metadata; actual Codex trust is handled by the host CLI.\"}}"
   ab_write_file_atomic "$settings_path" "$settings"

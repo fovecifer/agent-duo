@@ -176,6 +176,7 @@ assert_ok        "H: worker settings created" test -f "$PROJECT/.agent-duo/state
 assert_contains  "H: worker exports approval settings" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_SETTINGS='
 assert_contains  "H: worker exports approval hook" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_HOOK='
 assert_contains  "H: codex worker has pretool hook config" "$(cat "$SENDLOG")" 'hooks.PreToolUse'
+assert_contains  "H: codex worker has permission hook config" "$(cat "$SENDLOG")" 'hooks.PermissionRequest'
 teardown
 
 # 场景 I:--with claude:reviewer → worker settings 进入 Claude 启动参数。

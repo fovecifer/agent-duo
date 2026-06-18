@@ -485,6 +485,7 @@ case "$cmd" in
     else
       hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
       launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
+      launch="$launch -c $(printf '%q' "$(codex_hook_config PermissionRequest "$hook_command" "*")")"
     fi
     bin_dir="$(dirname "$PEER_SRC")"
     root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
@@ -495,6 +496,9 @@ case "$cmd" in
     tmux send-keys -t "$new_pane" \
       "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
     echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
+    if [[ "$provider" == "codex" ]]; then
+      echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook；未信任前不要假设 Approval Broker 已生效。"
+    fi
     ;;
 
   peek)

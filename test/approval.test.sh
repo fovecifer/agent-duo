@@ -229,6 +229,47 @@ assert_ok "hook: mcp write deny" run_hook \
   '{"tool_name":"mcp__github__merge_pull_request","tool_input":{},"round":14}'
 assert_contains "hook: mcp write deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 
+# Codex reports file edits through canonical apply_patch, not Claude-style Edit/Write.
+assert_ok "hook: apply_patch inside worktree allowed" run_hook \
+  '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: src/new.txt\n+hello\n*** End Patch"},"round":15}'
+assert_contains "hook: apply_patch inside decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_contains "hook: apply_patch audit keeps command" "$(cat "$PROJECT/.agent-duo/logs/approvals.jsonl")" 'src/new.txt'
+
+assert_ok "hook: apply_patch outside worktree escalates" run_hook \
+  '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: ../outside.txt\n@@\n+hello\n*** End Patch"},"round":16}'
+assert_contains "hook: apply_patch outside pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: apply_patch outside not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+outside_patch_id="$(latest_approval_id)"
+assert_contains "hook: apply_patch approval keeps command" "$(cat "$PROJECT/.agent-duo/approvals/$outside_patch_id.json")" '../outside.txt'
+
+assert_ok "hook: apply_patch secret hard-denies" run_hook \
+  '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: .env\n+TOKEN=x\n*** End Patch"},"round":17}'
+assert_contains "hook: apply_patch secret deny" "$(cat "$OUT")" 'DENIED-BY-POLICY'
+
+PATCH_FP_PROJECT="$TMP/patch-fingerprint"
+mkdir -p "$PATCH_FP_PROJECT"
+patch_fp_hook() {
+  printf '%s' "$1" | \
+    AGENT_DUO_ROOT="$PATCH_FP_PROJECT" AGENT_DUO_AGENT_ID="worker" AGENT_DUO_WORKTREE="$PATCH_FP_PROJECT" \
+    "$ROOT/bin/agent-duo-approval-hook" >/dev/null 2>&1
+}
+patch_fp_hook '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: ../one.txt\n@@\n+one\n*** End Patch"},"round":17}'
+patch_fp_hook '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: ../two.txt\n@@\n+two\n*** End Patch"},"round":17}'
+assert_eq "hook: apply_patch fingerprint includes command" \
+  "$(ls "$PATCH_FP_PROJECT/.agent-duo/approvals"/*.json | wc -l | tr -d ' ')" "2"
+
+# Codex PreToolUse does not support permissionDecision=ask; unknown tools must escalate.
+assert_ok "hook: unmanaged tool escalates instead of ask" run_hook \
+  '{"tool_name":"UnmanagedTool","tool_input":{},"round":18}'
+assert_contains "hook: unmanaged tool pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: unmanaged tool no unsupported ask" "$(cat "$OUT")" '"permissionDecision":"ask"'
+
+# PermissionRequest reuses the same broker policy but must return its own event name.
+assert_ok "hook: permission request escalates with matching event" run_hook \
+  '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"python permission-request.py"},"round":19}'
+assert_contains "hook: permission request output event" "$(cat "$OUT")" '"hookEventName":"PermissionRequest"'
+assert_contains "hook: permission request pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+
 # peer add installs per-agent broker session settings and exports hook env into the worker session.
 STUB_BIN="$TMP/stub-bin"
 mkdir -p "$STUB_BIN"
@@ -264,10 +305,12 @@ assert_ok "peer add: installs approval hook settings" \
 SETTINGS="$PROJECT/.agent-duo/state/worker/session-settings.json"
 assert_ok "peer add: settings file exists" test -f "$SETTINGS"
 assert_contains "peer add: settings contains hook" "$(cat "$SETTINGS")" 'PreToolUse'
+assert_contains "peer add: settings contains permission hook" "$(cat "$SETTINGS")" 'PermissionRequest'
 assert_contains "peer add: settings contains hook command" "$(cat "$SETTINGS")" 'agent-duo-approval-hook'
 assert_contains "peer add: send exports hook" "$(cat "$TMUX_LOG")" 'AGENT_DUO_APPROVAL_HOOK='
 assert_contains "peer add: send exports worker id" "$(cat "$TMUX_LOG")" 'AGENT_DUO_AGENT_ID=worker'
 assert_contains "peer add: codex send has hook config" "$(cat "$TMUX_LOG")" 'hooks.PreToolUse'
+assert_contains "peer add: codex send has permission hook config" "$(cat "$TMUX_LOG")" 'hooks.PermissionRequest'
 
 : > "$TMUX_LOG"
 assert_ok "peer add claude: loads approval settings" \

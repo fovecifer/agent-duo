@@ -318,7 +318,7 @@ peer deny
 2. prompt hash 未变化，避免观察后界面被替换。
 3. 命令和上下文命中 allow policy。
 
-> **更新（2026-06-17）：优先用 hook 实现，而非抓屏+回车。** Claude Code 与 Codex 都提供 `PreToolUse` / `PermissionRequest` hook，能**程序化 allow/deny 工具调用**（返回 `permissionDecision`/`decision.behavior`）。因此 Approval Broker 应做成 worker session 上的 hook：工具执行前触发 → 脚本查 policy → 返回放行/拒绝/交回人工。这比"识别权限 UI + 校验 prompt hash + 发 Enter"更机械、可审计、不依赖屏幕渲染，且 Claude/Codex 通用。详见 [loop runtime 设计](docs/superpowers/specs/2026-06-17-loop-runtime-design.md) 与 [worker↔supervisor 契约](docs/superpowers/specs/2026-06-17-worker-supervisor-contract.md)。
+> **更新（2026-06-18）：优先用 hook 实现，而非抓屏+回车。** Claude Code 与 Codex 都提供能程序化 `allow/deny` 工具调用的 hook；Codex 侧主入口是 `PreToolUse`，`PermissionRequest` 用来接管原生权限 prompt。Approval Broker 应做成 worker session 上的 hook：工具执行前触发 → 脚本查 policy → 返回放行/拒绝；需要人工判断时写 pending approval + `blocked` 事件并返回 `deny`，不能依赖 Codex `ask`。这比"识别权限 UI + 校验 prompt hash + 发 Enter"更机械、可审计、不依赖屏幕渲染。详见 [Approval Broker 设计](docs/superpowers/specs/2026-06-17-approval-broker-design.md)、[loop runtime 设计](docs/superpowers/specs/2026-06-17-loop-runtime-design.md) 与 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-validation.md)。
 
 ## Human Decision Gate
 
@@ -995,7 +995,7 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 
 第一阶段不需要一下子做完整多 Agent 平台，可以做一个小而硬的版本：
 
-> **更新（2026-06-17）：MVP 1 / 2 已细化为 hook 方案，见 [Approval Broker 设计](docs/superpowers/specs/2026-06-17-approval-broker-design.md)。** 下面要点中"检查 prompt hash / 抓屏"已被 worker session 的 `PreToolUse` hook 取代（工具执行前进程内 allow/deny/ask，不再抓屏）。
+> **更新（2026-06-18）：MVP 1 / 2 已细化为 hook 方案，见 [Approval Broker 设计](docs/superpowers/specs/2026-06-17-approval-broker-design.md)。** 下面要点中"检查 prompt hash / 抓屏"已被 worker session 的 `PreToolUse` hook 取代；Codex 侧升级人工确认不是 `ask`，而是 `deny + pending approval + blocked event`。
 
 ### MVP 1：安全 approve
 

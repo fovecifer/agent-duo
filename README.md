@@ -23,7 +23,7 @@ You say one sentence; the supervisor can add or address a worker, wait, and repo
 - ⌨️ **They talk to each other** — `peer tell` types into the other agent's input box; `peer wait` waits for it to finish
 - 🧑‍⚖️ **You stay in charge** — every exchange starts from your instruction; no unsupervised agent-to-agent chatter
 
-Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / `claude -p`), `peer` talks to the **actual interactive session you are looking at** — full context preserved, nothing hidden.
+Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / `claude -p`), `peer` talks to the **actual interactive session you are looking at** — full context preserved, nothing hidden. agent-duo safety hooks are scoped to registered interactive worker panes; do not assume a headless `codex exec` subprocess is protected by the Approval Broker.
 
 ## How it works
 

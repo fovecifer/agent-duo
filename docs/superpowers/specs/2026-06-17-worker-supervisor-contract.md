@@ -126,7 +126,16 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 - `scope` → supervisor `reframe`
 - `discovery` → **不是要放行，而是"我发现了可能掀桌子的东西"** → supervisor 重规划，**不得降级成按个 yes**
 
-### 2.3 task.json（持久化的 step ledger，多步骤任务的共享真相）
+### 2.3 Hook-originated blocked event（Approval Broker）
+
+权限类阻塞有两种入口：
+
+1. worker 主动调用 `peer report --type request --status blocked --needs approval ...`；
+2. Approval Broker hook 在工具执行前返回 `deny`，同时写 `.agent-duo/approvals/<id>.json` 并向 `.agent-duo/events/queue.jsonl` 追加 `type=blocked` 事件。
+
+第 2 种是 Codex `escalate` 的 canonical 路径，因为 Codex `PreToolUse` 不支持用 `ask` 升级人工确认。worker 看到 `BLOCKED-PENDING-APPROVAL` 后仍应停下等待，但 supervisor/loop 不应依赖模型再补一条 `peer report`；hook 入队事件本身就足以触发审批流程。若 worker 也补报，runtime 以 `agent + round + summary/ref` 幂等合并，避免重复审批。
+
+### 2.4 task.json（持久化的 step ledger，多步骤任务的共享真相）
 
 `assign` 下发或 worker `plan` 回写后由 supervisor `proceed` 冻结。状态落盘，使得即便 worker 换 session / 被 handoff 也不丢进度。
 
@@ -144,7 +153,7 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 
 步骤状态：`pending | in_progress | blocked | done | failed | kept`（`kept` 见重规划）。每个 `done` 步各自带 evidence。
 
-### 2.4 acceptance（验收组合规则，写进 loop contract）
+### 2.5 acceptance（验收组合规则，写进 loop contract）
 
 ```yaml
 acceptance:
@@ -293,7 +302,7 @@ supervisor:    accept worker-impl                       → done
 
 ## 7. 多步骤任务 + 反复 stall
 
-消息层面，"卡 N 次、每次找不同的人"通过 `request(阻塞) → 处理 → proceed` 循环即可，`needs[]` 可同时带多个诉求并按 `kind` 路由。缺的不是这个，而是**任务的步骤粒度状态**（见 §2.3 task.json）。
+消息层面，"卡 N 次、每次找不同的人"通过 `request(阻塞) → 处理 → proceed` 循环即可，`needs[]` 可同时带多个诉求并按 `kind` 路由。缺的不是这个，而是**任务的步骤粒度状态**（见 §2.4 task.json）。
 
 ### 三条保证
 
