@@ -556,4 +556,52 @@ TMUX_STUB_HAS_SESSION=0 assert_not_ok "missing session: status fails" run_peer s
 assert_contains "missing session: status error" "$(cat "$ERR")" "tmux 会话 'agents' 不存在"
 teardown
 
+# broker-status:无 marker 时报 unverified。
+setup
+assert_ok "broker-status: succeeds" run_peer broker-status worker
+assert_contains "broker-status: unverified default" "$(cat "$OUT")" '"status":"unverified"'
+teardown
+
+# broker-status:已有 ready marker 时如实回报。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","nonce":"n1"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
+assert_ok "broker-status: reads marker" run_peer broker-status worker
+assert_contains "broker-status: ready reported" "$(cat "$OUT")" '"status":"ready"'
+teardown
+
+# broker-check:投递自检探针(带 sentinel+nonce),未匹配时标记 fail-open 并非零退出。
+setup
+AGENT_DUO_BROKER_CHECK_TIMEOUT=2 assert_exit_code "broker-check: fail-open when hook never fires" 1 \
+  run_peer broker-check worker --nonce fixednonce
+assert_contains "broker-check: probe carries sentinel+nonce" \
+  "$(cat "$TMUX_STUB_BUFFER_DIR/peer-brokercheck-worker")" 'AGENT_DUO_BROKER_SELFCHECK_fixednonce'
+assert_contains "broker-check: warns fail-open" "$(cat "$ERR")" 'FAIL-OPEN'
+assert_contains "broker-check: marker set fail-open" \
+  "$(cat "$PROJECT/.agent-duo/state/worker/broker.json")" '"status":"fail-open"'
+teardown
+
+# broker-check:marker 已是 ready+匹配 nonce → 报 READY 并零退出。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","nonce":"fixednonce"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
+AGENT_DUO_BROKER_CHECK_TIMEOUT=3 assert_ok "broker-check: ready when marker matches nonce" \
+  run_peer broker-check worker --nonce fixednonce
+assert_contains "broker-check: reports READY" "$(cat "$OUT")" 'READY'
+teardown
+
+# broker-check:旧 marker 的 nonce 不匹配本次探针 → 不算通过(fail-open)。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","nonce":"stale"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
+AGENT_DUO_BROKER_CHECK_TIMEOUT=2 assert_exit_code "broker-check: stale nonce is not a pass" 1 \
+  run_peer broker-check worker --nonce freshnonce
+teardown
+
+# broker-check:未知 id 报错。
+setup
+assert_not_ok "broker-check: unknown id" run_peer broker-check ghost
+assert_contains "broker-check: unknown error" "$(cat "$ERR")" "找不到 agent 'ghost'"
+teardown
+
 exit "$ADK_FAIL"

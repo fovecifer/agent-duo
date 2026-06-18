@@ -270,6 +270,35 @@ assert_ok "hook: permission request escalates with matching event" run_hook \
 assert_contains "hook: permission request output event" "$(cat "$OUT")" '"hookEventName":"PermissionRequest"'
 assert_contains "hook: permission request pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
 
+# Broker readiness marker (#9): proves the hook actually fired so the broker can be
+# gated fail-closed instead of silently fail-open when Codex hooks are untrusted.
+broker_status() { bash "$ROOT/lib/approval_broker.sh" status --root "$PROJECT" --agent-id "worker"; }
+
+# status before any hook invocation → unverified.
+rm -rf "$PROJECT/.agent-duo/state/worker/broker.json"
+assert_contains "broker: status unverified before any hook" "$(broker_status)" '"status":"unverified"'
+
+# Any organic hook call writes a ready heartbeat (Codex called us → broker active).
+run_hook '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"round":20}'
+assert_contains "broker: heartbeat flips status to ready" "$(broker_status)" '"status":"ready"'
+
+# Self-check probe: denied by design, records nonce, but creates NO approval/blocked event.
+APPROVALS_BEFORE="$(ls "$PROJECT/.agent-duo/approvals"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+run_hook '{"tool_name":"Bash","tool_input":{"command":"printf ok > AGENT_DUO_BROKER_SELFCHECK_probe42.tmp"},"round":21}'
+assert_contains "hook: selfcheck probe is denied" "$(cat "$OUT")" '"permissionDecision":"deny"'
+assert_contains "hook: selfcheck probe reason" "$(cat "$OUT")" 'BROKER-SELFCHECK'
+assert_not_contains "hook: selfcheck probe not pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_contains "broker: selfcheck marker records nonce" "$(broker_status)" '"nonce":"probe42"'
+assert_contains "broker: selfcheck marker is ready" "$(broker_status)" '"status":"ready"'
+APPROVALS_AFTER="$(ls "$PROJECT/.agent-duo/approvals"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "hook: selfcheck creates no approval record" "$APPROVALS_AFTER" "$APPROVALS_BEFORE"
+assert_not_contains "hook: selfcheck enqueues no blocked event" \
+  "$(cat "$PROJECT/.agent-duo/events/queue.jsonl" 2>/dev/null || true)" 'AGENT_DUO_BROKER_SELFCHECK'
+
+# mark sets an explicit fail-open state (used by `peer broker-check` on timeout).
+bash "$ROOT/lib/approval_broker.sh" mark --root "$PROJECT" --agent-id "worker" --status fail-open >/dev/null
+assert_contains "broker: mark sets fail-open" "$(broker_status)" '"status":"fail-open"'
+
 # peer add installs per-agent broker session settings and exports hook env into the worker session.
 STUB_BIN="$TMP/stub-bin"
 mkdir -p "$STUB_BIN"

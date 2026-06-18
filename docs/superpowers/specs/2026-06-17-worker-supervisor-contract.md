@@ -166,6 +166,15 @@ acceptance:
   policy: no_blocking_findings   # 或 all_approve
 ```
 
+### 2.6 broker 就绪门控（issue #9）
+
+Approval Broker 只在 hook 被 provider **实际调用**时才生效。Codex 非托管 hook 未信任时 fail-open（hook 不运行、工具照常执行），所以「派了 worker」不等于「该 worker 被 broker 保护」。
+
+- 每个 worker 有一个就绪状态：`ready | unverified | fail-open`，落在 `.agent-duo/state/<agent>/broker.json`，由 hook 自身/自检写入（见 [Approval Broker 设计](./2026-06-17-approval-broker-design.md) §7.1）。
+- **supervisor 在派发需要 broker 保护的任务前，必须先确认目标 worker 为 `ready`**：用 `peer broker-check <id>` 主动自检，或 `peer broker-status <id>` 读状态。
+- `unverified` / `fail-open` 的 worker **不得**承接需要审批闸的任务；应先让用户在该 pane 内信任 hook（`/hooks`）并重跑 `peer broker-check`，或改派给已 `ready` 的 worker。
+- 这是 fail-closed 原则：宁可不派，也不要把保护性任务交给一个 broker 实际没生效的 worker。
+
 ---
 
 ## 3. 阻塞规则（协议的心脏）

@@ -5,6 +5,11 @@ set -euo pipefail
 
 ESCALATE_REASON="BLOCKED-PENDING-APPROVAL: 需 supervisor/人批准；报 blocked 并等待，勿另寻他法。"
 HARD_DENY_REASON="DENIED-BY-POLICY: 禁止；勿重试；改走他法或报 blocked-on-policy。"
+# Broker self-check: a probe whose command/path carries this sentinel is denied by
+# design and ONLY used to prove the hook actually fired (i.e. Codex trusted it).
+# It never creates an approval or blocked event — see ab_run_hook + `peer broker-check`.
+SELFCHECK_SENTINEL="AGENT_DUO_BROKER_SELFCHECK"
+SELFCHECK_REASON="BROKER-SELFCHECK: 探针被设计性拒绝；broker 已生效，无需重试。"
 
 ab_root() {
   local root="${AGENT_DUO_ROOT:-$PWD}"
@@ -16,6 +21,7 @@ ab_approvals_dir() { printf '%s/approvals' "$(ab_duo_dir "$1")"; }
 ab_logs_dir() { printf '%s/logs' "$(ab_duo_dir "$1")"; }
 ab_events_dir() { printf '%s/events' "$(ab_duo_dir "$1")"; }
 ab_state_dir() { printf '%s/state' "$(ab_duo_dir "$1")"; }
+ab_broker_marker_path() { printf '%s/%s/broker.json' "$(ab_state_dir "$1")" "$2"; } # <root> <agent>
 
 ab_iso_ts() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -715,8 +721,36 @@ ab_set_approval_fields() { # <root> <id> <status> [extra-json-fragment-with-lead
   AB_APPROVAL_DATA="$data"
 }
 
+# Liveness/readiness marker: proof that Codex actually invoked our hook (= trusted it).
+# Written on every hook call so organic tool use also flips the worker to "ready".
+ab_write_broker_marker() { # <root> <agent> <status> [nonce] [decision]
+  local root="$1" agent="$2" status="$3" nonce="${4:-}" decision="${5:-}" path data
+  [[ -n "$agent" ]] || agent="unknown"
+  path="$(ab_broker_marker_path "$root" "$agent")"
+  data="{\"agent\":\"$(ab_json_escape "$agent")\",\"status\":\"$(ab_json_escape "$status")\""
+  data="${data},\"updated_at\":\"$(ab_iso_ts)\""
+  if [[ -n "$nonce" ]]; then data="${data},\"nonce\":\"$(ab_json_escape "$nonce")\""; fi
+  if [[ -n "$decision" ]]; then data="${data},\"last_decision\":\"$(ab_json_escape "$decision")\""; fi
+  data="${data}}"
+  ab_write_file_atomic "$path" "$data"
+}
+
+# If the command/path carries the self-check sentinel, return the probe nonce (the token
+# right after the sentinel); empty otherwise. Sentinel form: AGENT_DUO_BROKER_SELFCHECK_<nonce>.
+ab_selfcheck_nonce() { # <command> <raw_path>
+  local hay="$1 $2" rest nonce
+  case "$hay" in
+    *"$SELFCHECK_SENTINEL"_*) ;;
+    *) return 0 ;;
+  esac
+  rest="${hay#*${SELFCHECK_SENTINEL}_}"
+  # nonce = leading run of [A-Za-z0-9] after the underscore.
+  nonce="$(printf '%s' "$rest" | LC_ALL=C sed 's/[^A-Za-z0-9].*$//')"
+  printf '%s' "$nonce"
+}
+
 ab_run_hook() {
-  local payload root agent tool command raw_path cwd wt_root round fingerprint existing_status summary
+  local payload root agent tool command raw_path cwd wt_root round fingerprint existing_status summary nonce
   payload="$(cat)"
   AB_HOOK_EVENT_NAME="$(ab_payload_event_name "$payload")"
   root="$(ab_root)"
@@ -728,6 +762,18 @@ ab_run_hook() {
   wt_root="$(ab_worktree_root "$payload" "$cwd")"
   round="$(ab_round "$payload")"
   fingerprint="$(ab_fingerprint "$agent" "$tool" "$cwd" "$command" "$raw_path" "$tool")"
+
+  # Self-check probe: prove the hook fired without creating an approval/blocked event.
+  nonce="$(ab_selfcheck_nonce "$command" "$raw_path")"
+  if [[ -n "$nonce" ]]; then
+    ab_write_broker_marker "$root" "$agent" "ready" "$nonce" "selfcheck"
+    ab_append_audit "$root" "$agent" "$tool" "$command" "$raw_path" "$cwd" "selfcheck" "broker.selfcheck" "$SELFCHECK_REASON" "" ""
+    ab_output deny "$SELFCHECK_REASON"
+    return 0
+  fi
+
+  # Heartbeat: any real invocation means Codex called us → broker is active for this agent.
+  ab_write_broker_marker "$root" "$agent" "ready" "" ""
 
   ab_find_existing_approval "$root" "$fingerprint"
   ab_evaluate_policy "$payload" "$root" "$agent" "$tool" "$command" "$raw_path" "$cwd" "$wt_root"
@@ -872,13 +918,35 @@ ab_cmd_install() {
   printf '%s\n' "$settings_path"
 }
 
+ab_cmd_status() { # <root> <agent>
+  local root="$1" agent="$2" data
+  data="$(ab_read_file "$(ab_broker_marker_path "$root" "$agent")")"
+  if [[ -z "$data" ]]; then
+    printf '{"agent":"%s","status":"unverified"}\n' "$(ab_json_escape "$agent")"
+  else
+    printf '%s\n' "$data"
+  fi
+}
+
+ab_cmd_mark() { # <root> <agent> <status>
+  ab_write_broker_marker "$root" "$agent" "$3" "" ""
+  ab_broker_marker_path "$root" "$agent"
+  printf '\n'
+}
+
+# Print the benign shell command a worker should run so the hook records a self-check.
+# Single source of truth for the sentinel so `peer broker-check` stays in sync.
+ab_cmd_selfcheck_cmd() { # <nonce>
+  printf 'printf agent-duo-broker-check > %s_%s.tmp\n' "$SELFCHECK_SENTINEL" "$1"
+}
+
 ab_usage() {
-  echo "用法: approval_broker.sh <hook|list|approve|deny|install>" >&2
+  echo "用法: approval_broker.sh <hook|list|approve|deny|install|status|mark>" >&2
   exit 2
 }
 
 main() {
-  local cmd="${1:-}" root="" show_all=0 id="" reason="" agent="" provider="" hook="" worktree="" output=""
+  local cmd="${1:-}" root="" show_all=0 id="" reason="" agent="" provider="" hook="" worktree="" output="" status="" nonce=""
   [[ -n "$cmd" ]] || ab_usage
   shift || true
   case "$cmd" in
@@ -938,6 +1006,41 @@ main() {
       [[ -n "$worktree" ]] || worktree="$root"
       worktree="$(ab_abs_path "$worktree" "$PWD")"
       ab_cmd_install "$root" "$agent" "$provider" "$hook" "$worktree" "$output"
+      ;;
+    status)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --agent-id) agent="${2:-}"; shift 2 ;;
+          --root) root="${2:-}"; shift 2 ;;
+          *) ab_usage ;;
+        esac
+      done
+      [[ -n "$agent" ]] || ab_usage
+      [[ -n "$root" ]] || root="$(ab_root)"
+      ab_cmd_status "$(ab_abs_path "$root" "$PWD")" "$agent"
+      ;;
+    mark)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --agent-id) agent="${2:-}"; shift 2 ;;
+          --root) root="${2:-}"; shift 2 ;;
+          --status) status="${2:-}"; shift 2 ;;
+          *) ab_usage ;;
+        esac
+      done
+      [[ -n "$agent" && -n "$status" ]] || ab_usage
+      [[ -n "$root" ]] || root="$(ab_root)"
+      ab_cmd_mark "$(ab_abs_path "$root" "$PWD")" "$agent" "$status"
+      ;;
+    selfcheck-cmd)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --nonce) nonce="${2:-}"; shift 2 ;;
+          *) ab_usage ;;
+        esac
+      done
+      [[ -n "$nonce" ]] || ab_usage
+      ab_cmd_selfcheck_cmd "$nonce"
       ;;
     *)
       ab_usage

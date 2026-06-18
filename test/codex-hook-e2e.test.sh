@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # test/codex-hook-e2e.test.sh — 真实交互式 Codex CLI 的 Approval Broker 端到端 smoke。
 #
-# 这是设计文档 2026-06-18-codex-hook-interaction-validation.md「设计修正建议 #5」要求的
-# 自动化 smoke:启动真实交互式 Codex,验证 `-c hooks.PreToolUse` 的 deny 能阻止写文件。
-# 它把之前只有手工记录的「核心闸门证据」固化成可复现实跑。
+# 覆盖两件事(都用真实 Codex + 真实 broker hook,把手工记录固化成可复现实跑):
+#   1. 设计文档 2026-06-18 「修正建议 #5」:`-c hooks.PreToolUse` 的 deny 能在工具执行前阻断。
+#   2. issue #9:hook 真的被 Codex 调用时,broker 就绪 marker 翻成 ready+nonce
+#      (= `peer broker-check` 据以判定 fail-closed 的信号)。
 #
 # 默认跳过(会真实调用 Codex/模型、慢、要联网+鉴权)。显式开启:
 #   AGENT_DUO_E2E_CODEX=1 bash test/codex-hook-e2e.test.sh
@@ -22,6 +23,8 @@ command -v tmux  >/dev/null 2>&1 || skip "tmux not installed"
 
 LAB="$(mktemp -d)" || skip "mktemp failed"
 SESS="adk-e2e-$$"
+AGENT="probe"
+NONCE="e2e$$"
 cleanup() {
   tmux kill-session -t "$SESS" 2>/dev/null
   # Codex records a per-directory trust entry on first launch; prune ours so the
@@ -42,15 +45,10 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$LAB/work"
-EVENTS="$LAB/events.log"; : > "$EVENTS"
-cat > "$LAB/hook.sh" <<EOF
-#!/usr/bin/env bash
-# Deny-all PreToolUse probe: log the payload, then block the tool (Codex schema).
-payload="\$(cat)"
-printf '%s\n' "\$payload" >> "$EVENTS"
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"E2E-DENY blocked by agent-duo broker probe"}}\n'
-EOF
-chmod +x "$LAB/hook.sh"
+MARKER="$LAB/.agent-duo/state/$AGENT/broker.json"
+# Real broker hook, carrying its env inline (same shape `peer add` injects for Codex).
+HOOK_CMD="AGENT_DUO_ROOT=$LAB AGENT_DUO_AGENT_ID=$AGENT AGENT_DUO_WORKTREE=$LAB/work $ROOT/bin/agent-duo-approval-hook"
+PROBE_CMD="$(bash "$ROOT/lib/approval_broker.sh" selfcheck-cmd --nonce "$NONCE")"
 
 cap() { tmux capture-pane -t "$SESS" -p -S -80 2>/dev/null; }
 
@@ -69,7 +67,7 @@ wait_for() { # <needle> <timeout-seconds>
   return 1
 }
 
-HOOKCFG="hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"$LAB/hook.sh\"}]}]"
+HOOKCFG="hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"$HOOK_CMD\"}]}]"
 tmux new-session -d -s "$SESS" -x 200 -y 50
 tmux send-keys -t "$SESS" \
   "codex -a never --no-alt-screen --dangerously-bypass-hook-trust -C $LAB/work -s workspace-write -c '$HOOKCFG'" Enter
@@ -79,21 +77,26 @@ if ! wait_for "OpenAI Codex" 30; then
   exit "$ADK_FAIL"
 fi
 
-# 让模型执行一个写文件命令;deny hook 应在工具执行前拦下。
-tmux send-keys -t "$SESS" "Run this shell command now, do not explain: printf E2E_RAN > blocked.txt"
+# 让模型执行 broker 自检探针;真实 broker hook 应 deny(设计性)并写 ready+nonce marker。
+tmux send-keys -t "$SESS" "Run this shell command now, do not explain, do not ask: $PROBE_CMD"
 sleep 1
 tmux send-keys -t "$SESS" Enter
 
-# 轮询直到 hook 被调用(events.log 落字)或超时。
-fired=0
+# 轮询真实 marker 直到 ready+nonce(= hook 被 Codex 实际调用)或超时。
+ready=0
 for ((i = 0; i < 60; i++)); do
-  [[ -s "$EVENTS" ]] && { fired=1; break; }
+  if [[ -f "$MARKER" ]] \
+    && [[ "$(jq -r '.status // ""' "$MARKER" 2>/dev/null)" == "ready" ]] \
+    && [[ "$(jq -r '.nonce // ""' "$MARKER" 2>/dev/null)" == "$NONCE" ]]; then
+    ready=1; break
+  fi
   sleep 1
 done
 
-assert_eq        "e2e: PreToolUse hook fired"                "$fired" "1"
-assert_contains  "e2e: hook saw the bash command"            "$(cat "$EVENTS" 2>/dev/null)" "blocked.txt"
-assert_ok        "e2e: target file was NOT created (blocked)" test ! -e "$LAB/work/blocked.txt"
-assert_contains  "e2e: TUI shows hook blocked"               "$(cap)" "blocked"
+assert_eq        "e2e: broker marker ready with probe nonce" "$ready" "1"
+assert_contains  "e2e: TUI shows hook blocked the probe"     "$(cap)" "blocked"
+assert_ok        "e2e: probe file NOT created (denied)"      test ! -e "$LAB/work/AGENT_DUO_BROKER_SELFCHECK_$NONCE.tmp"
+# Self-check must not leak a pending approval / blocked event.
+assert_ok        "e2e: selfcheck created no approval record" sh -c '! ls "'"$LAB"'/.agent-duo/approvals/"*.json >/dev/null 2>&1'
 
 exit "$ADK_FAIL"

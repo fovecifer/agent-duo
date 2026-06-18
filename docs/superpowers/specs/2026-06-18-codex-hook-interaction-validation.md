@@ -273,6 +273,8 @@ codex -a never --no-alt-screen -C <fresh-untrusted-dir> -s workspace-write \
 - worker 契约 / 文档必须把「未信任 = broker 未生效」当作显式状态，而不是假设 hook 一定在跑。
 - 后续应让 supervisor/runtime 能**探测** broker 是否真的生效（例如启动后做一次 deny 自检），未生效时不要把保护性任务派给该 worker，而不仅是打印提醒。
 
+> **更新（issue #9，已实现）**：broker 现在有可观测的就绪状态。hook 每次被实际调用都写 `.agent-duo/state/<agent>/broker.json`（`ready`）；`peer broker-check <id>` 投递带 `AGENT_DUO_BROKER_SELFCHECK_<nonce>` 哨兵的良性探针,hook 设计性 deny 并把 marker 写成 `ready`+nonce(无 approval/blocked 残渣),超时未命中则标 `fail-open` 并非零退出;`peer broker-status <id>` 读状态。supervisor 据此 fail-closed 门控(见 [Approval Broker 设计](./2026-06-17-approval-broker-design.md) §7.1 与契约 §2.6)。本路径已由 `test/codex-hook-e2e.test.sh` 用真实 Codex 验证(marker 翻 ready+nonce、探针被拦、无残渣)。
+
 ## `codex exec` 的验证结果
 
 同样尝试过：
@@ -344,7 +346,7 @@ Approval Broker 中的 `escalate` 对 Codex 应实现为：
 3. 对 unknown / unmanaged / 需要人工判断的请求，Codex 一律 `deny + pending approval record`。
 4. worker 契约里要求：看到 `BLOCKED-PENDING-APPROVAL` 时停下等待，不要换命令绕过；hook 写入的 `blocked` 事件是 supervisor 审批的 canonical 触发。
 5. ~~后续补一个自动化 smoke：启动真实交互式 Codex session，验证 `-c PreToolUse deny` 能阻止写文件。~~ ✅ 已固化为 `test/codex-hook-e2e.test.sh`（默认 skip，`AGENT_DUO_E2E_CODEX=1` 开启；需 codex + tmux + `~/.codex/auth.json`）。
-6. **hook trust fail-open 缺口**：产品启动路径未信任 hook 时 broker 不生效（见上节）。需把它当显式状态处理，并加 broker 生效自检，而非仅靠 echo 提醒。
+6. ~~**hook trust fail-open 缺口**：产品启动路径未信任 hook 时 broker 不生效（见上节）。需把它当显式状态处理，并加 broker 生效自检，而非仅靠 echo 提醒。~~ ✅ 已实现（issue #9）：就绪 marker + `peer broker-check` / `broker-status` + supervisor fail-closed 门控。
 
 ## 待补验证
 

@@ -1005,7 +1005,7 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 - 仅支持 allowlist 命令。
 - ~~检查 prompt hash~~ → 改为 `PreToolUse` hook 决策（见上）。
 - 写 `approvals.jsonl`。
-- **broker 生效自检（backlog）**：Codex 未信任 hook 时 broker 是 fail-open（实测见 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-validation.md) 的「Hook trust 首启行为」）。需在 worker 启动后做一次 deny 自检确认 hook 真的生效；未生效时标记该 worker 不可托管保护性任务，而不仅靠启动时的 echo 提醒。
+- ~~**broker 生效自检（backlog）**：Codex 未信任 hook 时 broker 是 fail-open（实测见 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-validation.md) 的「Hook trust 首启行为」）。需在 worker 启动后做一次 deny 自检确认 hook 真的生效；未生效时标记该 worker 不可托管保护性任务，而不仅靠启动时的 echo 提醒。~~ ✅ 已实现（issue #9）：就绪 marker（`.agent-duo/state/<agent>/broker.json`）+ `peer broker-check`（自检探针）/ `peer broker-status` + supervisor fail-closed 门控（契约 §2.6、Approval Broker 设计 §7.1）。
 
 目标：解决 80% 的低风险确认打断问题。
 

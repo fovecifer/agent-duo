@@ -22,6 +22,10 @@
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
 #                           拒绝一次待审批请求
+#   peer broker-status [<id>]
+#                           查看某 worker 的 Approval Broker 就绪状态(ready/unverified/fail-open)
+#   peer broker-check [<id>] 向 worker 投递自检探针,验证 broker hook 真的被 provider 调用;
+#                           未验证(fail-open)时不要派给它需要 broker 保护的任务
 #   peer gate resolve [<id>] --choice <choice> [--note "..."]
 #                           向 worker 答复 human gate 决策
 #   peer loopd              在当前 pane 运行 loop daemon 看板/轮询
@@ -496,9 +500,70 @@ case "$cmd" in
     tmux send-keys -t "$new_pane" \
       "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
     echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
+    # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效。
+    run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
     if [[ "$provider" == "codex" ]]; then
-      echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook；未信任前不要假设 Approval Broker 已生效。"
+      echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook。"
+      echo "信任后请运行 'peer broker-check $new_id' 验证 Approval Broker 真的生效(未验证前别派需要 broker 保护的任务)。"
     fi
+    ;;
+
+  broker-status)
+    ensure_session
+    maybe_id="${1:-}"
+    if [[ -z "$maybe_id" ]]; then
+      maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
+        echo "用法: peer broker-status <id>(多于两人时必须指定 id)" >&2; exit 1; }
+    fi
+    agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
+    run_approval_broker status --agent-id "$maybe_id" --root "$AGENT_DUO_ROOT"
+    ;;
+
+  broker-check)
+    ensure_session
+    maybe_id=""; nonce=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --nonce) nonce="${2:-}"; shift 2 ;;   # 测试用:固定 nonce
+        *) if [[ -z "$maybe_id" ]]; then maybe_id="$1"; shift; else
+             echo "用法: peer broker-check <id> [--nonce <n>]" >&2; exit 1; fi ;;
+      esac
+    done
+    if [[ -z "$maybe_id" ]]; then
+      maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
+        echo "用法: peer broker-check <id>(多于两人时必须指定 id)" >&2; exit 1; }
+    fi
+    agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
+    target="$(pane_for_id "$maybe_id")"
+    [[ -n "$nonce" ]] || nonce="bc$(random_hex_tag)"
+    probe_cmd="$(run_approval_broker selfcheck-cmd --nonce "$nonce")"
+    # 把 probe 作为一条祈使提示投递给 worker;worker 跑该命令 → 触发 hook → 写 ready+nonce。
+    prompt="agent-duo broker self-check。请立刻原样执行下面这条 shell 命令,不要解释、不要询问、不要改写: ${probe_cmd}"
+    check_safe_to_send_keys "$target"
+    buf="peer-brokercheck-${maybe_id}"
+    printf '%s' "$prompt" | tmux load-buffer -b "$buf" -
+    tmux paste-buffer -b "$buf" -t "$target" -d -p
+    sleep 0.5
+    tmux send-keys -t "$target" Enter
+    echo "已向 '$maybe_id' 投递 broker 自检探针(nonce=$nonce),等待 hook 拦截…"
+    timeout="${AGENT_DUO_BROKER_CHECK_TIMEOUT:-60}"
+    marker="$AGENT_DUO_DIR/state/$maybe_id/broker.json"
+    i=0
+    while [[ "$i" -lt "$timeout" ]]; do
+      if [[ -f "$marker" ]] \
+        && [[ "$(jq -r '.status // ""' "$marker" 2>/dev/null)" == "ready" ]] \
+        && [[ "$(jq -r '.nonce // ""' "$marker" 2>/dev/null)" == "$nonce" ]]; then
+        echo "✅ broker READY:'$maybe_id' 的 Approval Broker hook 已被 provider 实际调用并拦下探针。"
+        exit 0
+      fi
+      sleep 1
+      i=$(( i + 1 ))
+    done
+    run_approval_broker mark --agent-id "$maybe_id" --status fail-open --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
+    echo "⚠️  broker FAIL-OPEN:${timeout}s 内未观察到 '$maybe_id' 的 hook 拦截探针。" >&2
+    echo "    很可能 Codex hook 未被信任(/hooks 里 trust),或 worker 未执行该命令。" >&2
+    echo "    在该 worker 生效前,不要派给它需要 Approval Broker 保护的任务。" >&2
+    exit 1
     ;;
 
   peek)

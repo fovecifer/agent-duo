@@ -138,6 +138,18 @@ peer deny <id> [--reason "..."]
 
 ---
 
+## 7.1 broker 就绪自检（fail-closed，issue #9）
+
+Codex 的非托管 hook **未信任时不生效且 fail-open**——hook 根本不被调用，工具照常执行（实测见 [Codex hook 交互验证](./2026-06-18-codex-hook-interaction-validation.md) 的「Hook trust 首启行为」）。因此「装了 hook」不等于「broker 生效」，必须把生效性变成**可观测、可门控**的状态：
+
+- **就绪 marker**：broker hook 每次被实际调用都会写 `.agent-duo/state/<agent>/broker.json`（`status:ready`）。这是「provider 真的调用了我们」的权威信号——不依赖 Codex 内部 trust 存储（未文档化、版本易变）。
+- **自检探针**：命令/路径带 `AGENT_DUO_BROKER_SELFCHECK_<nonce>` 哨兵时，hook **设计性 deny** 并把 marker 写成 `ready` + 该 nonce，但**不**创建 approval、**不**入队 blocked event（无残渣、自证）。
+- **`peer broker-check <id>`**：向 worker 投递一条良性探针命令，轮询 marker；命中 `ready`+nonce → broker 生效；超时未命中 → 写 `status:fail-open` 并非零退出。
+- **`peer broker-status <id>`**：读 marker，回报 `ready | unverified | fail-open`。
+- **门控原则**：supervisor 在把**需要 broker 保护**的任务派给某 worker 前，必须确认其 broker 状态为 `ready`；`unverified` / `fail-open` 不得派发（见 worker↔supervisor 契约 §2.6）。`peer add` 创建 codex worker 时 marker 起始为 `unverified`，并提示先 `peer broker-check`。
+
+---
+
 ## 8. MVP 切法
 
 - **MVP 1**：deny 清单 + allow 清单 auto-allow + escalate（发 request 事件），**无 lease**；写 `approvals.jsonl`。解决 80% 低风险打扰。
