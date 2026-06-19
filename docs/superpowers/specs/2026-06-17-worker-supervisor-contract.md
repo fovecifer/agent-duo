@@ -170,9 +170,10 @@ acceptance:
 
 Approval Broker 只在 hook 被 provider **实际调用**时才生效。Codex 非托管 hook 未信任时 fail-open（hook 不运行、工具照常执行），所以「派了 worker」不等于「该 worker 被 broker 保护」。
 
-- 每个 worker 有一个就绪状态：`ready | unverified | fail-open`，落在 `.agent-duo/state/<agent>/broker.json`，由 hook 自身/自检写入（见 [Approval Broker 设计](./2026-06-17-approval-broker-design.md) §7.1）。
-- **supervisor 在派发需要 broker 保护的任务前，必须先确认目标 worker 为 `ready`**：用 `peer broker-check <id>` 主动自检，或 `peer broker-status <id>` 读状态。
-- `unverified` / `fail-open` 的 worker **不得**承接需要审批闸的任务；应先让用户在该 pane 内信任 hook（`/hooks`）并重跑 `peer broker-check`，或改派给已 `ready` 的 worker。
+- 每个 worker 有一个就绪状态：`ready | stale | unverified | fail-open`，落在 `.agent-duo/state/<agent>/broker.json`，由 hook 自身/自检写入（见 [Approval Broker 设计](./2026-06-17-approval-broker-design.md) §7.1）。marker 现携带 `updated_epoch`（用于鉴新）和 `session_id`（用于溯源取证）。
+- **派发门控要求 fresh `ready`**：`ready` marker 存在且其 `updated_epoch` 距当前不超过 `AGENT_DUO_BROKER_TTL`（默认 60s）才算就绪。若 `ready` marker 超龄，`status` 子命令报 `stale`——例如 worker 的 Codex session 重启后回到未信任、hook 不再被调用时，旧 `ready` 随即变 `stale`。
+- **supervisor 在派发需要 broker 保护的任务前，必须先确认目标 worker 为 fresh `ready`**：用 `peer broker-check <id>` 主动自检，或 `peer broker-status <id>` 读状态。
+- `stale` / `unverified` / `fail-open` 的 worker **不得**承接需要审批闸的任务；应先运行 `peer broker-check <id>`，若返回 `ready` 方可派发；或改派给已 fresh `ready` 的 worker。
 - 这是 fail-closed 原则：宁可不派，也不要把保护性任务交给一个 broker 实际没生效的 worker。
 
 ---

@@ -142,11 +142,11 @@ peer deny <id> [--reason "..."]
 
 Codex 的非托管 hook **未信任时不生效且 fail-open**——hook 根本不被调用，工具照常执行（实测见 [Codex hook 交互验证](./2026-06-18-codex-hook-interaction-validation.md) 的「Hook trust 首启行为」）。因此「装了 hook」不等于「broker 生效」，必须把生效性变成**可观测、可门控**的状态：
 
-- **就绪 marker**：broker hook 每次被实际调用都会写 `.agent-duo/state/<agent>/broker.json`（`status:ready`）。这是「provider 真的调用了我们」的权威信号——不依赖 Codex 内部 trust 存储（未文档化、版本易变）。
+- **就绪 marker**：broker hook 每次被实际调用都会写 `.agent-duo/state/<agent>/broker.json`（`status:ready`）。这是「provider 真的调用了我们」的权威信号——不依赖 Codex 内部 trust 存储（未文档化、版本易变）。marker 现携带 `updated_epoch`（Unix 时间戳，鉴新）和 `session_id`（溯源取证）。
 - **自检探针**：命令/路径带 `AGENT_DUO_BROKER_SELFCHECK_<nonce>` 哨兵时，hook **设计性 deny** 并把 marker 写成 `ready` + 该 nonce，但**不**创建 approval、**不**入队 blocked event（无残渣、自证）。
 - **`peer broker-check <id>`**：向 worker 投递一条良性探针命令，轮询 marker；命中 `ready`+nonce → broker 生效；超时未命中 → 写 `status:fail-open` 并非零退出。
-- **`peer broker-status <id>`**：读 marker，回报 `ready | unverified | fail-open`。
-- **门控原则**：supervisor 在把**需要 broker 保护**的任务派给某 worker 前，必须确认其 broker 状态为 `ready`；`unverified` / `fail-open` 不得派发（见 worker↔supervisor 契约 §2.6）。`peer add` 创建 codex worker 时 marker 起始为 `unverified`，并提示先 `peer broker-check`。
+- **`peer broker-status <id>`**：读 marker，回报 `ready | stale | unverified | fail-open`；当 `ready` marker 的 `updated_epoch` 超过 `AGENT_DUO_BROKER_TTL`（默认 60s）时报 `stale`，含义等同于不就绪。
+- **门控原则**：supervisor 在把**需要 broker 保护**的任务派给某 worker 前，必须确认其 broker 状态为 **fresh `ready`**（`status` 返回 `ready` 且未超龄）；`stale` / `unverified` / `fail-open` 均视为不就绪，不得派发——应先运行 `peer broker-check <id>` 确认返回 `ready` 后再派（见 worker↔supervisor 契约 §2.6）。`peer add` 创建 codex worker 时 marker 起始为 `unverified`，并提示先 `peer broker-check`。
 
 ---
 
