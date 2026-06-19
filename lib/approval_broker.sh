@@ -751,18 +751,18 @@ ab_write_broker_marker() { # <root> <agent> <status> [nonce] [decision] [session
   ab_write_file_atomic "$path" "$data"
 }
 
-# If the command/path carries the self-check sentinel, return the probe nonce (the token
-# right after the sentinel); empty otherwise. Sentinel form: AGENT_DUO_BROKER_SELFCHECK_<nonce>.
+# Return the probe nonce IFF <command> is the canonical self-check probe emitted by
+# ab_cmd_selfcheck_cmd: `printf agent-duo-broker-check > AGENT_DUO_BROKER_SELFCHECK_<nonce>.tmp`
+# (whitespace around `>` tolerant). Anchored on the whole command so a real command that
+# merely contains the sentinel substring is NOT treated as a probe. raw_path is ignored.
 ab_selfcheck_nonce() { # <command> <raw_path>
-  local hay="$1 $2" rest nonce
-  case "$hay" in
-    *"$SELFCHECK_SENTINEL"_*) ;;
-    *) return 0 ;;
-  esac
-  rest="${hay#*${SELFCHECK_SENTINEL}_}"
-  # nonce = leading run of [A-Za-z0-9] after the underscore.
-  nonce="$(printf '%s' "$rest" | LC_ALL=C sed 's/[^A-Za-z0-9].*$//')"
-  printf '%s' "$nonce"
+  local cmd re
+  cmd="$(ab_trim "$1")"
+  # Keep in sync with ab_cmd_selfcheck_cmd's output shape.
+  re="^printf agent-duo-broker-check[[:space:]]+>[[:space:]]*${SELFCHECK_SENTINEL}_([A-Za-z0-9]+)\.tmp$"
+  if [[ "$cmd" =~ $re ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
 }
 
 ab_run_hook() {
