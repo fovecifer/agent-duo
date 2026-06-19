@@ -163,17 +163,6 @@ role_for_id() {
   printf '%s' "$role"
 }
 
-# broker_is_fresh_ready <id> → 该 worker 的 broker 状态为 fresh `ready` 返回 0,否则 1。
-# 复用 approval_broker 的 status 子命令(ready 超 TTL 已自动判 stale)。
-broker_is_fresh_ready() {
-  local id="$1" out
-  out="$(run_approval_broker status --agent-id "$id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
-  case "$out" in
-    *'"status":"ready"'*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 install_approval_session_settings() { # <agent_id> <provider> <worktree>
   local agent_id="$1" provider="$2" worktree="$3"
   run_approval_broker install \
@@ -625,13 +614,17 @@ case "$cmd" in
     fi
     # Broker 硬门:发给 worker 角色时,broker 必须 fresh ready,否则拒发(fail-closed)。
     # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
-    if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
-      if [[ "$(role_for_id "$target_id")" == "worker" ]] && ! broker_is_fresh_ready "$target_id"; then
-        bg_status="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null | grep -o '"status":"[^"]*"' | head -1)"
-        echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-        echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
-        exit 1
-      fi
+    if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" && "$(role_for_id "$target_id")" == "worker" ]]; then
+      bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
+      case "$bg_out" in
+        *'"status":"ready"'*) ;;  # fresh ready → 放行
+        *)
+          bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
+          echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
+          echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
+          exit 1
+          ;;
+      esac
     fi
     check_safe_to_send_keys "$target"
     buf="peer-${ME}2${target_id}"
