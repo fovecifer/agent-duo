@@ -294,7 +294,7 @@ assert_contains "broker: heartbeat flips status to ready" "$(broker_status)" '"s
 
 # Self-check probe: denied by design, records nonce, but creates NO approval/blocked event.
 APPROVALS_BEFORE="$(ls "$PROJECT/.agent-duo/approvals"/*.json 2>/dev/null | wc -l | tr -d ' ')"
-run_hook '{"tool_name":"Bash","tool_input":{"command":"printf ok > AGENT_DUO_BROKER_SELFCHECK_probe42.tmp"},"round":21}'
+run_hook '{"tool_name":"Bash","tool_input":{"command":"printf agent-duo-broker-check > AGENT_DUO_BROKER_SELFCHECK_probe42.tmp"},"round":21}'
 assert_contains "hook: selfcheck probe is denied" "$(cat "$OUT")" '"permissionDecision":"deny"'
 assert_contains "hook: selfcheck probe reason" "$(cat "$OUT")" 'BROKER-SELFCHECK'
 assert_not_contains "hook: selfcheck probe not pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
@@ -305,6 +305,31 @@ APPROVALS_AFTER="$(ls "$PROJECT/.agent-duo/approvals"/*.json 2>/dev/null | wc -l
 assert_eq "hook: selfcheck creates no approval record" "$APPROVALS_AFTER" "$APPROVALS_BEFORE"
 assert_not_contains "hook: selfcheck enqueues no blocked event" \
   "$(cat "$PROJECT/.agent-duo/events/queue.jsonl" 2>/dev/null || true)" 'AGENT_DUO_BROKER_SELFCHECK'
+
+# ⑧ Self-check is anchored to the canonical probe command shape — a real command that
+# merely mentions the sentinel substring is NOT treated as a probe.
+
+# Canonical probe with extra whitespace around `>` is still recognized.
+run_hook '{"tool_name":"Bash","tool_input":{"command":"printf agent-duo-broker-check  >   AGENT_DUO_BROKER_SELFCHECK_sp1.tmp"},"round":40}'
+assert_contains "selfcheck: whitespace-tolerant probe deny decision" "$(cat "$OUT")" '"permissionDecision":"deny"'
+assert_contains "selfcheck: whitespace-tolerant probe denied" "$(cat "$OUT")" 'BROKER-SELFCHECK'
+assert_contains "selfcheck: whitespace-tolerant probe nonce" "$(broker_status)" '"nonce":"sp1"'
+
+# A grep that merely mentions the sentinel is NOT a probe → normal policy (grep is allowlisted → allow).
+run_hook '{"tool_name":"Bash","tool_input":{"command":"grep AGENT_DUO_BROKER_SELFCHECK_zzz test/peer.test.sh"},"round":41}'
+assert_not_contains "selfcheck: grep mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
+assert_contains "selfcheck: grep mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_not_contains "selfcheck: grep mention no fake nonce" "$(broker_status)" '"nonce":"zzz"'
+
+# An echo that mentions the sentinel is NOT a probe.
+run_hook '{"tool_name":"Bash","tool_input":{"command":"echo AGENT_DUO_BROKER_SELFCHECK_yyy"},"round":42}'
+assert_not_contains "selfcheck: echo mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
+assert_contains "selfcheck: echo mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+
+# A cat of a ..._.tmp file (not printf) is NOT a probe.
+run_hook '{"tool_name":"Bash","tool_input":{"command":"cat AGENT_DUO_BROKER_SELFCHECK_www.tmp"},"round":43}'
+assert_not_contains "selfcheck: cat mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
+assert_contains "selfcheck: cat mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # ① Marker carries session_id (forensic) and updated_epoch (for freshness).
 MARKER_FILE="$PROJECT/.agent-duo/state/worker/broker.json"
