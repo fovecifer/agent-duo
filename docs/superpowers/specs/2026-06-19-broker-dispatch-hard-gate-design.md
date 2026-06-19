@@ -48,6 +48,8 @@ broker_is_fresh_ready() {
 }
 ```
 
+> 实现说明：最终实现把 `broker_is_fresh_ready` 内联进门控块（单次 `run_approval_broker status` 调用，复用其输出同时做就绪判定与错误诊断），不再保留独立 helper；`role_for_id` 保留。
+
 - `list_agents` 已输出 `pane_id<TAB>agent_id<TAB>role<TAB>provider`，role 取第 3 列（与 `pane_for_id` 同模式）。
 - `broker_is_fresh_ready` 直接复用 ① 的 `status` 子命令：它在 `ready` 超 `AGENT_DUO_BROKER_TTL` 时已返回 `stale`，所以这里只需判 `"status":"ready"` 子串。`stale`/`fail-open`/`unverified` 均落入 return 1。匹配用紧凑 JSON 子串（broker 由字符串拼接产出，无空格，稳定）。
 
