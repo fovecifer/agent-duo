@@ -227,6 +227,10 @@ ab_payload_command() {
   ab_json_get_string "$1" command
 }
 
+ab_payload_session_id() {
+  ab_json_get_string "$1" session_id
+}
+
 ab_payload_cwd() {
   local payload="$1" cwd
   cwd="$(ab_json_get_string "$payload" cwd)"
@@ -734,14 +738,15 @@ ab_set_approval_fields() { # <root> <id> <status> [extra-json-fragment-with-lead
 
 # Liveness/readiness marker: proof that Codex actually invoked our hook (= trusted it).
 # Written on every hook call so organic tool use also flips the worker to "ready".
-ab_write_broker_marker() { # <root> <agent> <status> [nonce] [decision]
-  local root="$1" agent="$2" status="$3" nonce="${4:-}" decision="${5:-}" path data
+ab_write_broker_marker() { # <root> <agent> <status> [nonce] [decision] [session_id]
+  local root="$1" agent="$2" status="$3" nonce="${4:-}" decision="${5:-}" session_id="${6:-}" path data
   [[ -n "$agent" ]] || agent="unknown"
   path="$(ab_broker_marker_path "$root" "$agent")"
   data="{\"agent\":\"$(ab_json_escape "$agent")\",\"status\":\"$(ab_json_escape "$status")\""
-  data="${data},\"updated_at\":\"$(ab_iso_ts)\""
+  data="${data},\"updated_at\":\"$(ab_iso_ts)\",\"updated_epoch\":$(date +%s)"
   if [[ -n "$nonce" ]]; then data="${data},\"nonce\":\"$(ab_json_escape "$nonce")\""; fi
   if [[ -n "$decision" ]]; then data="${data},\"last_decision\":\"$(ab_json_escape "$decision")\""; fi
+  if [[ -n "$session_id" ]]; then data="${data},\"session_id\":\"$(ab_json_escape "$session_id")\""; fi
   data="${data}}"
   ab_write_file_atomic "$path" "$data"
 }
@@ -761,7 +766,7 @@ ab_selfcheck_nonce() { # <command> <raw_path>
 }
 
 ab_run_hook() {
-  local payload root agent tool command raw_path cwd wt_root round fingerprint existing_status summary nonce
+  local payload root agent tool command raw_path cwd wt_root round fingerprint existing_status summary nonce session
   payload="$(cat)"
   AB_HOOK_EVENT_NAME="$(ab_payload_event_name "$payload")"
   root="$(ab_root)"
@@ -770,6 +775,7 @@ ab_run_hook() {
   command="$(ab_payload_command "$payload")"
   raw_path="$(ab_payload_path "$payload")"
   cwd="$(ab_payload_cwd "$payload")"
+  session="$(ab_payload_session_id "$payload")"
   wt_root="$(ab_worktree_root "$payload" "$cwd")"
   round="$(ab_round "$payload")"
   fingerprint="$(ab_fingerprint "$agent" "$tool" "$cwd" "$command" "$raw_path" "$tool")"
@@ -777,14 +783,14 @@ ab_run_hook() {
   # Self-check probe: prove the hook fired without creating an approval/blocked event.
   nonce="$(ab_selfcheck_nonce "$command" "$raw_path")"
   if [[ -n "$nonce" ]]; then
-    ab_write_broker_marker "$root" "$agent" "ready" "$nonce" "selfcheck"
+    ab_write_broker_marker "$root" "$agent" "ready" "$nonce" "selfcheck" "$session"
     ab_append_audit "$root" "$agent" "$tool" "$command" "$raw_path" "$cwd" "selfcheck" "broker.selfcheck" "$SELFCHECK_REASON" "" ""
     ab_output deny "$SELFCHECK_REASON"
     return 0
   fi
 
   # Heartbeat: any real invocation means Codex called us → broker is active for this agent.
-  ab_write_broker_marker "$root" "$agent" "ready" "" ""
+  ab_write_broker_marker "$root" "$agent" "ready" "" "" "$session"
 
   ab_find_existing_approval "$root" "$fingerprint"
   ab_evaluate_policy "$payload" "$root" "$agent" "$tool" "$command" "$raw_path" "$cwd" "$wt_root"
@@ -930,13 +936,30 @@ ab_cmd_install() {
 }
 
 ab_cmd_status() { # <root> <agent>
-  local root="$1" agent="$2" data
+  local root="$1" agent="$2" data status epoch now ttl age out
   data="$(ab_read_file "$(ab_broker_marker_path "$root" "$agent")")"
   if [[ -z "$data" ]]; then
     printf '{"agent":"%s","status":"unverified"}\n' "$(ab_json_escape "$agent")"
-  else
-    printf '%s\n' "$data"
+    return 0
   fi
+  status="$(ab_json_get_string "$data" status)"
+  # Freshness only ever downgrades a "ready" marker; fail-open/unverified pass through.
+  if [[ "$status" != "ready" ]]; then
+    printf '%s\n' "$data"
+    return 0
+  fi
+  ttl="${AGENT_DUO_BROKER_TTL:-60}"
+  [[ "$ttl" =~ ^-?[0-9]+$ ]] || ttl=60
+  now="$(date +%s)"
+  epoch="$(ab_json_get_int "$data" updated_epoch)"   # missing/invalid → "0" → stale
+  age=$(( now - epoch ))
+  if (( age > ttl )); then
+    out="$(printf '%s' "$data" | sed 's/"status":"ready"/"status":"stale"/')"
+  else
+    out="$data"
+  fi
+  out="${out%$'\n'}"
+  printf '%s\n' "${out%\}},\"age_seconds\":${age}}"
 }
 
 ab_cmd_mark() { # <root> <agent> <status>

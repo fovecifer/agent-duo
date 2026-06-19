@@ -300,14 +300,51 @@ assert_contains "hook: selfcheck probe reason" "$(cat "$OUT")" 'BROKER-SELFCHECK
 assert_not_contains "hook: selfcheck probe not pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
 assert_contains "broker: selfcheck marker records nonce" "$(broker_status)" '"nonce":"probe42"'
 assert_contains "broker: selfcheck marker is ready" "$(broker_status)" '"status":"ready"'
+
 APPROVALS_AFTER="$(ls "$PROJECT/.agent-duo/approvals"/*.json 2>/dev/null | wc -l | tr -d ' ')"
 assert_eq "hook: selfcheck creates no approval record" "$APPROVALS_AFTER" "$APPROVALS_BEFORE"
 assert_not_contains "hook: selfcheck enqueues no blocked event" \
   "$(cat "$PROJECT/.agent-duo/events/queue.jsonl" 2>/dev/null || true)" 'AGENT_DUO_BROKER_SELFCHECK'
 
+# ① Marker carries session_id (forensic) and updated_epoch (for freshness).
+MARKER_FILE="$PROJECT/.agent-duo/state/worker/broker.json"
+run_hook '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"round":30,"session_id":"sess-abc123"}'
+assert_contains "broker: marker records session_id" "$(cat "$MARKER_FILE")" '"session_id":"sess-abc123"'
+assert_contains "broker: marker records updated_epoch" "$(cat "$MARKER_FILE")" '"updated_epoch":'
+
 # mark sets an explicit fail-open state (used by `peer broker-check` on timeout).
 bash "$ROOT/lib/approval_broker.sh" mark --root "$PROJECT" --agent-id "worker" --status fail-open >/dev/null
 assert_contains "broker: mark sets fail-open" "$(broker_status)" '"status":"fail-open"'
+
+# ① Freshness: fresh ready stays ready and reports age.
+run_hook '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"round":31,"session_id":"sess-abc123"}'
+FRESH="$(broker_status)"
+assert_contains "broker: fresh ready stays ready" "$FRESH" '"status":"ready"'
+assert_contains "broker: fresh ready reports age_seconds" "$FRESH" '"age_seconds":'
+
+# ① Freshness: a ready marker older than TTL is reported stale (constructed old epoch).
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","updated_at":"2001-09-09T01:46:40Z","updated_epoch":1000000000,"nonce":"old"}' \
+  > "$PROJECT/.agent-duo/state/worker/broker.json"
+OLD="$(broker_status)"
+assert_contains "broker: ready past TTL becomes stale" "$OLD" '"status":"stale"'
+assert_not_contains "broker: stale no longer reports ready" "$OLD" '"status":"ready"'
+
+# ① Freshness: TTL is configurable — a huge TTL makes the same old marker fresh again.
+WIDE="$(AGENT_DUO_BROKER_TTL=99999999999 bash "$ROOT/lib/approval_broker.sh" status --root "$PROJECT" --agent-id worker)"
+assert_contains "broker: TTL env override keeps old marker ready" "$WIDE" '"status":"ready"'
+
+# ① Freshness: legacy marker without updated_epoch → stale (fail-closed).
+printf '{"agent":"worker","status":"ready","nonce":"legacy"}' \
+  > "$PROJECT/.agent-duo/state/worker/broker.json"
+LEGACY="$(broker_status)"
+assert_contains "broker: legacy marker (no epoch) is stale" "$LEGACY" '"status":"stale"'
+
+# ① Freshness: fail-open is never rewritten by freshness, even with an old epoch.
+printf '{"agent":"worker","status":"fail-open","updated_epoch":1000000000}' \
+  > "$PROJECT/.agent-duo/state/worker/broker.json"
+FO="$(broker_status)"
+assert_contains "broker: fail-open survives freshness" "$FO" '"status":"fail-open"'
 
 # peer add installs per-agent broker session settings and exports hook env into the worker session.
 STUB_BIN="$TMP/stub-bin"

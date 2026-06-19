@@ -565,9 +565,19 @@ teardown
 # broker-status:已有 ready marker 时如实回报。
 setup
 mkdir -p "$PROJECT/.agent-duo/state/worker"
-printf '{"agent":"worker","status":"ready","nonce":"n1"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
+printf '{"agent":"worker","status":"ready","updated_epoch":%s,"nonce":"n1"}\n' "$(date +%s)" > "$PROJECT/.agent-duo/state/worker/broker.json"
 assert_ok "broker-status: reads marker" run_peer broker-status worker
 assert_contains "broker-status: ready reported" "$(cat "$OUT")" '"status":"ready"'
+assert_not_contains "broker-status: no hint when ready" "$(cat "$ERR")" 'broker-check'
+teardown
+
+# broker-status:ready 但过期(老 epoch)→ 报 stale,并给出 broker-check 提示。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","updated_epoch":1000000000,"nonce":"n1"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
+assert_ok "broker-status: stale surfaced" run_peer broker-status worker
+assert_contains "broker-status: stale status" "$(cat "$OUT")" '"status":"stale"'
+assert_contains "broker-status: stale hint to broker-check" "$(cat "$ERR")" 'broker-check'
 teardown
 
 # broker-check:投递自检探针(带 sentinel+nonce),未匹配时标记 fail-open 并非零退出。
