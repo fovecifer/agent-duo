@@ -148,6 +148,20 @@ assert_ok "hook: process substitution escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"diff <(ls) <(ls)"},"round":6}'
 assert_not_contains "hook: process substitution not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
+# Regression (F3): substitution where BOTH the head AND the inner command are allowlisted must
+# STILL escalate. The quote-naive segment splitter breaks `$(`/`<(` across segments (echo $(pwd)
+# → "echo $" + "pwd", both allowlisted), so substitution must be caught on the WHOLE command.
+assert_ok "hook: allowlisted-head command substitution escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"echo $(pwd)"},"round":6}'
+assert_contains "hook: allowlisted-head subst pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_not_contains "hook: allowlisted-head subst not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_ok "hook: allowlisted-head process substitution escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"cat <(ls)"},"round":6}'
+assert_not_contains "hook: allowlisted-head process subst not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_ok "hook: backtick substitution escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"echo `pwd`"},"round":6}'
+assert_not_contains "hook: backtick subst not allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+
 # awk/find are not auto-allowed (can exec/write); they escalate until worktree isolation lands.
 assert_ok "hook: awk escalates" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"awk \"{print}\" file"},"round":6}'

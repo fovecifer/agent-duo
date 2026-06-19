@@ -351,13 +351,8 @@ ab_bash_hits_deny() { # <segment> <whole>
 
 ab_bash_requires_escalation() { # <segment>
   local text="$1" stripped
-  # Command/process substitution is opaque (runs other commands) -> always escalate.
-  case "$text" in
-    *'$('*|*'`'*|*'<('*|*'>('*)
-      printf 'bash.command_substitution'
-      return 0
-      ;;
-  esac
+  # Note: command/process substitution (`$(`/`` ` ``/`<(`/`>(`) is escalated earlier in
+  # ab_evaluate_policy on the WHOLE command, before the segment split reaches here.
   # Output redirects: auto-allow only the two provably-safe token shapes — fd duplication
   # (2>&1, 1>&2, >&2) and redirects to /dev/null. A *file* target is escalated: a regex
   # cannot safely resolve a destination that may involve $VARS, ~, quoting, or the >&file
@@ -660,6 +655,13 @@ ab_evaluate_policy() {
   AB_REASON=""
   if [[ -z "$tool" ]]; then AB_OUTCOME="escalate"; AB_MATCHED="tool.unknown"; AB_REASON="$ESCALATE_REASON"; return 0; fi
   if [[ "$tool" == "Bash" ]]; then
+    # Command/process substitution is opaque and MUST be checked on the WHOLE command BEFORE
+    # the quote-naive segment split — splitting on ()/| breaks `$(`/`<(` across segments and
+    # lets individually-allowlisted fragments slip through (e.g. `echo $(pwd)` → `echo $`,`pwd`).
+    case "$command" in
+      *'$('*|*'`'*|*'<('*|*'>('*)
+        AB_OUTCOME="escalate"; AB_MATCHED="bash.command_substitution"; AB_REASON="$ESCALATE_REASON"; return 0 ;;
+    esac
     while IFS= read -r segment; do
       trimmed="$(ab_trim "$segment")"
       [[ -n "$trimmed" ]] || continue
