@@ -311,6 +311,7 @@ assert_not_contains "hook: selfcheck enqueues no blocked event" \
 
 # Canonical probe with extra whitespace around `>` is still recognized.
 run_hook '{"tool_name":"Bash","tool_input":{"command":"printf agent-duo-broker-check  >   AGENT_DUO_BROKER_SELFCHECK_sp1.tmp"},"round":40}'
+assert_contains "selfcheck: whitespace-tolerant probe deny decision" "$(cat "$OUT")" '"permissionDecision":"deny"'
 assert_contains "selfcheck: whitespace-tolerant probe denied" "$(cat "$OUT")" 'BROKER-SELFCHECK'
 assert_contains "selfcheck: whitespace-tolerant probe nonce" "$(broker_status)" '"nonce":"sp1"'
 
