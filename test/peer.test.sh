@@ -172,6 +172,7 @@ run_peer() {
     TMUX_STUB_SENTINEL="${TMUX_STUB_SENTINEL:-}" \
     TMUX_STUB_CODEC_TAG="${TMUX_STUB_CODEC_TAG:-}" \
     PEER_FORCE="${TEST_PEER_FORCE:-0}" \
+    AGENT_DUO_NO_BROKER_GATE="${AGENT_DUO_NO_BROKER_GATE:-0}" \
     AGENT_DUO_ROOT="${TEST_AGENT_DUO_ROOT:-$PROJECT}" \
     TMUX_STUB_HAS_SESSION="${TMUX_STUB_HAS_SESSION:-1}" \
     TMUX_STUB_PANE_EXISTS="${TMUX_STUB_PANE_EXISTS:-1}" \
@@ -260,7 +261,7 @@ teardown
 
 # tell:单行参数走 tmux buffer + bracketed paste + Enter。
 setup
-assert_ok "tell: arg succeeds" run_peer tell "hello codex"
+AGENT_DUO_NO_BROKER_GATE=1 assert_ok "tell: arg succeeds" run_peer tell "hello codex"
 assert_eq "tell: arg buffer content" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "hello codex"
 assert_contains "tell: load-buffer called" "$(cat "$TMUX_STUB_LOG")" 'load-buffer -b peer-supervisor2worker -'
 assert_contains "tell: paste-buffer called" "$(cat "$TMUX_STUB_LOG")" 'paste-buffer -b peer-supervisor2worker -t %2 -d -p'
@@ -277,7 +278,7 @@ teardown
 
 # tell:首参不是已注册 id → 整句当消息,两人默认发给另一个。
 setup
-assert_ok "tell: plain message default other" run_peer tell "hello there"
+AGENT_DUO_NO_BROKER_GATE=1 assert_ok "tell: plain message default other" run_peer tell "hello there"
 assert_eq "tell: plain buffer" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "hello there"
 teardown
 
@@ -291,14 +292,14 @@ teardown
 
 # tell:普通 TUI 输入提示符和普通 no/yes 文本不应被误判为权限弹窗。
 setup
-TMUX_STUB_CAPTURE_MODE=normal_prompt assert_ok "tell: normal prompt screen succeeds" run_peer tell "ordinary"
+AGENT_DUO_NO_BROKER_GATE=1 TMUX_STUB_CAPTURE_MODE=normal_prompt assert_ok "tell: normal prompt screen succeeds" run_peer tell "ordinary"
 assert_eq "tell: normal prompt buffer content" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "ordinary"
 assert_contains "tell: normal prompt enter" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %2 Enter'
 teardown
 
 # tell:对方疑似权限弹窗时拒绝发送,不写 buffer、不粘贴、不回车。
 setup
-TMUX_STUB_CAPTURE_MODE=prompt assert_exit_code "tell: prompt screen exits 3" 3 run_peer tell "danger"
+AGENT_DUO_NO_BROKER_GATE=1 TMUX_STUB_CAPTURE_MODE=prompt assert_exit_code "tell: prompt screen exits 3" 3 run_peer tell "danger"
 assert_contains "tell: prompt error" "$(cat "$ERR")" '疑似正在等待权限确认'
 assert_ok "tell: prompt no buffer" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker"
 assert_not_contains "tell: prompt no paste" "$(cat "$TMUX_STUB_LOG")" 'paste-buffer'
@@ -316,7 +317,7 @@ teardown
 
 # tell:stdin 多行保持原文进入 buffer。
 setup
-assert_ok "tell: stdin succeeds" run_peer tell <<< $'line 1\n`quoted`'
+AGENT_DUO_NO_BROKER_GATE=1 assert_ok "tell: stdin succeeds" run_peer tell <<< $'line 1\n`quoted`'
 printf 'line 1\n`quoted`\n' > "$SCENARIO_TMP/expected-stdin-buffer"
 assert_ok "tell: stdin buffer content" cmp -s "$SCENARIO_TMP/expected-stdin-buffer" "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker"
 teardown
@@ -612,6 +613,51 @@ teardown
 setup
 assert_not_ok "broker-check: unknown id" run_peer broker-check ghost
 assert_contains "broker-check: unknown error" "$(cat "$ERR")" "找不到 agent 'ghost'"
+teardown
+
+# ② Broker dispatch hard gate: tell to a worker refuses unless broker is fresh ready.
+
+# worker + no marker (unverified) → refuse, nonzero, no buffer written.
+setup
+assert_exit_code "gate: unverified worker refused" 1 run_peer tell worker "do work"
+assert_contains "gate: unverified error mentions fresh ready" "$(cat "$ERR")" 'fresh ready'
+assert_contains "gate: unverified error suggests broker-check" "$(cat "$ERR")" 'broker-check'
+assert_ok "gate: unverified no buffer written" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker"
+teardown
+
+# worker + stale marker (old epoch) → refuse.
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","updated_epoch":1000000000,"nonce":"old"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
+assert_exit_code "gate: stale worker refused" 1 run_peer tell worker "do work"
+assert_ok "gate: stale no buffer written" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker"
+teardown
+
+# worker + fresh ready marker → allowed (sends).
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","updated_epoch":%s,"nonce":"n1"}\n' "$(date +%s)" > "$PROJECT/.agent-duo/state/worker/broker.json"
+assert_ok "gate: fresh ready worker allowed" run_peer tell worker "do work"
+assert_eq "gate: fresh ready buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "do work"
+teardown
+
+# worker + unverified + --force → allowed (bypass).
+setup
+assert_ok "gate: --force bypasses gate" run_peer tell --force worker "do work"
+assert_eq "gate: --force buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "do work"
+teardown
+
+# worker + unverified + AGENT_DUO_NO_BROKER_GATE=1 → allowed (bypass).
+setup
+AGENT_DUO_NO_BROKER_GATE=1 assert_ok "gate: env disable bypasses gate" run_peer tell worker "do work"
+assert_eq "gate: env disable buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "do work"
+teardown
+
+# non-worker target (reviewer) + no marker → not gated, sends.
+setup
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%3\treviewer\treviewer\tclaude\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "gate: non-worker target not gated" run_peer tell reviewer "please review"
+assert_eq "gate: non-worker buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2reviewer")" "please review"
 teardown
 
 exit "$ADK_FAIL"
