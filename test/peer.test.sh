@@ -271,7 +271,7 @@ teardown
 # tell:显式 id 首参(已注册)→ 路由该 pane,其余为消息。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%3\treviewer\treviewer\tclaude\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "tell: explicit id routes" run_peer tell reviewer "please review"
+AGENT_DUO_NO_BROKER_GATE=1 assert_ok "tell: explicit id routes" run_peer tell reviewer "please review"
 assert_eq "tell: explicit id buffer" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2reviewer")" "please review"
 assert_contains "tell: explicit id paste" "$(cat "$TMUX_STUB_LOG")" 'paste-buffer -b peer-supervisor2reviewer -t %3 -d -p'
 teardown
@@ -285,7 +285,7 @@ teardown
 # tell:stdin + 显式 id(stdin 形式下唯一位置参数即目标 id)。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%3\treviewer\treviewer\tclaude\n' > "$TMUX_STUB_REGISTRY"
-run_peer tell reviewer <<< $'multi\nline'
+AGENT_DUO_NO_BROKER_GATE=1 run_peer tell reviewer <<< $'multi\nline'
 printf 'multi\nline\n' > "$SCENARIO_TMP/expected"
 assert_ok "tell: stdin with id buffer" cmp -s "$SCENARIO_TMP/expected" "$TMUX_STUB_BUFFER_DIR/peer-supervisor2reviewer"
 teardown
@@ -653,11 +653,18 @@ AGENT_DUO_NO_BROKER_GATE=1 assert_ok "gate: env disable bypasses gate" run_peer 
 assert_eq "gate: env disable buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "do work"
 teardown
 
-# non-worker target (reviewer) + no marker → not gated, sends.
+# F2: reviewer is a worker-like role → gated. unverified reviewer + no marker → refused.
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%3\treviewer\treviewer\tclaude\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "gate: non-worker target not gated" run_peer tell reviewer "please review"
-assert_eq "gate: non-worker buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2reviewer")" "please review"
+assert_exit_code "gate: unverified reviewer refused" 1 run_peer tell reviewer "please review"
+assert_ok "gate: reviewer no buffer written" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2reviewer"
+teardown
+
+# F2: non-worker roles (daemon/loopd) are NOT gated → send even with no marker.
+setup
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%4\tloopd\tdaemon\tclaude\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "gate: daemon/loopd target not gated" run_peer tell loopd "tick"
+assert_eq "gate: loopd buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2loopd")" "tick"
 teardown
 
 exit "$ADK_FAIL"

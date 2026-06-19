@@ -612,20 +612,27 @@ case "$cmd" in
     else
       target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
     fi
-    # Broker 硬门:发给 worker 角色时,broker 必须 fresh ready,否则拒发(fail-closed)。
+    # Broker 硬门:发给工作型角色(非 supervisor/daemon/loopd)时,broker 必须 fresh ready,否则拒发
+    # (fail-closed)。worker/reviewer/自定义工作角色都受保护,与 lib/loop.sh 的 active-worker 模型一致。
     # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
-    if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" && "$(role_for_id "$target_id")" == "worker" ]]; then
-      bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
-      case "$bg_out" in
-        *'"status":"ready"'*) ;;  # fresh ready → 放行
-        *)
-          bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
-          echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-          echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
-          exit 1
-          ;;
-      esac
-    fi
+    gate_role="$(role_for_id "$target_id")"
+    case "$gate_role" in
+      supervisor|daemon|loopd) ;;  # 非工作型角色:不门控
+      *)
+        if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
+          bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
+          case "$bg_out" in
+            *'"status":"ready"'*) ;;  # fresh ready → 放行
+            *)
+              bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
+              echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
+              echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
+              exit 1
+              ;;
+          esac
+        fi
+        ;;
+    esac
     check_safe_to_send_keys "$target"
     buf="peer-${ME}2${target_id}"
     if [[ $# -gt 0 ]]; then
