@@ -568,6 +568,7 @@ mkdir -p "$PROJECT/.agent-duo/state/worker"
 printf '{"agent":"worker","status":"ready","updated_epoch":%s,"nonce":"n1"}\n' "$(date +%s)" > "$PROJECT/.agent-duo/state/worker/broker.json"
 assert_ok "broker-status: reads marker" run_peer broker-status worker
 assert_contains "broker-status: ready reported" "$(cat "$OUT")" '"status":"ready"'
+assert_not_contains "broker-status: no hint when ready" "$(cat "$ERR")" 'broker-check'
 teardown
 
 # broker-status:ready 但过期(老 epoch)→ 报 stale,并给出 broker-check 提示。

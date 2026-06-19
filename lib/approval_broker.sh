@@ -958,6 +958,7 @@ ab_cmd_status() { # <root> <agent>
   else
     out="$data"
   fi
+  out="${out%$'\n'}"
   printf '%s\n' "${out%\}},\"age_seconds\":${age}}"
 }
 
