@@ -179,6 +179,21 @@ assert_contains  "H: codex worker has pretool hook config" "$(cat "$SENDLOG")" '
 assert_contains  "H: codex worker has permission hook config" "$(cat "$SENDLOG")" 'hooks.PermissionRequest'
 teardown
 
+# 场景 H2(F1):--with 必须把新 worker 的 broker marker 重置为 unverified,覆盖同一 workdir
+# 旧 session 残留的 fresh ready marker(否则硬门会误放行未信任的新 worker)。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf '{"agent":"worker","status":"ready","updated_epoch":%s,"nonce":"stale"}\n' "$(date +%s)" \
+  > "$PROJECT/.agent-duo/state/worker/broker.json"
+PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
+  bash "$ROOT/start.sh" "$PROJECT" --with codex:worker \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+assert_contains "H2: --with resets stale ready marker to unverified" \
+  "$(cat "$PROJECT/.agent-duo/state/worker/broker.json")" '"status":"unverified"'
+assert_not_contains "H2: stale ready no longer present" \
+  "$(cat "$PROJECT/.agent-duo/state/worker/broker.json")" '"status":"ready"'
+teardown
+
 # 场景 I:--with claude:reviewer → worker settings 进入 Claude 启动参数。
 setup
 PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
