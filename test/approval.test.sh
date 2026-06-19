@@ -331,6 +331,19 @@ run_hook '{"tool_name":"Bash","tool_input":{"command":"cat AGENT_DUO_BROKER_SELF
 assert_not_contains "selfcheck: cat mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
 assert_contains "selfcheck: cat mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
+# ⑦ Hook event name is recorded in the audit log and the marker (observability).
+AUDIT_LOG="$PROJECT/.agent-duo/logs/approvals.jsonl"
+
+# A PreToolUse invocation records event=PreToolUse in the audit line and marker last_event.
+run_hook '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"round":50}'
+assert_contains "audit: PreToolUse event recorded" "$(tail -n1 "$AUDIT_LOG")" '"event":"PreToolUse"'
+assert_contains "marker: last_event PreToolUse" "$(broker_status)" '"last_event":"PreToolUse"'
+
+# A PermissionRequest invocation records event=PermissionRequest in the audit line and marker.
+run_hook '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls -la"},"round":51}'
+assert_contains "audit: PermissionRequest event recorded" "$(tail -n1 "$AUDIT_LOG")" '"event":"PermissionRequest"'
+assert_contains "marker: last_event PermissionRequest" "$(broker_status)" '"last_event":"PermissionRequest"'
+
 # ① Marker carries session_id (forensic) and updated_epoch (for freshness).
 MARKER_FILE="$PROJECT/.agent-duo/state/worker/broker.json"
 run_hook '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"round":30,"session_id":"sess-abc123"}'
