@@ -157,6 +157,8 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 
 步骤状态：`pending | in_progress | blocked | done | failed | kept`（`kept` 见重规划）。每个 `done` 步各自带 evidence。
 
+> **CLI 现状（MVP 收窄）**：`peer task init <id> --task "..." --step s1:"..."` 会写 `.agent-duo/state/<id>/task.json` 并把步骤初始化为 `pending`；`peer task <id>` 查看账本；`peer task next <id>` 返回第一个 `blocked` / `in_progress` / `pending` 步作为 resume 点。`peer report --step <id>` 在该 agent 已有 `task.json` 时会校验 step 存在，并按 report 状态更新该步：`in_progress`、`blocked`、`failed`、带 evidence 的 `done`。`result(done)` 若 task 中仍有非 `done`/`kept` 步，会降级为 `partial`，避免静默完成整任务。重规划（`kept`、deps/gate/done_when 的编辑）仍待后续 MVP 扩展。
+
 ### 2.5 acceptance（验收组合规则，写进 loop contract）
 
 ```yaml
@@ -365,6 +367,7 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 |---|---|
 | 上行任意 Report（写文件 + sentinel） | `peer report --type … --status … [--step …] --file …` |
 | `peer wait` 等回合边界 | `peer wait <id> --round N`（等 sentinel） |
+| 初始化 / 查看步骤账本 | `peer task init <id> --task … --step s1:…` / `peer task next <id>` |
 | answer approval | `peer approve` / `peer deny` |
 | answer human gate | `peer gate resolve --choice …` |
 | create human gate | `peer gate open --title … [--option …]` |

@@ -19,6 +19,8 @@
 - `peer ls` — 列出本会话所有 agent(id / role / provider / pane),自己一行带 `*`
 - `peer add --provider claude|codex --role <role> [--id <id>]` — 新建一个**可见的**队友 tab 并自动注册;返回它的 id
 - `peer rm <id>` — 移除一个队友 tab
+- `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>`
+  — supervisor 初始化/查看 worker 的持久化 `task.json` 步骤账本;worker 解阻后按 next 从 `blocked` 或下一个 `pending` 步续跑
 - `peer report --type request --status blocked --needs decision --needs-detail "..." --needs-option "..."`
   — worker 需要人类做业务/部署/成本/网络等判断时,写结构化阻塞报告并打开 Human Decision Gate
 - `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...`

@@ -301,6 +301,7 @@ daemon 不是神秘服务——它是**一个跑在可见 tmux pane 里的 bash 
   logs/decisions.jsonl     # gate opened/resolved 审计日志
   state/supervisor.turn    # "busy"/"idle"，由 supervisor 的 hook 写
   state/<id>/report.json   # 各 worker 最新报告（peer report 写）
+  state/<id>/task.json     # worker 步骤账本（peer task init 写，peer report --step 更新）
   state/daemon.expected    # start/loopd 写入，表示本 session 预期有 daemon
   state/daemon.heartbeat   # daemon 自己的心跳时间戳
 ```
