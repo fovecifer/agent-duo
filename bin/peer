@@ -29,6 +29,9 @@
 #                           查看某 worker 的 Approval Broker 就绪状态(ready/unverified/fail-open)
 #   peer broker-check [<id>] 向 worker 投递自检探针,验证 broker hook 真的被 provider 调用;
 #                           未验证(fail-open)时不要派给它需要 broker 保护的任务
+#   peer gate [--all]       列出待处理 Human Decision Gate
+#   peer gate open [<id>] --title "..." [--detail "..."] [--option "..."]
+#                           创建一个 Decision Packet,供 supervisor 向人类升级
 #   peer gate resolve [<id>] --choice <choice> [--note "..."]
 #                           向 worker 答复 human gate 决策
 #   peer loopd              在当前 pane 运行 loop daemon 看板/轮询
@@ -382,6 +385,216 @@ append_event_json() {
     printf '}'
   )"
   printf '%s\n' "$line" >> "$queue"
+}
+
+json_array() {
+  local first=1 item
+  printf '['
+  for item in "$@"; do
+    if [[ $first -eq 1 ]]; then first=0; else printf ','; fi
+    json_str "$item"
+  done
+  printf ']'
+}
+
+gates_dir() {
+  printf '%s/gates' "$AGENT_DUO_DIR"
+}
+
+logs_dir() {
+  printf '%s/logs' "$AGENT_DUO_DIR"
+}
+
+gate_path() { # <gate_id>
+  printf '%s/%s.json' "$(gates_dir)" "$1"
+}
+
+new_gate_id() { # <round>
+  printf 'g%s-r%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$1" "$$"
+}
+
+write_gate_json() {
+  local path="$1" gate_id="$2" ts="$3" agent_id="$4" role="$5" round_s="$6"
+  local title="$7" detail="$8" report_ref="$9" options_json="${10}"
+  {
+    printf '{"protocol":"1",'
+    printf '"id":'; json_str "$gate_id"; printf ','
+    printf '"status":"pending",'
+    printf '"kind":"decision",'
+    printf '"agent_id":'; json_str "$agent_id"; printf ','
+    printf '"role":'; json_str "$role"; printf ','
+    printf '"round":%s,' "$round_s"
+    printf '"title":'; json_str "$title"; printf ','
+    printf '"detail":'; json_nullable_str "$detail"; printf ','
+    printf '"options":%s,' "$options_json"
+    printf '"report_ref":'; json_nullable_str "$report_ref"; printf ','
+    printf '"created_at":'; json_str "$ts"; printf ','
+    printf '"resolved_at":null,"resolved_by":null,"choice":null,"note":null'
+    printf '}\n'
+  } > "$path"
+}
+
+append_decision_log() {
+  local gate_id="$1" status="$2" agent="$3" summary="$4" choice="$5" note="$6"
+  local log line
+  mkdir -p "$(logs_dir)"
+  log="$(logs_dir)/decisions.jsonl"
+  line="$(
+    printf '{"ts":'; json_str "$(iso_ts)"
+    printf ',"gate":'; json_str "$gate_id"
+    printf ',"status":'; json_str "$status"
+    printf ',"agent":'; json_str "$agent"
+    printf ',"summary":'; json_str "$summary"
+    printf ',"choice":'; json_nullable_str "$choice"
+    printf ',"note":'; json_nullable_str "$note"
+    printf '}'
+  )"
+  printf '%s\n' "$line" >> "$log"
+}
+
+create_gate_record() { # <gate_id> <ts> <agent> <role> <round> <title> <detail> <report_ref> [option...]
+  local gate_id="$1" ts="$2" agent="$3" role="$4" round_s="$5" title="$6" detail="$7" report_ref="$8"
+  local dir path tmp options_json
+  shift 8
+  dir="$(gates_dir)"
+  mkdir -p "$dir"
+  path="$(gate_path "$gate_id")"
+  if [[ -e "$path" ]]; then
+    echo "错误: gate 已存在: $gate_id" >&2
+    return 1
+  fi
+  options_json="$(json_array "$@")"
+  tmp="$dir/.${gate_id}.json.$$"
+  write_gate_json "$tmp" "$gate_id" "$ts" "$agent" "$role" "$round_s" "$title" "$detail" "$report_ref" "$options_json"
+  mv "$tmp" "$path"
+}
+
+gate_pending_ids() {
+  local dir file
+  dir="$(gates_dir)"
+  for file in "$dir"/*.json; do
+    [[ -f "$file" ]] || continue
+    jq -r 'select((.status // "pending") == "pending") | .id // empty' "$file" 2>/dev/null || true
+  done
+}
+
+gate_pick_unique_pending() {
+  local ids count
+  ids="$(gate_pending_ids | sed '/^$/d')"
+  if [[ -z "$ids" ]]; then
+    count="0"
+  else
+    count="$(printf '%s\n' "$ids" | wc -l | tr -d ' ')"
+  fi
+  case "$count" in
+    0) return 1 ;;
+    1) printf '%s' "$ids"; return 0 ;;
+    *)
+      echo "错误: 存在多个 pending gate,请指定 gate id。可用 'peer gate' 查看。" >&2
+      return 2
+      ;;
+  esac
+}
+
+gate_pending_ids_for_agent() { # <agent_id>
+  local agent="$1" dir file
+  dir="$(gates_dir)"
+  for file in "$dir"/*.json; do
+    [[ -f "$file" ]] || continue
+    jq -r --arg agent "$agent" '
+      select((.status // "pending") == "pending" and (.agent_id // "") == $agent) | .id // empty
+    ' "$file" 2>/dev/null || true
+  done
+}
+
+gate_pick_unique_pending_for_agent() { # <agent_id>
+  local agent="$1" ids count
+  ids="$(gate_pending_ids_for_agent "$agent" | sed '/^$/d')"
+  if [[ -z "$ids" ]]; then
+    count="0"
+  else
+    count="$(printf '%s\n' "$ids" | wc -l | tr -d ' ')"
+  fi
+  case "$count" in
+    0) return 1 ;;
+    1) printf '%s' "$ids"; return 0 ;;
+    *)
+      echo "错误: agent '$agent' 存在多个 pending gate,请指定 gate id。可用 'peer gate' 查看。" >&2
+      return 2
+      ;;
+  esac
+}
+
+gate_print_list() { # <show_all:0|1>
+  local show_all="$1" dir file row id status agent round title options any
+  any=0
+  dir="$(gates_dir)"
+  for file in "$dir"/*.json; do
+    [[ -f "$file" ]] || continue
+    status="$(jq -r '.status // "pending"' "$file" 2>/dev/null || printf 'pending')"
+    if [[ "$show_all" != "1" && "$status" != "pending" ]]; then
+      continue
+    fi
+    if [[ "$any" == "0" ]]; then
+      printf '%-24s %-10s %-10s %-8s %s\n' "ID" "STATUS" "AGENT" "ROUND" "TITLE"
+    fi
+    any=1
+    row="$(jq -r '
+      [
+        (.id // ""),
+        (.status // "pending"),
+        (.agent_id // ""),
+        ("r" + ((.round // 0) | tostring)),
+        ((.title // .detail // "") | gsub("[\r\n\t]"; " ")),
+        ((.options // []) | join(","))
+      ] | @tsv
+    ' "$file" 2>/dev/null || true)"
+    IFS=$'\t' read -r id status agent round title options <<< "$row"
+    printf '%-24s %-10s %-10s %-8s %s' "$id" "$status" "$agent" "$round" "$(printf '%s' "$title" | cut -c1-80)"
+    if [[ -n "$options" ]]; then
+      printf ' [options: %s]' "$options"
+    fi
+    printf '\n'
+  done
+  if [[ "$any" == "0" ]]; then
+    if [[ "$show_all" == "1" ]]; then
+      printf '没有 human gate。\n'
+    else
+      printf '没有待处理 human gate。\n'
+    fi
+  fi
+}
+
+gate_field() { # <gate_id> <jq_expr>
+  local path
+  path="$(gate_path "$1")"
+  [[ -f "$path" ]] || return 1
+  jq -r "$2 // empty" "$path"
+}
+
+gate_resolve_record() { # <gate_id> <choice> <note>
+  local gate_id="$1" choice="$2" note="$3" path tmp agent summary
+  path="$(gate_path "$gate_id")"
+  if [[ ! -f "$path" ]]; then
+    echo "错误: 找不到 gate '$gate_id'。" >&2
+    return 1
+  fi
+  if [[ "$(jq -r '.status // "pending"' "$path")" != "pending" ]]; then
+    echo "错误: gate '$gate_id' 不是 pending。" >&2
+    return 1
+  fi
+  tmp="${path}.$$"
+  jq -c --arg ts "$(iso_ts)" --arg by "$ME" --arg choice "$choice" --arg note "$note" '
+    .status = "resolved"
+    | .resolved_at = $ts
+    | .resolved_by = $by
+    | .choice = $choice
+    | .note = (if $note == "" then null else $note end)
+  ' "$path" > "$tmp"
+  mv "$tmp" "$path"
+  agent="$(jq -r '.agent_id // ""' "$path")"
+  summary="$(jq -r '.detail // .title // ""' "$path")"
+  append_decision_log "$gate_id" "resolved" "$agent" "$summary" "$choice" "$note"
 }
 
 screen_has_round_sentinel() { # <screen> <round> <agent_id> [codec_tag]
@@ -947,6 +1160,8 @@ case "$cmd" in
     ts="$(iso_ts)"
     tag="$(codec_tag)"
     ref=".agent-duo/state/$ME/r${round}.json"
+    event_ref="$ref"
+    gate_created_file=""
 
     queue="$events_dir/queue.jsonl"
     event_type="$(event_type_for_report "$report_type" "$effective_status")"
@@ -956,10 +1171,25 @@ case "$cmd" in
     if [[ -z "$summary" && -n "$needs_detail" ]]; then summary="$(one_line "$needs_detail")"; fi
     if [[ -z "$summary" && -n "$needs_kind" ]]; then summary="needs:${needs_kind}"; fi
     if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
+    if [[ "$needs_kind" == "decision" && "$event_type" == "blocked" ]]; then
+      gate_id="$(new_gate_id "$round")"
+      gate_title="$needs_detail"
+      if [[ -z "$gate_title" ]]; then gate_title="Human decision required"; fi
+      if ! create_gate_record "$gate_id" "$ts" "$ME" "$role" "$round" "$gate_title" "$needs_detail" "$ref" ${needs_options[@]+"${needs_options[@]}"}; then
+        rm -f "$report_file"
+        exit 1
+      fi
+      gate_created_file="$(gate_path "$gate_id")"
+      event_ref=".agent-duo/gates/${gate_id}.json"
+    fi
     event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
-    if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"; then
+    if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$event_ref"; then
       rm -f "$report_file"
+      if [[ -n "$gate_created_file" ]]; then rm -f "$gate_created_file"; fi
       exit 1
+    fi
+    if [[ -n "$gate_created_file" ]]; then
+      append_decision_log "$gate_id" "opened" "$ME" "$summary" "" ""
     fi
 
     tmp_latest="$state_dir/.report.json.$$"
@@ -973,51 +1203,140 @@ case "$cmd" in
 
   gate)
     subcmd="${1:-}"
-    if [[ "$subcmd" != "resolve" ]]; then
-      echo "用法: peer gate resolve [<id>] --choice <choice> [--note \"...\"]" >&2
+    if [[ -z "$subcmd" || "$subcmd" == "--all" ]]; then
+      show_all=0
+      if [[ "$subcmd" == "--all" ]]; then show_all=1; fi
+      gate_print_list "$show_all"
+      exit 0
+    fi
+    if [[ "$subcmd" != "open" && "$subcmd" != "resolve" ]]; then
+      echo "用法: peer gate [--all] | peer gate open [<target>] --title \"...\" [--detail \"...\"] [--option \"...\"] | peer gate resolve [<gate-id>|<target-id>] --choice <choice> [--note \"...\"]" >&2
       exit 1
     fi
     shift
-    maybe_id=""
-    if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
-      maybe_id="$1"
-      shift
-    fi
-    choice=""
-    note=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --choice) choice="${2:-}"; shift 2 ;;
-        --note) note="${2:-}"; shift 2 ;;
-        *) echo "用法: peer gate resolve [<id>] --choice <choice> [--note \"...\"]" >&2; exit 1 ;;
-      esac
-    done
-    if [[ -z "$choice" ]]; then
-      echo "错误: peer gate resolve 需要 --choice。" >&2
-      exit 1
-    fi
-    if [[ ! "$choice" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-      echo "错误: --choice 只能包含字母、数字、点、下划线、冒号和连字符；补充说明请用 --note。" >&2
-      exit 1
-    fi
-    ensure_session
-    target="$(resolve_target_pane "$maybe_id")"
-    if [[ -n "$maybe_id" ]]; then
-      target_id="$maybe_id"
-    else
-      target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
-    fi
-    check_safe_to_send_keys "$target"
-    buf="peer-${ME}2${target_id}-gate"
-    gate_text="«AGENTDUO verb=decision choice=${choice}»"
-    if [[ -n "$note" ]]; then
-      gate_text="${gate_text}"$'\n'"$note"
-    fi
-    printf '%s' "$gate_text" | tmux load-buffer -b "$buf" -
-    tmux paste-buffer -b "$buf" -t "$target" -d -p
-    sleep 0.5
-    tmux send-keys -t "$target" Enter
-    echo "已发送 gate decision(choice=$choice)。"
+    case "$subcmd" in
+      open)
+        maybe_id=""
+        if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+          maybe_id="$1"
+          shift
+        fi
+        gate_title=""
+        gate_detail=""
+        round="0"
+        needs_options=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --title) gate_title="${2:-}"; shift 2 ;;
+            --detail) gate_detail="${2:-}"; shift 2 ;;
+            --option) needs_options+=("${2:-}"); shift 2 ;;
+            --round) round="${2:-}"; shift 2 ;;
+            *) echo "用法: peer gate open [<target>] --title \"...\" [--detail \"...\"] [--option \"...\"] [--round N]" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$gate_title" ]]; then
+          echo "错误: peer gate open 需要 --title。" >&2
+          exit 1
+        fi
+        if [[ -n "$round" && "$round" != "0" ]] && ! is_positive_int "$round"; then
+          echo "错误: --round 必须是正整数。" >&2
+          exit 1
+        fi
+        ensure_session
+        target="$(resolve_target_pane "$maybe_id")"
+        if [[ -n "$maybe_id" ]]; then
+          target_id="$maybe_id"
+        else
+          target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+        fi
+        target_role="$(role_for_id "$target_id")"
+        gate_id="$(new_gate_id "$round")"
+        ts="$(iso_ts)"
+        create_gate_record "$gate_id" "$ts" "$target_id" "$target_role" "$round" "$gate_title" "$gate_detail" "" ${needs_options[@]+"${needs_options[@]}"}
+        gate_summary="$gate_detail"
+        if [[ -z "$gate_summary" ]]; then gate_summary="$gate_title"; fi
+        append_decision_log "$gate_id" "opened" "$target_id" "$gate_summary" "" ""
+        echo "已打开 human gate $gate_id (target=$target_id)。"
+        ;;
+      resolve)
+        maybe_id=""
+        if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+          maybe_id="$1"
+          shift
+        fi
+        choice=""
+        note=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --choice) choice="${2:-}"; shift 2 ;;
+            --note) note="${2:-}"; shift 2 ;;
+            *) echo "用法: peer gate resolve [<gate-id>|<target-id>] --choice <choice> [--note \"...\"]" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$choice" ]]; then
+          echo "错误: peer gate resolve 需要 --choice。" >&2
+          exit 1
+        fi
+        if [[ ! "$choice" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+          echo "错误: --choice 只能包含字母、数字、点、下划线、冒号和连字符；补充说明请用 --note。" >&2
+          exit 1
+        fi
+        gate_id=""
+        if [[ -n "$maybe_id" && -f "$(gate_path "$maybe_id")" ]]; then
+          gate_id="$maybe_id"
+        elif [[ -n "$maybe_id" ]]; then
+          if gate_id="$(gate_pick_unique_pending_for_agent "$maybe_id")"; then
+            :
+          else
+            rc="$?"
+            if [[ "$rc" == "2" ]]; then exit 1; fi
+            gate_id=""
+          fi
+        elif [[ -z "$maybe_id" ]]; then
+          if gate_id="$(gate_pick_unique_pending)"; then
+            :
+          else
+            rc="$?"
+            if [[ "$rc" == "2" ]]; then exit 1; fi
+            gate_id=""
+          fi
+        fi
+        ensure_session
+        if [[ -n "$gate_id" ]]; then
+          target_id="$(gate_field "$gate_id" '.agent_id')"
+          if [[ -z "$target_id" ]]; then
+            echo "错误: gate '$gate_id' 缺少 agent_id,无法发送 decision。" >&2
+            exit 1
+          fi
+          target="$(resolve_target_pane "$target_id")"
+        else
+          target="$(resolve_target_pane "$maybe_id")"
+          if [[ -n "$maybe_id" ]]; then
+            target_id="$maybe_id"
+          else
+            target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+          fi
+        fi
+        check_safe_to_send_keys "$target"
+        if [[ -n "$gate_id" ]]; then
+          gate_resolve_record "$gate_id" "$choice" "$note"
+        fi
+        buf="peer-${ME}2${target_id}-gate"
+        gate_text="«AGENTDUO verb=decision choice=${choice}»"
+        if [[ -n "$note" ]]; then
+          gate_text="${gate_text}"$'\n'"$note"
+        fi
+        printf '%s' "$gate_text" | tmux load-buffer -b "$buf" -
+        tmux paste-buffer -b "$buf" -t "$target" -d -p
+        sleep 0.5
+        tmux send-keys -t "$target" Enter
+        if [[ -n "$gate_id" ]]; then
+          echo "已解决 human gate $gate_id 并发送 decision(choice=$choice)。"
+        else
+          echo "已发送 gate decision(choice=$choice)。"
+        fi
+        ;;
+    esac
     ;;
 
   approvals)

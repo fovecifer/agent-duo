@@ -19,6 +19,10 @@
 - `peer ls` — 列出本会话所有 agent(id / role / provider / pane),自己一行带 `*`
 - `peer add --provider claude|codex --role <role> [--id <id>]` — 新建一个**可见的**队友 tab 并自动注册;返回它的 id
 - `peer rm <id>` — 移除一个队友 tab
+- `peer report --type request --status blocked --needs decision --needs-detail "..." --needs-option "..."`
+  — worker 需要人类做业务/部署/成本/网络等判断时,写结构化阻塞报告并打开 Human Decision Gate
+- `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...`
+  — supervisor 查看、创建、解决 Human Decision Gate;人类只需对 supervisor 说自然语言,由 supervisor 执行这些命令
 - 寻址:`peer tell/peek/wait/esc [<id>]` 可指定目标 id;**正好两个 agent 时可省略**(默认发给"另一个");三个及以上必须显式指定 id
 
 ### 使用规则
