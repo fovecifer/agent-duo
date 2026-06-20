@@ -56,8 +56,8 @@ peer ask <worker> "..."  ──fail-closed 查 loop.json──┘  越界拒发(
   "mission": "把登录失败错误提示修对并跑测试验证",   // 软护栏:供 supervisor 读
   "non_goals": ["不改 auth 流程", "不重构"],          // 软护栏
   "success_signals": ["auth.test.ts 全绿", "401/403 文案正确"], // 软护栏(cut1 不机械匹配)
-  "max_rounds": 8,                  // 硬边界:机械截停
-  "frozen_at_round": 1,
+  "max_rounds": 8,                  // 硬边界:从 frozen_at_round 起的【相对预算】(再跑 N 轮),不是绝对轮号
+  "frozen_at_round": 1,             // 冻结时 worker 的当前轮次;轮预算相对它计
   "status": "active",               // active | stopped
   "stop": {
     "on_terminal": true,            // 硬边界:result(done)+全步done 或 failed 即停
@@ -98,11 +98,11 @@ peer loop init [<worker>] --mission "..." --max-rounds N \
 peer loop [<worker>]
 ```
 
-打印契约 + 当前派生量：`round`=最新 rN（读 `report.json` 的 `.round`，无报告为 0）、`remaining`=`max_rounds - round`、`status`。
+打印契约 + 当前派生量：`round`=最新 rN（读 `report.json` 的 `.round`，无报告为 0）、`rounds_used`=`round - frozen_at_round + 1`、`remaining`=`max_rounds - rounds_used`、`status`。
 
 ## 5. 评估器：`ad_loop_eval_contracts <root> <session>`
 
-加进 `lib/loop.sh`，由 `ad_loop_once` 在渲染看板前调用一次。对每个**有 `loop.json` 且 `status==active`** 的 worker：
+加进 `lib/loop.sh`。**`ad_loop_once` 的调用顺序明确为**：`check_liveness` → `maybe_tick` → **`eval_contracts`** → `idle_arrival` → `render_dashboard`。把评估器放在 `idle_arrival` **之前**，是为了让本 tick 产生的 `loop_stop` 事件**当 tick 就能被注入**给 supervisor，而不是拖到下一 tick。对每个**有 `loop.json` 且 `status==active`** 的 worker：
 
 ### 5.1 读两个信号（复用现成 helper，不新造计数器）
 
@@ -114,32 +114,39 @@ peer loop [<worker>]
 ### 5.2 停止判定（仅 `status==active` 时，按优先级）
 
 ```
+rounds_used = current_round - frozen_at_round + 1     # 相对预算,从冻结轮起算
+
 if on_terminal and report_status == "done"    → stop(reason=done)       # 成功优先
 elif on_terminal and report_status == "failed" → stop(reason=failed)
-elif current_round >= max_rounds               → stop(reason=max_rounds)
+elif rounds_used >= max_rounds                 → stop(reason=max_rounds)
 else                                           → 不动(active)
 ```
 
-终态优先于 `max_rounds`：worker 恰在第 `max` 轮报 done，记成功而非"耗尽"。
+- 终态优先于 `max_rounds`：worker 恰在预算最后一轮报 done，记成功而非"耗尽"。
+- **`max_rounds` 是相对预算,不是绝对轮号**：worker 已有历史 report（如 `current_round=12`）时，`peer loop init --max-rounds 8` 给的是从 `frozen_at_round=12` 起再跑 8 轮（停在 round 19），**不会**因 `12>=8` 立即停。`rounds_used <= 0`（异常的过期报告）永不触发停止。
 
 ### 5.3 状态翻转 + 事件：照搬 report/gate/task 的 tmp+回滚纪律
 
-命中停止时，**先 stage、event 成功后才 commit**——和仓库其它写入完全一致，保证不"静默停"也不重复发：
+命中停止时，靠**确定性事件 id 去重**保证 exactly-once，并用 **append-先-mv-后** 保证不"静默停"：
 
 ```
-1. 把 stopped 版 loop.json 写到 tmp
-   (status=stopped, stop.reason/stopped_at_round/stopped_at, updated_at)
-2. append 一条 loop_stop 事件到 queue.jsonl
-3. event 成功 → mv tmp → loop.json   (这一刻起 status=stopped,下个 tick 不再评估 → 天然幂等)
-   event 失败 → rm tmp,loop.json 仍 active(下个 tick 重试,不会漏通知)
+deterministic_id = "loopstop-<agent>-<stopped_at_round>"   # 与时间戳/pid 无关
+stopped_at_round = current_round
+
+1. 把 stopped 版 loop.json 写到 tmp(status=stopped, stop.reason/stopped_at_round/stopped_at, updated_at)
+2. 若 queue.jsonl 已含该 deterministic_id 的事件 → 跳过 append(上次尝试已写),直接进 4
+3. 否则 append loop_stop 事件(其 "id" 字段 = deterministic_id)
+4. mv tmp → loop.json   (status=stopped,下个 tick 不再评估)
+   —— 若 append 失败 → rm tmp,loop.json 仍 active(下个 tick 重试,不漏通知)
 ```
 
-loopd 是单进程常驻、串行 tick，无并发重入，所以这套顺序既不漏发也不重发。
+**为什么 exactly-once 成立**：崩溃/失败只可能发生在"append 成功、mv 未完成"之间 → loop.json 仍 active → 下个 tick 重评 → `stopped_at_round` 不变（无新报告）→ 同一 `deterministic_id` → 命中第 2 步去重 → **不重发,只补 mv**。loopd 单进程串行 tick，无并发重入，故去重只需查 queue 子串、无需锁。（若重试前来了新报告使 `current_round` 前进，那是一次全新评估，按新 round/reason 处理——exactly-once 的粒度是 per `(agent, stopped_at_round)`。）
 
 ### 5.4 `loop_stop` 事件
 
 ```jsonc
-{ "type": "loop_stop", "agent": "worker", "round": <current_round>,
+{ "id": "loopstop-worker-19",                    // 确定性 id(见 §5.3 去重)
+  "type": "loop_stop", "agent": "worker", "round": <current_round>,
   "summary": "loop stopped: max_rounds (8/8)",   // 或 done / failed
   "ref": ".agent-duo/state/worker/loop.json" }
 ```
@@ -168,9 +175,11 @@ peer ask [<worker>] "<消息>" [--timeout N] [--interval N] [--force]
 
 ### 6.2 为什么"新结果"= 新 report，而不是屏幕 diff
 
-worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重绘帧，不是 append 日志，两帧 diff 很脏、不可靠。而本仓库 worker→supervisor 的干净通道**就是 report**：`peer report` 打出的 sentinel（`«AGENTDUO:… round=N … file=…»`）是 TUI 里**显式、可锚定**的标记，`wait --round` 已经在用它判回合边界。
+worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重绘帧，不是 append 日志，两帧 diff 很脏、不可靠。而本仓库 worker→supervisor 的干净通道**就是 report**：`peer report` 原子写出 `report.json`（symlink 指向最新 rN.json）。
 
-所以 `peer ask` 的"新输出"定义为：**这一轮产生的新 report 的 summary + ref**——干净、鲁棒、且正好是契约里 supervisor 该消费的东西。
+所以 `peer ask` 的"新输出"定义为：**这一轮产生的新 rN.json 的关键字段 + ref**——干净、鲁棒、且正好是契约里 supervisor 该消费的东西。
+
+> **等待机制（不要复用 `wait --round`）**：现有 `peer wait --round N` 用 `screen_has_round_sentinel` 等**精确** round=N 的屏幕 sentinel，没有">R"语义。`peer ask` 改为**轮询文件系统**：读 target 的 `report.json` 的 `.round`，直到 `> R` 或超时——确定性、可 stub、零 TUI 依赖。命中后直接读那条 `rN.json`，不碰屏幕。
 
 > 定位：`peer ask` 是 **loop 原语**（report-gated），不替代 `tell`。要跟 reviewer 随口问一句、对方不会 report 的场景，supervisor 仍用 `tell + peek`。
 
@@ -179,14 +188,17 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 ```
 1. 解析 target(同 tell/peek:[<worker>] 省略时按两人默认回查)
 2. 【loop fail-closed】读 target 的 loop.json(若存在)且非 --force:
-     若 status==stopped              → 拒发,exit 1
-     若 current_round >= max_rounds  → 拒发,exit 1
+     若 status==stopped                                  → 拒发,exit 1
+     若 (current_round - frozen_at_round + 1) >= max_rounds → 拒发,exit 1   (同 §5.2 相对预算)
    (current_round 用 report.json 的 .round;这步同时挡住"loopd 还没 tick 到"的竞态)
-3. 记录 pre-send 最新 report 轮次 R(无报告 → 0)
-4. 下发消息:复用 tell 的 buffer+paste+enter 路径
-     → ⚠️ tell 的 broker 硬门在此自动生效。即 ask 叠两道闸:loop 边界(新)+ broker ready(已有)
-5. 等待该 worker 出现 round > R 的 report sentinel(复用 wait --round 的 sentinel 轮询)
-6. 命中 → 读那条 rN.json,打印结构化结果:round / status / delta / next / needs + ref
+3. 记录 pre-send 最新 report 轮次 R(读 report.json 的 .round;无报告 → 0)
+4. 下发消息:复用 tell 的发送段。⚠️ 因 tell 只认 ${1}=="--force",ask【不能】拼 `peer tell <worker> ... --force`;
+     而是在同进程内【设置 FORCE_SEND=1】再走发送段(--force 时),或调用 `peer tell --force <worker> -- "$msg"`(--force 居首)。
+     → tell 的 broker 硬门在发送段自动生效。即 ask 叠两道闸:loop 边界(新,发送前)+ broker ready(已有,发送段内)
+5. 轮询 target 的 report.json 的 .round,直到 > R 或超时(--timeout/--interval)
+6. 命中 → 读那条 rN.json,打印关键字段:round / status / delta / next / needs + ref
+     一行 summary 按【event 同款派生】:delta → next → needs.detail → needs:kind → type/status
+     (report JSON 无 summary 原字段,summary 是 event 层派生概念)
    超时未出新 report → 非零退出 + 末屏 peek 兜底(best-effort)
 ```
 
@@ -204,7 +216,7 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 | **loop 边界**（本 spec 新增） | loop.json status/轮次 | `peer ask` 发送前 | `--force` |
 | **broker 硬门**（已有） | 目标 broker fresh ready | tell 路径内 | `--force` / `AGENT_DUO_NO_BROKER_GATE=1` |
 
-- `peer ask --force` 同时跳过 loop 边界**和** broker 门（复用 tell 的 `FORCE_SEND` 语义），与现有 `--force` 一致。
+- `peer ask --force` 同时跳过 loop 边界**和** broker 门：实现上 ask 在发送段【内部置 `FORCE_SEND=1`】（不可拼成 `peer tell <worker> … --force`，因 tell 只认 `${1}`），与现有 `--force` 语义一致。
 - `peer tell` 本身**不**加 loop 边界检查——loop 边界只属于 `ask` 这个 loop 原语，`tell` 维持现状（只受 broker 门）。
 
 ## 7. 错误处理与边界
@@ -242,14 +254,16 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 
 **评估器（loop.test.sh，用 `loopd --once`，照搬现有 stub 报告手法）**
 
-- active、round<max、非终态 → 保持 active，**无** loop_stop 事件。
-- round≥max、非终态 → stopped(max_rounds) + **恰一条** loop_stop。
-- 终态 done（未到 max）→ stopped(done)。
+- active、`rounds_used<max`、非终态 → 保持 active，**无** loop_stop 事件。
+- `rounds_used>=max`、非终态 → stopped(max_rounds) + **恰一条** loop_stop。
+- **相对预算**：`frozen_at_round=12`、`max_rounds=8`、`current_round=12` → 仍 active（`rounds_used=1`），不因 12≥8 立即停。
+- 终态 done（预算内）→ stopped(done)。
 - 终态 failed → stopped(failed)。
-- **终态优先**：round==max 且 done → reason=done（非 max_rounds）。
-- 幂等：连跑两次 `--once`，只有一条 loop_stop（第二次 status 已 stopped）。
+- **终态优先**：`rounds_used==max` 且 done → reason=done（非 max_rounds）。
+- 幂等（正常）：连跑两次 `--once`，只有一条 loop_stop（第二次 status 已 stopped 跳过评估）。
+- 幂等（崩溃重试）：queue **预置**同 `deterministic_id` 的 loop_stop 后，loop.json 仍 active 跑 `--once` → **不追加重复事件**，且 loop.json 翻成 stopped（去重 + 补 mv）。
 - event append 失败 → loop.json 仍 active（无孤儿 stopped）。
-- 看板显示 `loop=round/max status`。
+- 看板显示 `loop=rounds_used/max status`。
 
 **peer ask（peer.test.sh）**
 
@@ -258,8 +272,8 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 - `--force` → 越过 loop 闸，发送。
 - 无 loop.json → 不挂 loop 闸（发送）。
 - broker 未 ready + loop active → 仍被 broker 门拒（验证两闸独立）。
-- 成功：stub 出 round>R 的 sentinel → 打印新 report 的 summary/ref。
-- 超时无新 report → 非零退出 + 兜底提示。
+- 成功：stub 写出 `report.json` 的 `.round > R` → ask 轮询命中 → 打印那条 rN.json 的字段 + 派生 summary + ref。
+- 超时无新 report（`.round` 不前进）→ 非零退出 + 兜底提示。
 
 ## 9. 实现影响面
 
@@ -273,3 +287,14 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 - 不把 supervisor 变无头 `loop run`——它始终是可见、可插话的 session（守水线）。
 - 不在人面前暴露结构化命令——`loop`/`ask`/契约全是 supervisor 的内部动作。
 - 不做 validation 自动跑、success_signals 机械匹配、acceptance veto、loop reset——均留后续迭代。
+
+## 11. 评审修订（2026-06-21，交付前收紧）
+
+实现者注意这 6 处已澄清的语义（早期草案曾含糊/不一致）：
+
+1. **`max_rounds` = 相对预算**：判定用 `rounds_used = current_round - frozen_at_round + 1 >= max_rounds`，**不是** `current_round >= max_rounds`（否则有历史 report 的 worker 会被立即停）。
+2. **`loop_stop` exactly-once 靠确定性 id 去重**：id = `loopstop-<agent>-<stopped_at_round>`；append 前查 queue 去重，再 mv。崩溃重试不重发。
+3. **`peer ask` 等待 = 轮询 `report.json` 的 `.round > R`**，**不复用** `wait --round`（后者是精确 round 的屏幕 sentinel 匹配，无 ">R" 语义）。
+4. **评估器插入点精确**：`liveness → tick → eval_contracts → idle_arrival → dashboard`，保证 `loop_stop` 当 tick 即被注入。
+5. **`peer ask --force` 内部置 `FORCE_SEND=1`**：`tell` 只认 `${1}=="--force"`，不能拼 `peer tell <worker> … --force`。
+6. **report 无 `summary` 原字段**：ask 输出的一行 summary 按 event 同款派生（delta → next → needs.detail → needs:kind → type/status）。
