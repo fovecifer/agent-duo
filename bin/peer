@@ -162,6 +162,15 @@ is_needs_kind() {
   esac
 }
 
+# 工作型角色(受 broker 派发硬门保护):除 supervisor/daemon/loopd 外的所有角色。
+# 单一真相:tell 门控与 add 提示都用它,避免两处豁免名单漂移。
+role_is_gated() {
+  case "$1" in
+    supervisor|daemon|loopd) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 run_approval_broker() {
   bash "$APPROVAL_BROKER" "$@"
 }
@@ -541,9 +550,12 @@ case "$cmd" in
     echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
     # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效。
     run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
+    # 工作型角色(任何 provider)都受派发硬门保护:派任务前必须先 broker-check,否则首次 peer tell 被拒发。
+    if role_is_gated "$role"; then
+      echo "提示: '$new_id' 的 Approval Broker 起始为 unverified;派任务前先运行 'peer broker-check $new_id' 验证 broker 生效,否则首次 'peer tell $new_id ...' 会被硬门 fail-closed 拒发。"
+    fi
     if [[ "$provider" == "codex" ]]; then
-      echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook。"
-      echo "信任后请运行 'peer broker-check $new_id' 验证 Approval Broker 真的生效(未验证前别派需要 broker 保护的任务)。"
+      echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook(信任前 broker-check 不会通过)。"
     fi
     ;;
 
@@ -647,23 +659,19 @@ case "$cmd" in
     # (fail-closed)。worker/reviewer/自定义工作角色都受保护,与 lib/loop.sh 的 active-worker 模型一致。
     # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
     gate_role="$(role_for_id "$target_id")"
-    case "$gate_role" in
-      supervisor|daemon|loopd) ;;  # 非工作型角色:不门控
-      *)
-        if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
-          bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
-          case "$bg_out" in
-            *'"status":"ready"'*) ;;  # fresh ready → 放行
-            *)
-              bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
-              echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-              echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
-              exit 1
-              ;;
-          esac
-        fi
-        ;;
-    esac
+    if role_is_gated "$gate_role" \
+       && [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
+      bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
+      case "$bg_out" in
+        *'"status":"ready"'*) ;;  # fresh ready → 放行
+        *)
+          bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
+          echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
+          echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
+          exit 1
+          ;;
+      esac
+    fi
     check_safe_to_send_keys "$target"
     buf="peer-${ME}2${target_id}"
     if [[ $# -gt 0 ]]; then
