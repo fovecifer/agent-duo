@@ -89,7 +89,8 @@ peer loop init [<worker>] --mission "..." --max-rounds N \
 - 冻结 `loop.json`；已存在则 fail-closed（照搬 task init）。
 - `--mission`、`--max-rounds` 必填；`--max-rounds` 必须为正整数。
 - `--non-goal` / `--success` 可重复，落入对应数组；空数组用 `${arr[@]+...}` 守 `set -u`，值经 `json_str` 转义。
-- `<worker>` 省略默认 `ME`（供 supervisor 指定目标）；`--round` 默认 1，写入 `frozen_at_round`。
+- `<worker>` 省略默认 `ME`（供 supervisor 指定目标）。
+- `--round` 省略时**默认取该 worker 当前最新 report 轮次**（读 `report.json` 的 `.round`），无报告则 1；写入 `frozen_at_round`。这样预算从"冻结当下"起算——worker 已在 round 12 时 `peer loop init --max-rounds 8` 写 `frozen_at_round=12`（`rounds_used` 当下为 1），与 §5.2 历史 report 示例一致；**不会**因默认 1 导致 `rounds_used=12` 立即触发停止。
 - 写入用 tmp+mv 原子可见。
 
 ### 4.2 `peer loop`
@@ -268,7 +269,8 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 **peer ask（peer.test.sh）**
 
 - stopped → 拒发，无 paste。
-- round≥max → 拒发，无 paste。
+- `rounds_used>=max` → 拒发，无 paste。
+- **相对预算不误拒**：`frozen_at_round=12`、`max_rounds=8`、`current_round=12`（`rounds_used=1`）→ ask **不**拒发（与评估器同口径）。
 - `--force` → 越过 loop 闸，发送。
 - 无 loop.json → 不挂 loop 闸（发送）。
 - broker 未 ready + loop active → 仍被 broker 门拒（验证两闸独立）。
@@ -298,3 +300,5 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 4. **评估器插入点精确**：`liveness → tick → eval_contracts → idle_arrival → dashboard`，保证 `loop_stop` 当 tick 即被注入。
 5. **`peer ask --force` 内部置 `FORCE_SEND=1`**：`tell` 只认 `${1}=="--force"`，不能拼 `peer tell <worker> … --force`。
 6. **report 无 `summary` 原字段**：ask 输出的一行 summary 按 event 同款派生（delta → next → needs.detail → needs:kind → type/status）。
+7. **`peer loop init --round` 默认 = 当前最新 report 轮次**（无报告则 1），不是硬编码 1；否则有历史 report 的 worker 不传 `--round` 会写 `frozen_at_round=1` → 立即触发 `max_rounds`。
+8. **`peer ask` fail-closed 与测试统一为 `rounds_used>=max`**（非 `round>=max`），并加历史 report 不误拒的用例。
