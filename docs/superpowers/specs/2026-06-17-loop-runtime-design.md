@@ -297,6 +297,8 @@ daemon 不是神秘服务——它是**一个跑在可见 tmux pane 里的 bash 
   events/queue.jsonl       # append-only 事件流（生产者: peer report、daemon）
   events/cursor (+ .lock)  # 已投递数量 + flock 锁
   events/delivered         # 已投递 queue 行号集合（支持优先级投递）
+  gates/<id>.json          # Human Decision Gate packet（peer report needs=decision / peer gate open）
+  logs/decisions.jsonl     # gate opened/resolved 审计日志
   state/supervisor.turn    # "busy"/"idle"，由 supervisor 的 hook 写
   state/<id>/report.json   # 各 worker 最新报告（peer report 写）
   state/daemon.expected    # start/loopd 写入，表示本 session 预期有 daemon

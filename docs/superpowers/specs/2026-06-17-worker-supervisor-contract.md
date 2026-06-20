@@ -128,6 +128,8 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 
 > **CLI 现状（MVP 收窄）**：协议层面 `needs[]` 是数组、可同时带多个诉求；但当前 `peer report` CLI **只支持一个 need 对象**——`--needs <kind>` + 可选 `--needs-detail` + 可重复的 `--needs-option`，重复传 `--needs` 只会覆盖前一个 `kind`，没有多对象语法。一轮卡多个诉求时，按 `request(阻塞) → 处理 → proceed` 循环逐个发即可（见 §7）。多对象 CLI 语法待后续按需扩展。
 
+> **Human Gate 现状**：当 `peer report --type request --status blocked --needs decision ...` 成功时，CLI 会同时写 `.agent-duo/gates/<id>.json`（status=`pending`，含 detail/options/report_ref），向 runtime queue 追加 `blocked` 事件且 `ref` 指向该 gate packet，并在 `.agent-duo/logs/decisions.jsonl` 记录 `opened`。Supervisor 也可用 `peer gate open` 手动创建 Decision Packet；`peer gate resolve --choice ...` 会把 gate 标为 `resolved`、记录选择，并向目标 worker 发送 `«AGENTDUO verb=decision choice=...»`。
+
 ### 2.3 Hook-originated blocked event（Approval Broker）
 
 权限类阻塞有两种入口：
@@ -365,6 +367,7 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 | `peer wait` 等回合边界 | `peer wait <id> --round N`（等 sentinel） |
 | answer approval | `peer approve` / `peer deny` |
 | answer human gate | `peer gate resolve --choice …` |
+| create human gate | `peer gate open --title … [--option …]` |
 | 驳回 claim | `peer require-evidence --for …` |
 | 拉回方向 | `peer reframe` |
 | 移交 | `peer budget handoff` |

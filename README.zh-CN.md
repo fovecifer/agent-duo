@@ -150,6 +150,9 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 | `peer tell "消息"` | 发送单行消息并回车 |
 | `... \| peer tell` | 从 stdin 投递多行消息(buffer + bracketed paste,引号/换行安全) |
 | `peer wait [秒] [采样间隔] [连续稳定次数]` | 等待对方输出连续多次采样一致(默认最长 300s、间隔 5s、连续 2 次) |
+| `peer report --type request --status blocked --needs decision ...` | worker 写结构化报告；需要人类选择时自动打开 Human Decision Gate |
+| `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...` | 查看、创建、解决 Human Decision Gate；选择会写入 `decisions.jsonl` 并以 `decision` 动词发回 worker |
+| `peer approvals` / `peer approve` / `peer deny` | 查看并处理 Approval Broker 的工具权限请求 |
 | `peer esc` | 向对方发 Escape,打断其生成 |
 | `peer status` | 查看双方身份与窗口状态 |
 
