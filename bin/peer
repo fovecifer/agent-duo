@@ -896,6 +896,11 @@ case "$cmd" in
       echo "错误: --needs 必须是 approval、decision、info、scope 或 discovery。" >&2
       exit 1
     fi
+    # detail/option 离开 kind 无处安放:fail-closed,别把阻塞诉求悄悄丢成空 needs[]。
+    if [[ -z "$needs_kind" && ( -n "$needs_detail" || ${#needs_options[@]} -gt 0 ) ]]; then
+      echo "错误: --needs-detail / --needs-option 需要同时指定 --needs <approval|decision|info|scope|discovery>。" >&2
+      exit 1
+    fi
 
     role="$(self_role)"
     state_dir="$AGENT_DUO_DIR/state/$ME"
@@ -939,6 +944,9 @@ case "$cmd" in
     event_type="$(event_type_for_report "$report_type" "$effective_status")"
     summary="$(one_line "$delta")"
     if [[ -z "$summary" ]]; then summary="$(one_line "$next_text")"; fi
+    # 阻塞诉求要带进 event summary,否则 Stop/loop 注入只能给 supervisor 一个泛化 request/blocked。
+    if [[ -z "$summary" && -n "$needs_detail" ]]; then summary="$(one_line "$needs_detail")"; fi
+    if [[ -z "$summary" && -n "$needs_kind" ]]; then summary="needs:${needs_kind}"; fi
     if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
     event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
     if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$ref"; then

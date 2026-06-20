@@ -1,5 +1,7 @@
 # Broker Dispatch Hard Gate Implementation Plan
 
+> **历史记录（范围已变更）：** 本计划描述的是初版设计——「只拦 `role==worker`，非 worker 角色豁免」。最终实现把范围改宽为**豁免名单取反**：`case` 命中 `supervisor|daemon|loopd` 才放行，其余工作型角色（含 `reviewer` 及自定义角色）一律门控。本文档保留为时间点记录，**不**反映当前行为；当前实现与说明见 [派发硬门设计](../specs/2026-06-19-broker-dispatch-hard-gate-design.md)（含「实现说明（范围比初版宽）」），契约见 [worker↔supervisor 契约 §2.6](../specs/2026-06-17-worker-supervisor-contract.md)。下文凡提到「only `role==worker`」「non-worker roles exempt」均按此理解。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `peer tell` to a worker-role target refuse to send (fail-closed) unless that worker's Approval Broker is fresh `ready`, turning the "confirm broker before dispatch" contract into a mechanical gate (backlog ②).
