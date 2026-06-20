@@ -16,6 +16,8 @@
 - `peer wait [超时秒]` — 阻塞等待,直到对方屏幕输出稳定(视为它已完成当前任务)
 - `peer esc` — 向对方发送 Escape,打断它正在进行的生成
 - `peer status` — 查看双方身份与窗口状态
+- `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>`
+  — supervisor 初始化/查看 worker 的持久化 `task.json` 步骤账本;worker 解阻后按 next 从 `blocked` 或下一个 `pending` 步续跑
 - `peer report --type request --status blocked --needs decision --needs-detail "..." --needs-option "..."`
   — worker 需要人类做业务/部署/成本/网络等判断时,写结构化阻塞报告并打开 Human Decision Gate
 - `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...`

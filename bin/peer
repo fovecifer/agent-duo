@@ -21,6 +21,10 @@
 #                  [--needs-detail ...] [--needs-option ...]]
 #                           写结构化 report、追加 runtime event、打印 sentinel
 #                           --needs 把阻塞诉求写入 needs[],决定 supervisor stall 路由
+#   peer task [<id>]        查看某 agent 的 task.json 步骤账本(默认自己)
+#   peer task next [<id>]   打印 blocked / in_progress / pending 的下一个 resume step
+#   peer task init [<id>] --task "..." [--round N] --step s1:"..." [--step s2:"..."]
+#                           初始化/冻结某 agent 的 task.json 步骤账本
 #   peer approvals          列出待审批的 Approval Broker 请求
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
@@ -367,6 +371,185 @@ write_report_json() {
     printf ',"needs":%s,"next":' "$needs_json"; json_str "$next_text"
     printf '}\n'
   } > "$path"
+}
+
+task_file_for_id() { # <agent_id>
+  printf '%s/state/%s/task.json' "$AGENT_DUO_DIR" "$1"
+}
+
+is_step_status() {
+  case "$1" in
+    pending|in_progress|blocked|done|failed|kept) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_step_spec() { # <id:desc>; sets STEP_ID STEP_DESC
+  local spec="$1"
+  if [[ "$spec" != *:* ]]; then
+    echo "错误: --step 必须形如 <id>:<desc>。" >&2
+    return 1
+  fi
+  STEP_ID="${spec%%:*}"
+  STEP_DESC="${spec#*:}"
+  if [[ -z "$STEP_ID" || -z "$STEP_DESC" ]]; then
+    echo "错误: --step 的 id 和 desc 都不能为空。" >&2
+    return 1
+  fi
+  if [[ ! "$STEP_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "错误: step id 只能包含字母、数字、点、下划线和连字符。" >&2
+    return 1
+  fi
+}
+
+write_task_json() { # <path> <agent_id> <task_title> <frozen_round> [step_spec...]
+  local path="$1" agent_id="$2" task_title="$3" frozen_round="$4" spec first=1 now
+  shift 4
+  now="$(iso_ts)"
+  {
+    printf '{"protocol":"1",'
+    printf '"agent_id":'; json_str "$agent_id"; printf ','
+    printf '"task":'; json_str "$task_title"; printf ','
+    printf '"frozen_at_round":%s,' "$frozen_round"
+    printf '"current_step":null,'
+    printf '"created_at":'; json_str "$now"; printf ','
+    printf '"updated_at":'; json_str "$now"; printf ','
+    printf '"steps":['
+    for spec in "$@"; do
+      parse_step_spec "$spec" || return 1
+      if [[ $first -eq 1 ]]; then first=0; else printf ','; fi
+      printf '{"id":'; json_str "$STEP_ID"
+      printf ',"desc":'; json_str "$STEP_DESC"
+      printf ',"deps":[],"done_when":null,"gate":null,"status":"pending","evidence":[]}'
+    done
+    printf ']}\n'
+  } > "$path"
+}
+
+task_init() { # <agent_id> <task_title> <frozen_round> [step_spec...]
+  local agent_id="$1" task_title="$2" frozen_round="$3" task_file task_dir tmp
+  shift 3
+  if [[ -z "$task_title" ]]; then
+    echo "错误: peer task init 需要 --task。" >&2
+    return 1
+  fi
+  if [[ $# -eq 0 ]]; then
+    echo "错误: peer task init 至少需要一个 --step <id>:<desc>。" >&2
+    return 1
+  fi
+  if ! is_positive_int "$frozen_round"; then
+    echo "错误: --round 必须是正整数。" >&2
+    return 1
+  fi
+  task_file="$(task_file_for_id "$agent_id")"
+  task_dir="${task_file%/*}"
+  mkdir -p "$task_dir"
+  if [[ -e "$task_file" ]]; then
+    echo "错误: task.json 已存在: .agent-duo/state/$agent_id/task.json" >&2
+    return 1
+  fi
+  tmp="$task_dir/.task.json.$$"
+  if ! write_task_json "$tmp" "$agent_id" "$task_title" "$frozen_round" "$@"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$task_file"
+}
+
+task_print() { # <agent_id>
+  local agent_id="$1" task_file
+  task_file="$(task_file_for_id "$agent_id")"
+  if [[ ! -f "$task_file" ]]; then
+    echo "没有 task.json: .agent-duo/state/$agent_id/task.json" >&2
+    return 1
+  fi
+  jq -r '
+    "TASK\t\(.task // "")",
+    "FROZEN_AT_ROUND\t\(.frozen_at_round // "")",
+    "CURRENT_STEP\t\(.current_step // "")",
+    (.steps[]? | "\(.id)\t\(.status // "pending")\t\(.desc // "")")
+  ' "$task_file"
+}
+
+task_next() { # <agent_id>
+  local agent_id="$1" task_file
+  task_file="$(task_file_for_id "$agent_id")"
+  if [[ ! -f "$task_file" ]]; then
+    echo "没有 task.json: .agent-duo/state/$agent_id/task.json" >&2
+    return 1
+  fi
+  jq -r '
+    def one($s): [.steps[]? | select((.status // "pending") == $s)][0];
+    (one("blocked") // one("in_progress") // one("pending")) as $step
+    | if $step == null then "done" else "\($step.id)\t\($step.status // "pending")\t\($step.desc // "")" end
+  ' "$task_file"
+}
+
+task_step_exists() { # <task_file> <step_id>
+  jq -e --arg id "$2" 'any(.steps[]?; .id == $id)' "$1" >/dev/null 2>&1
+}
+
+task_all_steps_done() { # <task_file>
+  jq -e '
+    ((.steps // []) | length) > 0 and
+    ([.steps[]? | select((.status // "pending") != "done" and (.status // "pending") != "kept")] | length) == 0
+  ' "$1" >/dev/null 2>&1
+}
+
+task_evidence_json() { # <cmd> <result> <ref>
+  local cmd="$1" result="$2" ref="$3"
+  if [[ -z "$cmd" && -z "$result" && -z "$ref" ]]; then
+    printf '[]'
+    return
+  fi
+  printf '[{"cmd":'; json_str "$cmd"
+  printf ',"result":'; json_str "$result"
+  printf ',"ref":'; json_str "$ref"
+  printf '}]'
+}
+
+task_step_status_for_report() { # <report_type> <report_status> <effective_status>
+  local report_type="$1" report_status="$2" effective_status="$3"
+  if [[ "$report_status" == "done" && "$effective_status" != "unknown" ]]; then
+    printf 'done'
+    return 0
+  fi
+  if [[ "$report_type" == "request" || "$effective_status" == "blocked" ]]; then
+    printf 'blocked'
+    return 0
+  fi
+  case "$effective_status" in
+    in_progress|failed) printf '%s' "$effective_status" ;;
+    *) return 1 ;;
+  esac
+}
+
+task_prepare_update() { # <task_file> <tmp_file> <step_id> <step_status> <round> <evidence_json>
+  local task_file="$1" tmp_file="$2" step_id="$3" step_status="$4" round_s="$5" evidence_json="$6"
+  if ! task_step_exists "$task_file" "$step_id"; then
+    echo "错误: task.json 中不存在 step '$step_id'。" >&2
+    return 1
+  fi
+  if ! is_step_status "$step_status"; then
+    echo "错误: 非法 step 状态 '$step_status'。" >&2
+    return 1
+  fi
+  jq -c \
+    --arg id "$step_id" \
+    --arg status "$step_status" \
+    --arg ts "$(iso_ts)" \
+    --argjson round "$round_s" \
+    --argjson evidence "$evidence_json" '
+      .updated_at = $ts
+      | .current_step = (if ($status == "done" or $status == "kept") then null else $id end)
+      | .steps |= map(
+          if .id == $id then
+            .status = $status
+            | .last_round = $round
+            | if $status == "done" then .evidence = ((.evidence // []) + $evidence) else . end
+          else . end
+        )
+    ' "$task_file" > "$tmp_file"
 }
 
 append_event_json() {
@@ -1020,6 +1203,68 @@ case "$cmd" in
     exit 2
     ;;
 
+  task)
+    subcmd="${1:-}"
+    case "$subcmd" in
+      init)
+        shift
+        target_id="$ME"
+        if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+          target_id="$1"
+          shift
+        fi
+        task_title=""
+        round="1"
+        task_steps=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --task|--title)
+              task_title="${2:-}"
+              shift 2
+              ;;
+            --round)
+              round="${2:-}"
+              shift 2
+              ;;
+            --step)
+              task_steps+=("${2:-}")
+              shift 2
+              ;;
+            *)
+              echo "用法: peer task init [<id>] --task \"...\" [--round N] --step s1:\"...\" [--step s2:\"...\"]" >&2
+              exit 1
+              ;;
+          esac
+        done
+        task_init "$target_id" "$task_title" "$round" ${task_steps[@]+"${task_steps[@]}"}
+        echo "已初始化 task.json: .agent-duo/state/$target_id/task.json"
+        ;;
+      next)
+        shift
+        target_id="${1:-$ME}"
+        if [[ -n "${2:-}" ]]; then
+          echo "用法: peer task next [<id>]" >&2
+          exit 1
+        fi
+        task_next "$target_id"
+        ;;
+      ""|--help|-h)
+        if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
+          echo "用法: peer task [<id>] | peer task next [<id>] | peer task init [<id>] --task \"...\" --step s1:\"...\"" >&2
+          exit 0
+        fi
+        task_print "$ME"
+        ;;
+      *)
+        if [[ -n "${2:-}" ]]; then
+          echo "用法: peer task [<id>] | peer task next [<id>] | peer task init [<id>] --task \"...\" --step s1:\"...\"" >&2
+          exit 1
+        fi
+        task_print "$subcmd"
+        ;;
+    esac
+    ;;
+
   report)
     report_type=""
     report_status=""
@@ -1139,6 +1384,34 @@ case "$cmd" in
       fi
     fi
 
+    task_file="$state_dir/task.json"
+    tmp_task=""
+    if [[ -f "$task_file" ]]; then
+      if [[ -n "$step_ref" ]]; then
+        if ! task_step_exists "$task_file" "$step_ref"; then
+          echo "错误: task.json 中不存在 step '$step_ref'。" >&2
+          exit 1
+        fi
+        step_status=""
+        step_status="$(task_step_status_for_report "$report_type" "$report_status" "$effective_status" 2>/dev/null || true)"
+        if [[ -n "$step_status" ]]; then
+          evidence_json="$(task_evidence_json "$evidence_cmd" "$evidence_result" "$evidence_ref")"
+          tmp_task="${state_dir}/.task.json.$$"
+          if ! task_prepare_update "$task_file" "$tmp_task" "$step_ref" "$step_status" "$round" "$evidence_json"; then
+            rm -f "$tmp_task"
+            exit 1
+          fi
+        fi
+      fi
+      task_candidate="$task_file"
+      if [[ -n "$tmp_task" ]]; then task_candidate="$tmp_task"; fi
+      if [[ "$report_type" == "result" && "$effective_status" == "done" ]]; then
+        if ! task_all_steps_done "$task_candidate"; then
+          effective_status="partial"
+        fi
+      fi
+    fi
+
     report_file="$state_dir/r${round}.json"
     latest_file="$state_dir/report.json"
     if [[ -e "$report_file" ]]; then
@@ -1177,6 +1450,7 @@ case "$cmd" in
       if [[ -z "$gate_title" ]]; then gate_title="Human decision required"; fi
       if ! create_gate_record "$gate_id" "$ts" "$ME" "$role" "$round" "$gate_title" "$needs_detail" "$ref" ${needs_options[@]+"${needs_options[@]}"}; then
         rm -f "$report_file"
+        if [[ -n "$tmp_task" ]]; then rm -f "$tmp_task"; fi
         exit 1
       fi
       gate_created_file="$(gate_path "$gate_id")"
@@ -1186,7 +1460,11 @@ case "$cmd" in
     if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$event_ref"; then
       rm -f "$report_file"
       if [[ -n "$gate_created_file" ]]; then rm -f "$gate_created_file"; fi
+      if [[ -n "$tmp_task" ]]; then rm -f "$tmp_task"; fi
       exit 1
+    fi
+    if [[ -n "$tmp_task" ]]; then
+      mv "$tmp_task" "$task_file"
     fi
     if [[ -n "$gate_created_file" ]]; then
       append_decision_log "$gate_id" "opened" "$ME" "$summary" "" ""
