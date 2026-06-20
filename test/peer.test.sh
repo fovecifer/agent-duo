@@ -447,6 +447,49 @@ assert_ok "report: queue append failure removes rN" test ! -e "$PROJECT/.agent-d
 assert_ok "report: queue append failure leaves no latest" test ! -L "$PROJECT/.agent-duo/state/worker/report.json"
 teardown
 
+# report:无 --needs 时 needs[] 保持为空数组(无阻塞诉求)。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: no needs succeeds" \
+  run_peer report --type checkpoint --status in_progress --round 1 --delta "still working"
+assert_contains "report: empty needs" "$(cat "$PROJECT/.agent-duo/state/worker/r1.json")" '"needs":[]'
+teardown
+
+# report:--needs <kind> 把阻塞诉求结构化写入 needs[],供 supervisor 路由(approval|decision|info|scope|discovery)。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: needs approval succeeds" \
+  run_peer report --type request --status blocked --round 1 --needs approval --needs-detail "迁移需要写权限"
+needs_report="$(cat "$PROJECT/.agent-duo/state/worker/r1.json")"
+assert_contains "report: needs kind approval" "$needs_report" '"kind":"approval"'
+assert_contains "report: needs detail" "$needs_report" '"detail":"迁移需要写权限"'
+assert_contains "report: needs empty options" "$needs_report" '"options":[]'
+assert_not_contains "report: needs not empty array" "$needs_report" '"needs":[]'
+teardown
+
+# report:--needs decision 可带多个 --needs-option 候选,按 contract §2.2 给人类决策门。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: needs decision succeeds" \
+  run_peer report --type request --status blocked --round 1 \
+    --needs decision --needs-detail "用哪个库?" --needs-option new-vm --needs-option existing-dev-vm
+decision_report="$(cat "$PROJECT/.agent-duo/state/worker/r1.json")"
+assert_contains "report: needs kind decision" "$decision_report" '"kind":"decision"'
+assert_contains "report: needs option a" "$decision_report" '"options":["new-vm","existing-dev-vm"]'
+teardown
+
+# report:--needs-detail 仍按 codec 转义,避免下游 jq 崩。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: needs detail escaping succeeds" \
+  run_peer report --type request --status blocked --round 1 --needs info --needs-detail $'quote " tab\t'
+assert_contains "report: needs detail escaped quote" "$(cat "$PROJECT/.agent-duo/state/worker/r1.json")" 'quote \"'
+teardown
+
+# report:--needs kind 非法枚举时 fail-closed,不写 report。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_not_ok "report: invalid needs kind fails" \
+  run_peer report --type request --status blocked --round 1 --needs bogus
+assert_contains "report: invalid needs kind error" "$(cat "$ERR")" 'approval'
+assert_ok "report: invalid needs kind writes no rN" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
 # wait --round:等待指定 round 的 sentinel,不再靠屏幕稳定猜测回合边界。
 setup
 TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=worker round=7 type=checkpoint status=in_progress file=.agent-duo/state/worker/r7.json sha=abc ts=2026-06-17T00:00:00Z'

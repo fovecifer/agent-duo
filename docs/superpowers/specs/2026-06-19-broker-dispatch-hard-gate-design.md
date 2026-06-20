@@ -18,11 +18,13 @@
 
 ## 设计决策（已确认）
 
-- **拦截范围**：只拦 `peer tell`，且仅当目标**角色为 worker**。`broker-check` 探针走裸 tmux（不经 `tell`），天然豁免；`gate resolve` / `esc` / `peek` / 发给 supervisor 的消息都不拦。
-- **Provider 范围**：所有 worker（codex 与 claude 一视同仁，防御纵深 + 逻辑简单，只看 `role==worker`）。
+- **拦截范围**：只拦 `peer tell`，且当目标**角色为工作型**时门控。工作型 = 除 `supervisor`/`daemon`/`loopd` 外的所有角色，含 `worker`、`reviewer` 及自定义角色（见下「实现说明」——最终实现比初版「只拦 `role==worker`」更宽，按豁免名单取反，对所有可能在 broker 保护下执行工具的角色 fail-closed）。`broker-check` 探针走裸 tmux（不经 `tell`），天然豁免；`gate resolve` / `esc` / `peek` / 发给 supervisor 的消息都不拦。
+- **Provider 范围**：所有工作型角色（codex 与 claude 一视同仁，防御纵深 + 逻辑简单）。
 - **越过机制**：复用 `--force`（语义：强制发送、跳过安全检查，与它现有「跳过权限弹窗检测」一致）；外加 `AGENT_DUO_NO_BROKER_GATE=1` 全局关闭（供测试 / 不想启用的会话）。
 - **严格度**：硬 fail-closed——非 fresh `ready` 直接非零退出、完全不发送。
-- **role 读不到时**：默认按 `worker` 处理（fail-closed，宁可多拦）。
+- **role 读不到时**：`role_for_id` fallback 到 `worker` → 落入工作型门控分支，fail-closed，宁可多拦。
+
+> **实现说明（范围比初版宽）**：初版设计写的是「仅 `role==worker` 被门控」。最终实现改为**豁免名单取反**：`case` 命中 `supervisor|daemon|loopd` 才放行，其余一律门控。理由是 `reviewer`/`evaluator`/自定义工作角色同样在 broker 保护下跑工具，应当受同一道硬门保护；白名单（只拦 worker）会漏掉它们。本文档（含下方 §2 代码块）已同步为实现实际行为。
 
 ## 设计
 
@@ -58,16 +60,27 @@ broker_is_fresh_ready() {
 在 `tell` 分支中、解析出 `target_id` 之后、`check_safe_to_send_keys`/粘贴之前插入：
 
 ```sh
-    # Broker 硬门:发给 worker 角色时,broker 必须 fresh ready,否则拒发(fail-closed)。
+    # Broker 硬门:发给工作型角色(非 supervisor/daemon/loopd)时,broker 必须 fresh ready,否则拒发
+    # (fail-closed)。worker/reviewer/自定义工作角色都受保护。
     # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
-    if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
-      if [[ "$(role_for_id "$target_id")" == "worker" ]] && ! broker_is_fresh_ready "$target_id"; then
-        bg_status="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null | grep -o '"status":"[^"]*"' | head -1)"
-        echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-        echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
-        exit 1
-      fi
-    fi
+    gate_role="$(role_for_id "$target_id")"
+    case "$gate_role" in
+      supervisor|daemon|loopd) ;;  # 非工作型角色:不门控
+      *)
+        if [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
+          bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
+          case "$bg_out" in
+            *'"status":"ready"'*) ;;  # fresh ready → 放行
+            *)
+              bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
+              echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
+              echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
+              exit 1
+              ;;
+          esac
+        fi
+        ;;
+    esac
 ```
 
 - 位置在粘贴/回车之前，保证拒发时**完全没有副作用**（buffer 未写、未 send-keys）。
@@ -77,7 +90,7 @@ broker_is_fresh_ready() {
 
 - `peer broker-check`：探针用 `tmux load-buffer`/`paste-buffer`/`send-keys`，不经 `tell` → 不被拦。bootstrap 无死锁：`unverified` → `broker-check`（豁免）→ worker 跑探针 → marker `ready` → 之后 `tell` 放行。
 - `gate resolve` / `esc` / `peek` / `report`：不经此门。
-- 发给非 worker 角色（如 supervisor）的 `tell`：`role_for_id != worker` → 不拦。
+- 发给豁免名单角色（`supervisor`/`daemon`/`loopd`）的 `tell`：`case` 命中豁免分支 → 不拦。注意 `reviewer` 及自定义工作角色**不在**豁免名单，仍受门控。
 
 ### 4. 契约 / 文档
 
@@ -97,7 +110,8 @@ broker_is_fresh_ready() {
 - **worker + fresh ready（`updated_epoch=$(date +%s)`）→ 放行**：退出 0；stub buffer 写入；发生 send-keys。
 - **worker + unverified + `--force` → 放行**：`peer tell --force worker "x"` 退出 0、已粘贴。
 - **worker + unverified + `AGENT_DUO_NO_BROKER_GATE=1` → 放行**：退出 0、已粘贴。
-- **非 worker 角色（supervisor）+ unverified → 放行**：目标 `@agent_role=supervisor` 时不拦，退出 0、已粘贴。
+- **豁免名单角色（supervisor / daemon / loopd）+ unverified → 放行**：目标 `@agent_role` 命中豁免分支时不拦，退出 0、已粘贴。
+- **工作型非 worker 角色（reviewer）+ unverified → 拒发**：目标 `@agent_role=reviewer` 仍受门控，退出 1、未粘贴（验证范围按豁免名单取反，不是只拦字面 `worker`）。
 
 注：测试需保证目标 pane 带 `@agent_role`（stub 注册时设置），并能区分「已粘贴/未粘贴」（依据现有 `TMUX_STUB_BUFFER_DIR` 里 `peer-<me>2<target>` buffer 文件是否存在）。
 

@@ -293,6 +293,13 @@ cat <<EOF
     tmux kill-session -t $SESSION
 EOF
 
+if [[ -n "$WITH_SPEC" ]]; then
+  echo
+  echo "新 worker '$W_ROLE' 的 Approval Broker 起始为 unverified(hook 未被 provider 实际调用前不可信)。"
+  echo "派任务前先在 supervisor pane 运行 'peer broker-check $W_ROLE' 验证 broker 生效——"
+  echo "否则首次 'peer tell $W_ROLE ...' 会被硬门 fail-closed 拒发。"
+fi
+
 if [[ "$SUPERVISOR_PROVIDER" == "codex" || "${WITH_PROVIDER:-}" == "codex" ]]; then
   echo
   echo "Codex hook 提示: 若 Codex 启动时提示 hooks need review，请在该 Codex pane 内运行 /hooks 并信任 agent-duo hook；未信任前不要假设 Approval Broker 已生效。"
