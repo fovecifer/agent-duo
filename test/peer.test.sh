@@ -594,6 +594,26 @@ TMUX_STUB_NEW_PANE="%5" assert_ok "add: derive id" run_peer add --provider codex
 assert_contains "add: derived worker-2" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id worker-2'
 teardown
 
+# add:工作型角色(任何 provider)都要提示先 broker-check——硬门对 Claude reviewer 同样 fail-closed。
+setup
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude reviewer succeeds" run_peer add --provider claude --role reviewer
+assert_contains "add: claude reviewer broker-check hint" "$(cat "$OUT")" 'peer broker-check reviewer'
+teardown
+
+# add:豁免名单角色(supervisor/daemon/loopd)不受硬门保护,不应误导用户去 broker-check。
+setup
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude supervisor succeeds" run_peer add --provider claude --role supervisor --id sup2
+assert_not_contains "add: exempt role no broker-check hint" "$(cat "$OUT")" 'broker-check'
+teardown
+
+# add:Codex 工作型角色既给 broker-check 提示,也给 /hooks 信任提示。
+setup
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: codex worker succeeds" run_peer add --provider codex --role worker --id helper2
+add_out="$(cat "$OUT")"
+assert_contains "add: codex worker broker-check hint" "$add_out" 'peer broker-check helper2'
+assert_contains "add: codex worker hooks hint" "$add_out" '/hooks'
+teardown
+
 # add:非法 provider 报错。
 setup
 assert_not_ok "add: bad provider" run_peer add --provider gpt --role worker

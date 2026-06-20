@@ -126,6 +126,8 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 - `scope` → supervisor `reframe`
 - `discovery` → **不是要放行，而是"我发现了可能掀桌子的东西"** → supervisor 重规划，**不得降级成按个 yes**
 
+> **CLI 现状（MVP 收窄）**：协议层面 `needs[]` 是数组、可同时带多个诉求；但当前 `peer report` CLI **只支持一个 need 对象**——`--needs <kind>` + 可选 `--needs-detail` + 可重复的 `--needs-option`，重复传 `--needs` 只会覆盖前一个 `kind`，没有多对象语法。一轮卡多个诉求时，按 `request(阻塞) → 处理 → proceed` 循环逐个发即可（见 §7）。多对象 CLI 语法待后续按需扩展。
+
 ### 2.3 Hook-originated blocked event（Approval Broker）
 
 权限类阻塞有两种入口：
@@ -313,7 +315,7 @@ supervisor:    accept worker-impl                       → done
 
 ## 7. 多步骤任务 + 反复 stall
 
-消息层面，"卡 N 次、每次找不同的人"通过 `request(阻塞) → 处理 → proceed` 循环即可，`needs[]` 可同时带多个诉求并按 `kind` 路由。缺的不是这个，而是**任务的步骤粒度状态**（见 §2.4 task.json）。
+消息层面，"卡 N 次、每次找不同的人"通过 `request(阻塞) → 处理 → proceed` 循环即可，`needs[]` 在协议上可同时带多个诉求并按 `kind` 路由（当前 `peer report` CLI 每轮只发一个 need 对象，见 §2.2「CLI 现状」；逐轮发即可覆盖）。缺的不是这个，而是**任务的步骤粒度状态**（见 §2.4 task.json）。
 
 ### 三条保证
 
