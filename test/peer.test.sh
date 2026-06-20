@@ -490,6 +490,36 @@ assert_contains "report: invalid needs kind error" "$(cat "$ERR")" 'approval'
 assert_ok "report: invalid needs kind writes no rN" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
 teardown
 
+# report:给了 --needs-detail 却忘了 --needs <kind> → fail-closed,别把阻塞诉求悄悄丢成空 needs[]。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_not_ok "report: detail without kind fails" \
+  run_peer report --type request --status blocked --round 1 --needs-detail "迁移需要写权限"
+assert_contains "report: detail without kind error" "$(cat "$ERR")" '--needs'
+assert_ok "report: detail without kind writes no rN" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+# report:给了 --needs-option 却忘了 --needs <kind> → 同样 fail-closed。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_not_ok "report: option without kind fails" \
+  run_peer report --type request --status blocked --round 1 --needs-option new-vm
+assert_ok "report: option without kind writes no rN" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+# report:blocked + needs 但无 --delta/--next 时,event summary 用 needs detail,别退化成 request/blocked。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: needs summary succeeds" \
+  run_peer report --type request --status blocked --round 1 --needs approval --needs-detail "迁移需要写权限"
+needs_event="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "report: event summary uses needs detail" "$needs_event" '"summary":"迁移需要写权限"'
+teardown
+
+# report:有 needs kind 但无 detail/delta/next 时,summary 退化为 needs:<kind> 而非 request/blocked。
+setup
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report: needs kind summary succeeds" \
+  run_peer report --type request --status blocked --round 1 --needs discovery
+assert_contains "report: event summary uses needs kind" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"summary":"needs:discovery"'
+teardown
+
 # wait --round:等待指定 round 的 sentinel,不再靠屏幕稳定猜测回合边界。
 setup
 TMUX_STUB_SENTINEL='«AGENTDUO:7f3a» agent_id=worker round=7 type=checkpoint status=in_progress file=.agent-duo/state/worker/r7.json sha=abc ts=2026-06-17T00:00:00Z'

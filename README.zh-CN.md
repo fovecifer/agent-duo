@@ -135,6 +135,11 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
   → 它会 `peer tell` → `peer wait` → `peer peek`,再向你汇报
 - 对 Codex 说:「问问 Claude 它对这个方案的意见」 → 反方向同理
 
+新建 worker 的 Approval Broker 起始为 **unverified**(hook 未被 provider 实际调用前不可信),
+而 `peer tell` 发给 worker 是对这道门 fail-closed 的。所以对一个新 worker 的第一次派发是
+`peer broker-check <id>` → 等到 `ready`,**再** `peer tell`。`agent-duo-start --with` 和
+`peer add` 都会打印这条提醒。
+
 结束:`tmux kill-session -t agents`
 
 ## peer 命令参考
