@@ -177,6 +177,7 @@ assert_contains  "H: worker exports approval settings" "$(cat "$SENDLOG")" 'AGEN
 assert_contains  "H: worker exports approval hook" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_HOOK='
 assert_contains  "H: codex worker has pretool hook config" "$(cat "$SENDLOG")" 'hooks.PreToolUse'
 assert_contains  "H: codex worker has permission hook config" "$(cat "$SENDLOG")" 'hooks.PermissionRequest'
+assert_contains  "H: prints broker-check hint for new worker" "$(cat "$SCENARIO_TMP/out.txt")" 'peer broker-check worker'
 teardown
 
 # 场景 H2(F1):--with 必须把新 worker 的 broker marker 重置为 unverified,覆盖同一 workdir

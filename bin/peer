@@ -17,7 +17,10 @@
 #   peer report --type <plan|checkpoint|request|result>
 #               --status <in_progress|blocked|partial|done|failed|unknown>
 #               [--step sN] [--round N] [--delta ...] [--next ...]
+#               [--needs <approval|decision|info|scope|discovery>
+#                  [--needs-detail ...] [--needs-option ...]]
 #                           写结构化 report、追加 runtime event、打印 sentinel
+#                           --needs 把阻塞诉求写入 needs[],决定 supervisor stall 路由
 #   peer approvals          列出待审批的 Approval Broker 请求
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
@@ -147,6 +150,14 @@ is_report_type() {
 is_report_status() {
   case "$1" in
     in_progress|blocked|partial|done|failed|unknown) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# needs[].kind 枚举:决定 stall 路由到谁(见 worker-supervisor-contract §2.2)。
+is_needs_kind() {
+  case "$1" in
+    approval|decision|info|scope|discovery) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -298,10 +309,30 @@ json_nullable_str() {
   fi
 }
 
+# build_needs_json <kind> <detail> [option...] → 打印 needs[] 数组(JSON)。
+# kind 为空 → "[]"(无阻塞诉求);否则一条 {kind,detail,options[]}。options 始终是数组。
+build_needs_json() {
+  local kind="$1" detail="${2:-}"
+  shift 2 2>/dev/null || shift $#
+  if [[ -z "$kind" ]]; then
+    printf '[]'
+    return
+  fi
+  printf '[{"kind":'; json_str "$kind"
+  printf ',"detail":'; json_nullable_str "$detail"
+  printf ',"options":['
+  local first=1 opt
+  for opt in "$@"; do
+    if [[ $first -eq 1 ]]; then first=0; else printf ','; fi
+    json_str "$opt"
+  done
+  printf ']}]'
+}
+
 write_report_json() {
   local path="$1" round_s="$2" agent_id="$3" role="$4" report_type="$5" status="$6"
   local goal_ref="$7" step_ref="$8" delta="$9" drift="${10}" next_text="${11}"
-  local evidence_cmd="${12}" evidence_result="${13}" evidence_ref="${14}"
+  local evidence_cmd="${12}" evidence_result="${13}" evidence_ref="${14}" needs_json="${15:-[]}"
   {
     printf '{"protocol":"1","round":%s,' "$round_s"
     printf '"agent_id":'; json_str "$agent_id"; printf ','
@@ -321,7 +352,7 @@ write_report_json() {
     else
       printf '[]'
     fi
-    printf ',"needs":[],"next":'; json_str "$next_text"
+    printf ',"needs":%s,"next":' "$needs_json"; json_str "$next_text"
     printf '}\n'
   } > "$path"
 }
@@ -780,6 +811,9 @@ case "$cmd" in
     evidence_cmd=""
     evidence_result=""
     evidence_ref=""
+    needs_kind=""
+    needs_detail=""
+    needs_options=()
 
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -827,8 +861,20 @@ case "$cmd" in
           evidence_ref="${2:-}"
           shift 2
           ;;
+        --needs|--needs-kind)
+          needs_kind="${2:-}"
+          shift 2
+          ;;
+        --needs-detail)
+          needs_detail="${2:-}"
+          shift 2
+          ;;
+        --needs-option)
+          needs_options+=("${2:-}")
+          shift 2
+          ;;
         *)
-          echo "用法: peer report --type <plan|checkpoint|request|result> --status <in_progress|blocked|partial|done|failed|unknown> [--step sN] [--round N] [--delta ...] [--next ...]" >&2
+          echo "用法: peer report --type <plan|checkpoint|request|result> --status <in_progress|blocked|partial|done|failed|unknown> [--step sN] [--round N] [--delta ...] [--next ...] [--needs <approval|decision|info|scope|discovery> [--needs-detail ...] [--needs-option ...]]" >&2
           exit 1
           ;;
       esac
@@ -844,6 +890,10 @@ case "$cmd" in
     fi
     if [[ -n "$round" ]] && ! is_positive_int "$round"; then
       echo "错误: --round 必须是正整数。" >&2
+      exit 1
+    fi
+    if [[ -n "$needs_kind" ]] && ! is_needs_kind "$needs_kind"; then
+      echo "错误: --needs 必须是 approval、decision、info、scope 或 discovery。" >&2
       exit 1
     fi
 
@@ -873,10 +923,11 @@ case "$cmd" in
     # 写临时文件 + rename：保证读者只看到完整文件(原子可见性)。
     # 注意:不再 fsync —— 去掉 Python 运行时依赖后放弃了跨崩溃耐久性。单机断电/内核崩溃
     # 极端情形下，已返回成功的 report/event 可能丢失;原子性与正常读写不受影响。
+    needs_json="$(build_needs_json "$needs_kind" "$needs_detail" ${needs_options[@]+"${needs_options[@]}"})"
     tmp_report="$state_dir/.r${round}.json.$$"
     write_report_json "$tmp_report" "$round" "$ME" "$role" "$report_type" "$effective_status" \
       "$goal_ref" "$step_ref" "$delta" "$drift" "$next_text" \
-      "$evidence_cmd" "$evidence_result" "$evidence_ref"
+      "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_json"
     mv "$tmp_report" "$report_file"
 
     sha="$(sha256_file "$report_file")"

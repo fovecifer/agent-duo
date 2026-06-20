@@ -110,6 +110,8 @@ Then just talk naturally:
 
 The supervisor will run `peer tell` → `peer wait` → `peer peek` and report back. Direct agent-to-agent delegation still stays visible in the worker tabs.
 
+A freshly created worker's Approval Broker starts **unverified** (the hook isn't trusted until the provider actually invokes it), and `peer tell` to a worker is fail-closed against that gate. So the first delegation to a new worker is `peer broker-check <id>` → wait for `ready`, *then* `peer tell`. `agent-duo-start --with` and `peer add` both print this reminder.
+
 ## The `peer` command
 
 | Command | What it does |
