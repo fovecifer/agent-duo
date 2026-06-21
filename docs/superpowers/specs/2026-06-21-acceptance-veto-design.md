@@ -65,7 +65,7 @@ peer report --type result --status <s> \
 - **`--target-ref <worker>@<round>`**：解析出 `target_worker` + `target_round`（`@` 分割；round 容忍 `r` 前缀；round 必须正整数）。`target_worker` 必须过 `is_role_token`/id token（见下）。
 - **`--finding <severity>:<note>`**：可重复 → `findings[]` 的 `{severity, note}`；无冒号则 `severity="note"`。可选载荷。空数组守 `set -u`。
 - **耦合校验（fail-closed）**：`--verdict` 与 `--target-ref` 必须同时出现；`--finding` 需有 `--verdict`；`--verdict` 仅在 `--type result` 上合法。缺一即报错。
-- **role/id token 安全（评审 R1-②）**：判决记录路径含 `<reviewer-role>` 与 `<target_worker>`，二者都必须是 token（新增共享 `is_role_token` = `^[A-Za-z0-9._-]+$`，与现有 step-id 校验同款）。`peer report --verdict` 对 `self_role`（reviewer 自己的 `@agent_role`）与 `target_worker` **fail-closed** 校验——含 `/`/空白等 → 报错退出（否则判决会写到意外路径，done 门永远 pending）。**根因收紧**：`peer add --role`、`peer add --id`、`start --with` 的 role/id 同步要求 `is_role_token`（现 role 仅校验非空、`--id` 仅查重复，评审 R2-①），从入口杜绝坏 role/id——否则 `--id a/b` 之类会让后续 `--target-ref a/b@1` 路径异常、done 门永远 pending。`is_role_token` 同时充当 agent id 的 token 校验（同字符集）。
+- **role/id token 安全（评审 R1-② / R3-①）**：判决记录路径含 `<reviewer-role>` 与 `<target_worker>`，二者都必须是**路径段安全**的 token——新增共享 `is_role_token` = `^[A-Za-z0-9][A-Za-z0-9._-]*$`（**首字符必须字母/数字**，从而拒绝 `.`、`..`、`.foo` 等；普通 role/id 如 `worker`/`reviewer.v2`/`worker-2` 不受影响）。注意 `^[A-Za-z0-9._-]+$` 会放行 `.`/`..`，作为 `<target_worker>` 写进 `state/<target_worker>/reviews/…` 时 `..` 会逃出 state 目录、`.` 会别名到 state 本身——故必须用首字符受限的版本。`peer report --verdict` 对 `self_role`（reviewer 自己的 `@agent_role`）与 `target_worker` **fail-closed** 校验——含 `/`/空白等 → 报错退出（否则判决会写到意外路径，done 门永远 pending）。**根因收紧**：`peer add --role`、`peer add --id`、`start --with` 的 role/id 同步要求 `is_role_token`（现 role 仅校验非空、`--id` 仅查重复，评审 R2-①），从入口杜绝坏 role/id——否则 `--id a/b` 之类会让后续 `--target-ref a/b@1` 路径异常、done 门永远 pending。`is_role_token` 同时充当 agent id 的 token 校验（同字符集）。
 
 ### 2.2 reviewer 自己的 report 也带这些字段
 
@@ -150,7 +150,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 ### 4.1 错误处理（新增/跨切面）
 
 - **`peer report` 耦合校验（fail-closed）**：`--verdict`⇔`--target-ref` 必须成对；`--finding` 需 `--verdict`；`--verdict` 仅 `--type result`；`--target-ref` 不含 `@`/round 非正整数 → 全部报错退出。
-- **role/id token（评审 R1-②，fail-closed）**：`self_role` 或 `target_worker` 非 `is_role_token` → `peer report --verdict` 报错退出；`peer add --role`/`start --with` 的 role 同样要求 token。
+- **role/id token（评审 R1-②/R3-①/R3-②，fail-closed）**：`self_role` 或 `target_worker` 非 `is_role_token`（路径段安全、拒 `.`/`..`）→ `peer report --verdict` 报错退出；`peer add --role`、**`peer add --id`**、`start --with` 的 role/id 同样要求 token。
 - **判决路由写失败（评审 R1-③）**：stderr 明示 + 非零退出（**不静默成功**）；reviewer 重跑覆盖。
 - **`peer loop init --review` 格式非法**（缺 role / 空 veto-list / 坏 token）→ fail-closed。
 - **loop.json `acceptance` 手改坏**：单条 review 缺 `role`/`veto_on` → 跳过该条 + 告警（`peer loop init` 已在写入时校验，坏值仅来自手改，罕见）；全坏 → 无 review 门。
@@ -165,6 +165,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 - 耦合错误：`--verdict` 缺 `--target-ref` / 反之 / `--finding` 无 `--verdict` / `--verdict` 配 `--type checkpoint` → 各报错。
 - `--target-ref` 无 `@` / round 非整数 / `target_worker` 非 token → 报错（R1-②）。
 - **坏 self_role**（`@agent_role` 含 `/`）→ `--verdict` 报错退出（R1-②）；`peer add --role 'a/b'` / `peer add --id 'a/b'`（R2-①）/ `start --with x:'a/b'` → 报错。
+- **路径段攻击（R3-①）**：`peer add --id .` / `peer add --id ..` / `peer add --role ..` / `start --with codex:..` / `--target-ref ..@1` 全部拒绝（首字符受限）。
 - **`--review reviewer.v2:reject`**（含点号的 role）→ 接受（R2-②，role 走 `is_role_token`）。
 - **判决路由写失败**（stub 让 reviews/ 不可写）→ stderr 明示 + 非零退出（R1-③）。
 
@@ -186,7 +187,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 
 ### 4.3 实现影响面
 
-- `bin/peer`：新增共享 `is_role_token`（`^[A-Za-z0-9._-]+$`，R1-②；同时用于 agent id 校验）；`report` 加 `--verdict/--target-ref/--finding`（耦合校验、token 校验、`write_report_json` 增字段、判决记录路由到目标 `reviews/`、路由写失败非零退出 R1-③）；`loop init` 加 `--review`（role 用 `is_role_token`，R2-②）；`add` 的 `--role` **与 `--id`** 收紧到 token（R2-①）。
+- `bin/peer`：新增共享 `is_role_token`（`^[A-Za-z0-9][A-Za-z0-9._-]*$`，路径段安全、拒 `.`/`..`，R1-②/R3-①；同时用于 agent id 校验）；`report` 加 `--verdict/--target-ref/--finding`（耦合校验、token 校验、`write_report_json` 增字段、判决记录路由到目标 `reviews/`、路由写失败非零退出 R1-③）；`loop init` 加 `--review`（role 用 `is_role_token`，R2-②）；`add` 的 `--role` **与 `--id`** 收紧到 token（R2-①）。
 - `start.sh`：`--with` 的 role 收紧到 `is_role_token`（R1-②）。
 - `lib/loop.sh`：新增 `ad_loop_acceptance_state`；`eval_contracts` done 门合 validation+acceptance；`review_required` 按 `…-pending`/`…-vetoed` 拆 id（R1-①）；`ad_loop_event_priority` 加 `review_required) 11`；看板 `accept=` 行。
 - 文档：README（en/zh）、AGENT-INSTRUCTIONS/AGENTS、契约 §2.5（CLI 现已实现 acceptance）。
@@ -202,10 +203,15 @@ elif rounds_used>=max_rounds → reason=max_rounds
 ## 5. 评审修订（2026-06-21，交付前收紧）
 
 1. **`review_required` 按 phase 拆 id（§3.3/§4.2）**：`reviewreq-<worker>-<round>-pending` 与 `…-vetoed` 各每轮一条；避免"先 pending、后 reviewer request_changes"的状态变化被固定 id 去重吞掉——vetoed 会新发一条。
-2. **role/id token 安全（§2.1/§2.3/§4）**：判决记录路径含 `<reviewer-role>`/`<target_worker>`；新增共享 `is_role_token`（`^[A-Za-z0-9._-]+$`）；`peer report --verdict` 对 `self_role`/`target_worker` fail-closed，`peer add --role`/`start --with` 同步收紧（现仅校验非空），杜绝坏 role 把判决写到意外路径、done 门永远 pending。
+2. **role/id token 安全（§2.1/§2.3/§4）**：判决记录路径含 `<reviewer-role>`/`<target_worker>`；新增共享路径段安全 token `is_role_token`（`^[A-Za-z0-9][A-Za-z0-9._-]*$`，拒 `.`/`..`）；`peer report --verdict` 对 `self_role`/`target_worker` fail-closed，`peer add --role`/`--id`/`start --with` 同步收紧（现仅校验非空/查重），杜绝坏 role/id 把判决写到意外路径或逃出 state、done 门永远 pending。
 3. **判决路由写失败可见（§2.3/§4）**：`peer report` 路由写失败时 stderr 明示 + 非零退出，**不静默成功**；reviewer 重跑按 `target_round` 覆盖。
 
 ### 第二轮评审
 
 4. **`peer add --id` 也收紧到 token（§2.1/§4）**：判决路径含 `<target_worker>`（= worker 的 id），故 id 也必须是 token。原只收紧了 `--role`/`start --with`，漏了 `peer add --id`（现仅查重复）——`--id a/b` 会让 `--target-ref a/b@1` 路径异常、done 永远 pending。`is_role_token` 同时充当 id 校验。
 5. **`--review` 的 role 用 `is_role_token`（§1.3）**：原写成不含点号的 `[A-Za-z0-9_-]+`，与共享 `is_role_token`（含点号）不一致——真实 role `reviewer.v2` 会配不上。统一为 `is_role_token`。
+
+### 第三轮评审
+
+6. **`is_role_token` 改为路径段安全（§2.1/§4）**：原 `^[A-Za-z0-9._-]+$` 放行 `.`/`..`，而该 token 现也是 agent id / 路径段——`<target_worker>=..` 会逃出 `state/` 目录、`.` 别名到 `state` 本身。改为 `^[A-Za-z0-9][A-Za-z0-9._-]*$`（首字符字母/数字,拒 `.`/`..`）；测试补 `--id .`/`--id ..`/`--role ..`/`--with codex:..`/`--target-ref ..@1` 均拒。
+7. **错误处理段同步补 `peer add --id`（§4.1）**：上轮测试/影响面已含 `--id`，错误处理清单漏了,现补齐,避免实现按清单漏掉。
