@@ -96,8 +96,8 @@ reviewer 跑 `peer report --verdict …` 写的是 **reviewer 自己的 report**
 
 ```
 acceptance 缺 / 无 acceptance.reviews 键 → satisfied(无 review 门,向后兼容)
-acceptance.reviews 非数组,或任一条缺 role(非 token)/缺 veto_on(非非空数组)
-    → blocked(config_invalid)        # fail-closed:坏 contract 不放行 done(评审 R4-①)
+acceptance.reviews 非数组,或任一条: role 非 token / veto_on 非"非空数组"/ veto_on 任一元素非 verdict token(`[A-Za-z0-9_-]+`)
+    → blocked(config_invalid)        # fail-closed:坏 contract 不放行 done(评审 R4-① / R5-①)
 acceptance.reviews == []           → satisfied(显式无 review)
 for each {role, veto_on}:
     rec = .agent-duo/state/<worker>/reviews/<role>-r<round>.json
@@ -185,7 +185,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 - **pending→vetoed 转变（R1-①）**：先 MISSING 出 `…-pending`,reviewer 再给 request_changes 后同轮出 `…-vetoed`(两条不同 id,后者不被吞)。
 - done + validation **running** → **不发** `review_required`（先等 validation）。
 - 无 `acceptance` → done 仅凭 validation 停（**回归**）。
-- **坏 acceptance 配置 fail-closed（R4-①）**：`acceptance.reviews` 手改成非数组 / 条目缺字段 → done **不停**、发 `…-configinvalid`、看板 `accept=config_invalid`；空数组 `[]` → 视为无 review、done 照常停。
+- **坏 acceptance 配置 fail-closed（R4-① / R5-①）**：`acceptance.reviews` 手改成非数组 / 条目缺字段 / **`veto_on:[null]` / `veto_on:[""]` / `veto_on:["bad/value"]`（元素非 verdict token）** → done **不停**、发 `…-configinvalid`、看板 `accept=config_invalid`；空数组 `[]` → 视为无 review、done 照常停。
 - 幂等：`…-pending` / `…-vetoed` / `…-configinvalid` 各每轮一条。
 - reviewer+evaluator 都必需、一过一缺 → blocked。
 - 看板含 `accept=…`。
@@ -194,7 +194,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 
 - `bin/peer`：新增共享 `is_role_token`（`^[A-Za-z0-9][A-Za-z0-9._-]*$`，路径段安全、拒 `.`/`..`，R1-②/R3-①；同时用于 agent id 校验）；`report` 加 `--verdict/--target-ref/--finding`（耦合校验、token 校验、`write_report_json` 增字段、判决记录路由到目标 `reviews/`、路由写失败非零退出 R1-③）；`loop init` 加 `--review`（role 用 `is_role_token`，R2-②）；`add` 的 `--role` **与 `--id`** 收紧到 token（R2-①）。
 - `start.sh`：`--with` 的 role 收紧到 `is_role_token`（R1-②）。
-- `lib/loop.sh`：新增 `ad_loop_acceptance_state`；`eval_contracts` done 门合 validation+acceptance；`review_required` 按 `…-pending`/`…-vetoed` 拆 id（R1-①）；`ad_loop_event_priority` 加 `review_required) 11`；看板 `accept=` 行。
+- `lib/loop.sh`：新增 `ad_loop_acceptance_state`；`eval_contracts` done 门合 validation+acceptance；`review_required` 按 `…-pending`/`…-vetoed`/`…-configinvalid` 拆 id（R1-①/R4-①）；`ad_loop_event_priority` 加 `review_required) 11`；看板 `accept=` 行。
 - 文档：README（en/zh）、AGENT-INSTRUCTIONS/AGENTS、契约 §2.5（CLI 现已实现 acceptance）。
 - **不动**：validation runner、direction、loop_stop、broker、worktree。
 
@@ -225,3 +225,8 @@ elif rounds_used>=max_rounds → reason=max_rounds
 
 8. **坏 `acceptance.reviews` 改为 fail-closed（§3.1/§3.3/§3.4/§4）**：acceptance 是验收**安全门**——`reviews` 存在但配置坏时,原设计"跳过/无门"会让 worker 绕过 reviewer。改为 `blocked(config_invalid)`、done 不放行,发 `…-configinvalid` phase、看板 `accept=config_invalid`;空数组 `[]` 仍视为显式无 review。（缺 acceptance 键 = 无门,向后兼容,不变。）
 9. **路由写失败的重跑文案修正（§2.3）**：原"重跑同一条命令"对显式 `--round` 不成立（撞 reviewer 自身 `report round 已存在`）。改为:保留同一 `--target-ref`;若显式带了 `--round`,重试换新 round 或省略 `--round`。
+
+### 第五轮评审
+
+10. **`veto_on` 元素也要是 verdict token（§3.1/§4）**：上轮只校验"非空数组",`veto_on:[null]`/`[""]`/`["bad/value"]` 仍是非空数组,但 `rec.verdict ∈ veto_on` 不会命中 → reviewer 任何 verdict 都当 OK,与 fail-closed 相反。改为:`veto_on` 必须是**非空 verdict-token 字符串数组**,任一元素非 token → `config_invalid`。
+11. **影响面补 `…-configinvalid` phase（§4.3）**：设计/测试已要求,影响面只写了 pending/vetoed,同步补齐。
