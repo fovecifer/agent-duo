@@ -27,6 +27,7 @@
 #                           初始化/冻结某 agent 的 task.json 步骤账本
 #   peer loop [<id>]        查看某 agent 的 loop.json 契约与当前预算
 #   peer loop init [<id>] --mission "..." --max-rounds N [--non-goal "..."] [--success "..."] [--round N]
+#                  [--validation id:"cmd"] [--validation-satisfies id:"signal"] [--validation-timeout id:N]
 #                           初始化/冻结某 agent 的 supervisor loop 契约
 #   peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
 #                           原子 tell + 等待 target 写出新 report,并打印该 report 摘要
@@ -516,8 +517,117 @@ loop_file_for_id() { # <agent_id>
   printf '%s/state/%s/loop.json' "$AGENT_DUO_DIR" "$1"
 }
 
-write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json>
-  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" now
+is_validation_id() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+parse_validation_pair() { # <option_name> <id:value>; sets VALIDATION_ID VALIDATION_VALUE
+  local opt="$1" spec="${2:-}"
+  if [[ "$spec" != *:* ]]; then
+    echo "错误: $opt 需要 id:value 格式。" >&2
+    return 1
+  fi
+  VALIDATION_ID="${spec%%:*}"
+  VALIDATION_VALUE="${spec#*:}"
+  if ! is_validation_id "$VALIDATION_ID"; then
+    echo "错误: $opt 的 id 只能包含字母、数字、点、下划线和连字符。" >&2
+    return 1
+  fi
+  if [[ -z "$VALIDATION_VALUE" ]]; then
+    echo "错误: $opt 的 value 不能为空。" >&2
+    return 1
+  fi
+}
+
+validation_id_in_list() { # <id> [id...]
+  local needle="$1" item
+  shift || true
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+build_validation_json() {
+  local spec id cmd timeout signal first_val first_signal seen_signal i
+  local -a ids cmds
+  ids=()
+  cmds=()
+  if (( ${#loop_validations[@]} == 0 )); then
+    printf '[]'
+    return 0
+  fi
+  for spec in "${loop_validations[@]}"; do
+    parse_validation_pair "--validation" "$spec" || return 1
+    id="$VALIDATION_ID"
+    cmd="$VALIDATION_VALUE"
+    if validation_id_in_list "$id" "${ids[@]+"${ids[@]}"}"; then
+      echo "错误: --validation id 重复: $id" >&2
+      return 1
+    fi
+    ids+=("$id")
+    cmds+=("$cmd")
+  done
+  for spec in ${loop_validation_satisfies[@]+"${loop_validation_satisfies[@]}"}; do
+    parse_validation_pair "--validation-satisfies" "$spec" || return 1
+    if ! validation_id_in_list "$VALIDATION_ID" "${ids[@]+"${ids[@]}"}"; then
+      echo "错误: --validation-satisfies 引用了不存在的 validation id: $VALIDATION_ID" >&2
+      return 1
+    fi
+  done
+  for spec in ${loop_validation_timeouts[@]+"${loop_validation_timeouts[@]}"}; do
+    parse_validation_pair "--validation-timeout" "$spec" || return 1
+    if ! validation_id_in_list "$VALIDATION_ID" "${ids[@]+"${ids[@]}"}"; then
+      echo "错误: --validation-timeout 引用了不存在的 validation id: $VALIDATION_ID" >&2
+      return 1
+    fi
+    if ! is_positive_int "$VALIDATION_VALUE"; then
+      echo "错误: --validation-timeout 的秒数必须是正整数。" >&2
+      return 1
+    fi
+  done
+
+  printf '['
+  first_val=1
+  for (( i=0; i<${#ids[@]}; i++ )); do
+    id="${ids[$i]}"
+    cmd="${cmds[$i]}"
+    timeout="${AGENT_DUO_VALIDATION_TIMEOUT:-120}"
+    if ! is_positive_int "$timeout"; then
+      timeout="120"
+    fi
+    for spec in ${loop_validation_timeouts[@]+"${loop_validation_timeouts[@]}"}; do
+      parse_validation_pair "--validation-timeout" "$spec" >/dev/null || return 1
+      if [[ "$VALIDATION_ID" == "$id" ]]; then
+        timeout="$VALIDATION_VALUE"
+      fi
+    done
+    if [[ $first_val -eq 1 ]]; then first_val=0; else printf ','; fi
+    printf '{"id":'; json_str "$id"
+    printf ',"cmd":'; json_str "$cmd"
+    printf ',"timeout_seconds":%s' "$timeout"
+    printf ',"satisfies":['
+    first_signal=1
+    seen_signal=0
+    for spec in ${loop_validation_satisfies[@]+"${loop_validation_satisfies[@]}"}; do
+      parse_validation_pair "--validation-satisfies" "$spec" >/dev/null || return 1
+      if [[ "$VALIDATION_ID" == "$id" ]]; then
+        signal="$VALIDATION_VALUE"
+        if [[ $first_signal -eq 1 ]]; then first_signal=0; else printf ','; fi
+        json_str "$signal"
+        seen_signal=1
+      fi
+    done
+    if [[ $seen_signal -eq 0 ]]; then
+      json_str "$id"
+    fi
+    printf ']}'
+  done
+  printf ']'
+}
+
+write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json>
+  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" validation_json="$8" now
   now="$(iso_ts)"
   {
     printf '{"protocol":"1",'
@@ -525,6 +635,7 @@ write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <n
     printf '"mission":'; json_str "$mission"; printf ','
     printf '"non_goals":%s,' "$non_goals_json"
     printf '"success_signals":%s,' "$success_json"
+    printf '"validation":%s,' "$validation_json"
     printf '"max_rounds":%s,' "$max_rounds"
     printf '"frozen_at_round":%s,' "$frozen_round"
     printf '"status":"active",'
@@ -535,8 +646,8 @@ write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <n
   } > "$path"
 }
 
-loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json>
-  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6"
+loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json>
+  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6" validation_json="$7"
   local loop_file loop_dir tmp
   if [[ -z "$mission" ]]; then
     echo "错误: peer loop init 需要 --mission。" >&2
@@ -558,7 +669,7 @@ loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json
     return 1
   fi
   tmp="$loop_dir/.loop.json.$$"
-  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json"; then
+  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json" "$validation_json"; then
     rm -f "$tmp"
     return 1
   fi
@@ -586,7 +697,8 @@ loop_print() { # <agent_id>
       "REMAINING\t\($max - $used)",
       "STOP_REASON\t\(.stop.reason // "")",
       "NON_GOALS\t\((.non_goals // []) | join("; "))",
-      "SUCCESS_SIGNALS\t\((.success_signals // []) | join("; "))"
+      "SUCCESS_SIGNALS\t\((.success_signals // []) | join("; "))",
+      "VALIDATION\t\((.validation // []) | map(((.id // "") | tostring) + ":" + ((.cmd // "") | tostring)) | join("; "))"
   ' "$loop_file"
 }
 
@@ -1560,6 +1672,9 @@ case "$cmd" in
         loop_round=""
         loop_non_goals=()
         loop_success=()
+        loop_validations=()
+        loop_validation_satisfies=()
+        loop_validation_timeouts=()
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --mission)
@@ -1578,12 +1693,24 @@ case "$cmd" in
               loop_success+=("${2:-}")
               shift 2
               ;;
+            --validation)
+              loop_validations+=("${2:-}")
+              shift 2
+              ;;
+            --validation-satisfies)
+              loop_validation_satisfies+=("${2:-}")
+              shift 2
+              ;;
+            --validation-timeout)
+              loop_validation_timeouts+=("${2:-}")
+              shift 2
+              ;;
             --round)
               loop_round="${2:-}"
               shift 2
               ;;
             *)
-              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N]" >&2
+              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N]" >&2
               exit 1
               ;;
           esac
@@ -1594,19 +1721,22 @@ case "$cmd" in
         fi
         loop_non_goals_json="$(json_array ${loop_non_goals[@]+"${loop_non_goals[@]}"})"
         loop_success_json="$(json_array ${loop_success[@]+"${loop_success[@]}"})"
-        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json"
+        if ! loop_validation_json="$(build_validation_json)"; then
+          exit 1
+        fi
+        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json" "$loop_validation_json"
         echo "已初始化 loop.json: .agent-duo/state/$target_id/loop.json"
         ;;
       ""|--help|-h)
         if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N]" >&2
           exit 0
         fi
         loop_print "$ME"
         ;;
       *)
         if [[ -n "${2:-}" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N]" >&2
           exit 1
         fi
         loop_print "$subcmd"

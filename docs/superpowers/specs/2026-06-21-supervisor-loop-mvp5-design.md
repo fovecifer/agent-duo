@@ -18,8 +18,8 @@
 
 **明确推后（非本 spec）**：
 
-- validation 命令自动跑 + 结果入 evidence。
-- `success_signals` 的机械匹配（依赖 validation）。
+- validation 命令自动跑 + 结果入 evidence（后续已由 [Loop Validation + Success Signals（MVP 5 验收补丁）](./2026-06-21-loop-validation-success-signals-mvp-design.md) 补齐）。
+- `success_signals` 的机械匹配（后续已由 validation 补丁补齐）。
 - acceptance 组合规则（reviewer/evaluator veto，契约 §2.5）。
 - `peer loop reset` / `--bump-max-rounds`（停止后的完整重置；cut1 用 `peer ask --force` 作逃生口）。
 
@@ -73,7 +73,7 @@ peer ask <worker> "..."  ──fail-closed 查 loop.json──┘  越界拒发(
 **硬边界 vs 软护栏（贴合混合模型）**：
 
 - **硬边界（runtime 机械执行）**：`max_rounds`、`stop.on_terminal`。
-- **软护栏（supervisor LLM 读，不机械执行）**：`mission`、`non_goals`、`success_signals`。cut1 不做 `success_signals` 自动匹配（那要 validation，已推后）。
+- **软护栏（supervisor LLM 读，不机械执行）**：`mission`、`non_goals`。cut1 不做 `success_signals` 自动匹配；后续 validation 补丁已在配置 validation 时把 `success_signals` 升级为机械匹配目标。
 
 > roadmap 写的是 `contract.yaml`，但本仓库是 jq-only、无 YAML parser，故用 JSON + `peer loop init` 结构化冻结，与 task.json/broker marker 的 per-worker scope 一致。
 
@@ -288,7 +288,7 @@ worker 是 Claude/Codex **全屏 TUI**——`capture-pane` 抓到的是当前重
 
 - 不把 supervisor 变无头 `loop run`——它始终是可见、可插话的 session（守水线）。
 - 不在人面前暴露结构化命令——`loop`/`ask`/契约全是 supervisor 的内部动作。
-- 不做 validation 自动跑、success_signals 机械匹配、acceptance veto、loop reset——均留后续迭代。
+- cut1 不做 validation 自动跑、success_signals 机械匹配、acceptance veto、loop reset；其中 validation 自动跑与 success_signals 机械匹配已由后续验收补丁实现，acceptance veto / loop reset 仍留后续迭代。
 
 ## 11. 评审修订（2026-06-21，交付前收紧）
 

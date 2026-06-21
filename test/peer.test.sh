@@ -541,9 +541,33 @@ assert_contains "loop init: max rounds" "$loop_json" '"max_rounds":8'
 assert_contains "loop init: frozen from report" "$loop_json" '"frozen_at_round":12'
 assert_contains "loop init: non goal" "$loop_json" '"non_goals":["no auth refactor"]'
 assert_contains "loop init: success" "$loop_json" '"success_signals":["tests pass"]'
+assert_contains "loop init: default validation empty" "$loop_json" '"validation":[]'
 assert_ok "loop print: succeeds" run_peer loop worker
 assert_contains "loop print: rounds used" "$(cat "$OUT")" $'ROUNDS_USED\t1'
 assert_contains "loop print: remaining" "$(cat "$OUT")" $'REMAINING\t7'
+teardown
+
+# loop:init validation 命令写入 contract,并把 validation id 映射到 success_signals。
+setup
+assert_ok "loop init validation: succeeds" run_peer loop init worker --mission "ship with tests" --max-rounds 4 \
+  --success "tests pass" --validation go-test:"printf ok" \
+  --validation-satisfies go-test:"tests pass" --validation-timeout go-test:5
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop init validation: id" "$loop_json" '"id":"go-test"'
+assert_contains "loop init validation: cmd" "$loop_json" '"cmd":"printf ok"'
+assert_contains "loop init validation: timeout" "$loop_json" '"timeout_seconds":5'
+assert_contains "loop init validation: satisfies" "$loop_json" '"satisfies":["tests pass"]'
+assert_ok "loop init validation: print succeeds" run_peer loop worker
+assert_contains "loop init validation: print" "$(cat "$OUT")" $'VALIDATION\tgo-test:printf ok'
+teardown
+
+# loop:init validation 省略 satisfies/timeout 时,bash 3.2 空数组分支不崩溃,并使用默认值。
+setup
+assert_ok "loop init validation default: succeeds" run_peer loop init worker --mission "ship with default validation" --max-rounds 4 \
+  --validation go-test:"echo hi"
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop init validation default: timeout" "$loop_json" '"timeout_seconds":120'
+assert_contains "loop init validation default: satisfies id" "$loop_json" '"satisfies":["go-test"]'
 teardown
 
 # loop:init 无 report 时 frozen_at_round 默认 1,且已存在/非法输入 fail-closed。
@@ -559,6 +583,10 @@ assert_not_ok "loop init: missing mission rejected" run_peer loop init worker --
 assert_contains "loop init: missing mission error" "$(cat "$ERR")" '--mission'
 assert_not_ok "loop init: bad max rejected" run_peer loop init worker --mission "do work" --max-rounds nope
 assert_contains "loop init: bad max error" "$(cat "$ERR")" '--max-rounds'
+assert_not_ok "loop init: bad validation rejected" run_peer loop init worker --mission "do work" --max-rounds 3 --validation bad
+assert_contains "loop init: bad validation error" "$(cat "$ERR")" 'id:value'
+assert_not_ok "loop init: unknown validation signal rejected" run_peer loop init worker --mission "do work" --max-rounds 3 --validation go-test:"true" --validation-satisfies lint:"tests pass"
+assert_contains "loop init: unknown validation signal error" "$(cat "$ERR")" '不存在的 validation id'
 teardown
 
 # ask:stopped loop 发送前 fail-closed,不写 buffer。

@@ -14,6 +14,10 @@ ad_loop_state_dir() { # <root>
   printf '%s/state' "$(ad_loop_duo_dir "$1")"
 }
 
+ad_loop_logs_dir() { # <root>
+  printf '%s/logs' "$(ad_loop_duo_dir "$1")"
+}
+
 ad_loop_queue_file() { # <root>
   printf '%s/queue.jsonl' "$(ad_loop_events_dir "$1")"
 }
@@ -32,7 +36,7 @@ ad_loop_delivered_file() { # <root>
 
 ad_loop_ensure_dirs() { # <root>
   local root="$1"
-  mkdir -p "$(ad_loop_events_dir "$root")" "$(ad_loop_state_dir "$root")"
+  mkdir -p "$(ad_loop_events_dir "$root")" "$(ad_loop_state_dir "$root")" "$(ad_loop_logs_dir "$root")"
   [[ -e "$(ad_loop_queue_file "$root")" ]] || : > "$(ad_loop_queue_file "$root")"
 }
 
@@ -114,11 +118,13 @@ EOF
 )"
   case "$type" in
     blocked|request|loop_stop) printf '10' ;;
+    validation_fail)     printf '15' ;;
     result)              printf '20' ;;
     stuck|dead)          printf '30' ;;
     budget_low)          printf '40' ;;
     silent)              printf '50' ;;
     plan)                printf '60' ;;
+    validation_pass)     printf '70' ;;
     checkpoint)          printf '90' ;;
     tick)                printf '95' ;;
     *)                   printf '80' ;;
@@ -361,6 +367,26 @@ ad_loop_contract_path() { # <root> <agent_id>
   printf '%s/%s/loop.json' "$(ad_loop_state_dir "$1")" "$2"
 }
 
+ad_loop_validation_path() { # <root> <agent_id> <round>
+  printf '%s/%s/validation-r%s.json' "$(ad_loop_state_dir "$1")" "$2" "$3"
+}
+
+ad_loop_validation_ref() { # <agent_id> <round>
+  printf '.agent-duo/state/%s/validation-r%s.json' "$1" "$2"
+}
+
+ad_loop_validation_log_path() { # <root> <agent_id> <round> <validation_id>
+  printf '%s/%s/validation-r%s-%s.log' "$(ad_loop_logs_dir "$1")" "$2" "$3" "$4"
+}
+
+ad_loop_validation_log_ref() { # <agent_id> <round> <validation_id>
+  printf '.agent-duo/logs/%s/validation-r%s-%s.log' "$1" "$2" "$3"
+}
+
+ad_loop_safe_validation_id() {
+  printf '%s' "${1:-validation}" | sed 's/[^A-Za-z0-9._-]/_/g'
+}
+
 ad_loop_report_round() { # <report_path>
   local round
   round="$(jq -r '.round // 0' "$1" 2>/dev/null || true)"
@@ -478,9 +504,176 @@ ad_loop_stop_contract() { # <root> <agent> <reason> <current_round> <rounds_used
   mv "$tmp" "$contract"
 }
 
+ad_loop_run_validation_command() { # <root> <cmd> <timeout_seconds> <log_path>
+  local root="$1" cmd="$2" timeout="$3" log="$4" start end pid watchdog flag rc
+  start="$(ad_loop_now_epoch)"
+  flag="${log}.timeout.$$"
+  rm -f "$flag"
+  (
+    cd "$root" || exit 127
+    bash -lc "$cmd"
+  ) > "$log" 2>&1 &
+  pid=$!
+  watchdog=""
+  if ad_loop_is_nonnegative_int "$timeout" && (( timeout > 0 )); then
+    (
+      sleep "$timeout"
+      if kill -0 "$pid" 2>/dev/null; then
+        : > "$flag"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    ) &
+    watchdog=$!
+  fi
+  if wait "$pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ -n "$watchdog" ]]; then
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+  fi
+  if [[ -f "$flag" ]]; then
+    VALIDATION_TIMED_OUT=true
+    rc=124
+    rm -f "$flag"
+  else
+    VALIDATION_TIMED_OUT=false
+  fi
+  end="$(ad_loop_now_epoch)"
+  VALIDATION_EXIT_CODE="$rc"
+  VALIDATION_DURATION_SECONDS="$(( end - start ))"
+}
+
+ad_loop_emit_validation_event() { # <root> <agent> <round> <validation_path>
+  local root="$1" agent="$2" round="$3" validation_path="$4" status event_id ref type summary total passed details
+  [[ -f "$validation_path" ]] || return 1
+  status="$(jq -r '.status // "unknown"' "$validation_path" 2>/dev/null || printf 'unknown')"
+  total="$(jq -r '(.results // []) | length' "$validation_path" 2>/dev/null || printf '0')"
+  passed="$(jq -r '(.results // []) | map(select(.status == "pass")) | length' "$validation_path" 2>/dev/null || printf '0')"
+  ref="$(ad_loop_validation_ref "$agent" "$round")"
+  event_id="validation-${agent}-${round}"
+  if [[ "$status" == "pass" ]]; then
+    type="validation_pass"
+    summary="validation pass: ${passed}/${total} checks"
+  else
+    type="validation_fail"
+    details="$(jq -r '
+      [(.failed_validations[]? | "failed:" + .), (.missing_signals[]? | "missing:" + .)]
+      | if length == 0 then "unknown" else join(", ") end
+    ' "$validation_path" 2>/dev/null || printf 'unknown')"
+    summary="validation fail: ${details}"
+  fi
+  if ! ad_loop_event_id_seen "$root" "$event_id"; then
+    ad_loop_append_event_with_id "$root" "$event_id" "$agent" "$type" "$round" "$summary" "$ref"
+  fi
+}
+
+ad_loop_run_validation_round() { # <root> <agent> <contract_path> <round>
+  local root="$1" agent="$2" contract="$3" round="$4"
+  local out tmp results tmp_result ts success_json validation id cmd timeout satisfies safe_id log_path log_ref
+  local result_status exit_code timed_out duration status
+  out="$(ad_loop_validation_path "$root" "$agent" "$round")"
+  if [[ -f "$out" ]]; then
+    ad_loop_emit_validation_event "$root" "$agent" "$round" "$out" || true
+    jq -r '.status // "unknown"' "$out" 2>/dev/null || printf 'unknown'
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$out")" "$(ad_loop_logs_dir "$root")/$agent"
+  tmp="${out}.$$"
+  results="${out}.results.$$"
+  : > "$results"
+
+  while IFS= read -r validation; do
+    id="$(jq -r '.id // ""' <<EOF
+$validation
+EOF
+)"
+    cmd="$(jq -r '.cmd // ""' <<EOF
+$validation
+EOF
+)"
+    timeout="$(jq -r '.timeout_seconds // 120' <<EOF
+$validation
+EOF
+)"
+    satisfies="$(jq -c '
+      if ((.satisfies // []) | type) == "array" and ((.satisfies // []) | length) > 0
+      then (.satisfies // [] | map(tostring))
+      elif (.id // "") != ""
+      then [(.id | tostring)]
+      else []
+      end
+    ' <<EOF
+$validation
+EOF
+)"
+    safe_id="$(ad_loop_safe_validation_id "$id")"
+    [[ -n "$safe_id" ]] || safe_id="validation"
+    log_path="$(ad_loop_validation_log_path "$root" "$agent" "$round" "$safe_id")"
+    log_ref="$(ad_loop_validation_log_ref "$agent" "$round" "$safe_id")"
+    result_status="pass"
+    exit_code=0
+    timed_out=false
+    duration=0
+    if [[ -z "$id" || -z "$cmd" ]] || ! ad_loop_is_nonnegative_int "$timeout" || [[ "$timeout" == "0" ]]; then
+      result_status="error"
+      exit_code=127
+      printf 'invalid validation entry: id/cmd/timeout_seconds required\n' > "$log_path"
+    else
+      ad_loop_run_validation_command "$root" "$cmd" "$timeout" "$log_path"
+      exit_code="$VALIDATION_EXIT_CODE"
+      timed_out="$VALIDATION_TIMED_OUT"
+      duration="$VALIDATION_DURATION_SECONDS"
+      if [[ "$exit_code" != "0" ]]; then
+        result_status="fail"
+      fi
+    fi
+    tmp_result="$(jq -cn \
+      --arg id "$id" --arg cmd "$cmd" --arg status "$result_status" --arg log_ref "$log_ref" \
+      --argjson exit_code "$exit_code" --argjson timed_out "$timed_out" --argjson duration "$duration" \
+      --argjson satisfies "$satisfies" \
+      '{id:$id,cmd:$cmd,status:$status,exit_code:$exit_code,timed_out:$timed_out,duration_seconds:$duration,log_ref:$log_ref,satisfies:$satisfies}')"
+    printf '%s\n' "$tmp_result" >> "$results"
+  done < <(jq -c '(.validation // [])[]?' "$contract")
+
+  ts="$(ad_loop_iso_ts)"
+  success_json="$(jq -c '(.success_signals // []) | map(tostring)' "$contract" 2>/dev/null || printf '[]')"
+  if ! jq -cs \
+    --arg agent "$agent" --arg ts "$ts" --argjson round "$round" --argjson success "$success_json" '
+      (map(select(.status == "pass") | .satisfies[]?) | unique) as $satisfied
+      | ($success | map(select(. as $signal | ($satisfied | index($signal)) == null))) as $missing
+      | (map(select(.status != "pass") | .id) | unique) as $failed
+      | {
+          protocol:"1",
+          agent_id:$agent,
+          round:$round,
+          status:(if (($failed | length) == 0 and ($missing | length) == 0 and (length > 0)) then "pass" else "fail" end),
+          satisfied_signals:$satisfied,
+          missing_signals:$missing,
+          failed_validations:$failed,
+          results:.,
+          created_at:$ts
+        }
+    ' "$results" > "$tmp"; then
+    rm -f "$tmp" "$results"
+    printf 'error'
+    return 1
+  fi
+  mv "$tmp" "$out"
+  rm -f "$results"
+  ad_loop_emit_validation_event "$root" "$agent" "$round" "$out" || true
+  status="$(jq -r '.status // "unknown"' "$out" 2>/dev/null || printf 'unknown')"
+  printf '%s' "$status"
+}
+
 ad_loop_eval_contracts() { # <root> <session>
   local root="$1" session="${2:-}" agent contract parsed status max_rounds frozen_round on_terminal
-  local report current_round report_status rounds_used reason
+  local report current_round report_status rounds_used reason validation_count validation_status
   : "${session:-}"
   ad_loop_contract_agents "$root" | while IFS= read -r agent; do
     [[ -n "$agent" ]] || continue
@@ -515,9 +708,22 @@ EOF
     current_round="$(ad_loop_report_round "$report")"
     report_status="$(ad_loop_report_status "$report")"
     rounds_used="$(( current_round - frozen_round + 1 ))"
+    validation_count="$(jq -r '(.validation // []) | length' <<EOF
+$parsed
+EOF
+)"
+    if ! ad_loop_is_nonnegative_int "$validation_count"; then
+      validation_count="0"
+    fi
+    validation_status=""
+    if (( validation_count > 0 && current_round > 0 && rounds_used > 0 )); then
+      validation_status="$(ad_loop_run_validation_round "$root" "$agent" "$contract" "$current_round" || printf 'error')"
+    fi
     reason=""
     if [[ "$on_terminal" == "true" && "$report_status" == "done" ]]; then
-      reason="done"
+      if (( validation_count == 0 )) || [[ "$validation_status" == "pass" ]]; then
+        reason="done"
+      fi
     elif [[ "$on_terminal" == "true" && "$report_status" == "failed" ]]; then
       reason="failed"
     elif (( rounds_used > 0 && rounds_used >= max_rounds )); then
@@ -615,7 +821,7 @@ ad_loop_idle_arrival() { # <root> <session>
 }
 
 ad_loop_dashboard_loop_info() { # <root> <agent>
-  local root="$1" agent="$2" contract parsed max_rounds frozen_round status reason current_round rounds_used
+  local root="$1" agent="$2" contract parsed max_rounds frozen_round status reason current_round rounds_used validation_file validation_status
   contract="$(ad_loop_contract_path "$root" "$agent")"
   [[ -f "$contract" ]] || return 0
   if ! parsed="$(jq -c '.' "$contract" 2>/dev/null)"; then
@@ -642,10 +848,18 @@ EOF
   if ! ad_loop_is_nonnegative_int "$frozen_round" || [[ "$frozen_round" == "0" ]]; then frozen_round="1"; fi
   current_round="$(ad_loop_report_round "$(ad_loop_report_path "$root" "$agent")")"
   rounds_used="$(( current_round - frozen_round + 1 ))"
+  validation_file="$(ad_loop_validation_path "$root" "$agent" "$current_round")"
+  validation_status=""
+  if [[ -f "$validation_file" ]]; then
+    validation_status="$(jq -r '.status // "unknown"' "$validation_file" 2>/dev/null || printf 'unknown')"
+  fi
   if [[ "$status" == "stopped" && -n "$reason" ]]; then
     printf 'loop=%s/%s stopped:%s' "$rounds_used" "$max_rounds" "$reason"
   else
     printf 'loop=%s/%s %s' "$rounds_used" "$max_rounds" "$status"
+  fi
+  if [[ -n "$validation_status" ]]; then
+    printf ' validation=%s' "$validation_status"
   fi
 }
 
