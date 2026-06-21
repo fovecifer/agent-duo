@@ -19,7 +19,9 @@
 - `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>`
   — supervisor 初始化/查看 worker 的持久化 `task.json` 步骤账本;worker 解阻后按 next 从 `blocked` 或下一个 `pending` 步续跑
 - `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"] [--detail-trap-rounds N]` / `peer loop <id>`
-  — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并在配置 validation 时用客观验收结果门控 `done`
+  — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并在配置 validation 时用异步客观验收结果门控 `done`
+- `peer loop reset <id> [--max-rounds N]`
+  — supervisor 在当前最新 report 轮次重新冻结 loop,清空停止状态并给新预算;若最新 report 已是 `done`/`failed`,先用 `peer reframe --force` 推出新非终态 report 再续跑
 - `peer ask <id> "消息"` — supervisor 原子下发一条 loop-gated 消息,等待 worker 下一轮结构化 report,再只读取这轮新结果
 - `peer checkpoint <id> [--json]` — supervisor 只读汇总 worker 的 loop、最近 report、task 与 validation 状态,用于判断继续/纠偏/停止
 - `peer reframe <id> "消息" [--force]` — supervisor 向 worker 下发方向纠偏(`verb=reframe`),并写入 `checkpoints.jsonl` 审计

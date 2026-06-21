@@ -603,6 +603,68 @@ assert_not_ok "loop init: unknown validation signal rejected" run_peer loop init
 assert_contains "loop init: unknown validation signal error" "$(cat "$ERR")" '不存在的 validation id'
 teardown
 
+# loop:reset 在当前 report 轮次重新冻结预算,只重写 loop.json 的边界/stop 状态。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",round:8,agent_id:"worker",role:"worker",type:"checkpoint",status:"in_progress",delta:"",next:"",needs:[]}' \
+  > "$PROJECT/.agent-duo/state/worker/r8.json"
+ln -s "r8.json" "$PROJECT/.agent-duo/state/worker/report.json"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:["n"],success_signals:["s"],validation:[{id:"go-test",cmd:"true",timeout_seconds:5,satisfies:["s"]}],detail_trap_rounds:4,max_rounds:3,frozen_at_round:1,status:"stopped",stop:{on_terminal:true,reason:"max_rounds",stopped_at_round:3,stopped_at:"2026-06-21T00:00:00Z"}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_ok "loop reset: succeeds" run_peer loop reset worker --max-rounds 5
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop reset: active" "$loop_json" '"status":"active"'
+assert_contains "loop reset: frozen current round" "$loop_json" '"frozen_at_round":8'
+assert_contains "loop reset: max override" "$loop_json" '"max_rounds":5'
+assert_contains "loop reset: stop cleared" "$loop_json" '"reason":null'
+assert_contains "loop reset: validation preserved" "$loop_json" '"validation":[{"id":"go-test"'
+assert_contains "loop reset: detail preserved" "$loop_json" '"detail_trap_rounds":4'
+assert_not_contains "loop reset: no terminal warning" "$(cat "$ERR")" '下一 tick'
+teardown
+
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],validation:[],max_rounds:3,frozen_at_round:4,status:"stopped",stop:{on_terminal:true,reason:"max_rounds",stopped_at_round:6,stopped_at:"2026-06-21T00:00:00Z"}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_ok "loop reset: no report keeps frozen" run_peer loop reset worker
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop reset: no report frozen old" "$loop_json" '"frozen_at_round":4'
+assert_contains "loop reset: no max override keeps old" "$loop_json" '"max_rounds":3'
+teardown
+
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],validation:[],max_rounds:3,frozen_at_round:1,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_not_ok "loop reset: bad max rejected" run_peer loop reset worker --max-rounds 0
+assert_contains "loop reset: bad max error" "$(cat "$ERR")" '--max-rounds'
+teardown
+
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],validation:[],max_rounds:3,frozen_at_round:1,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_not_ok "loop reset: missing max rejected" run_peer loop reset worker --max-rounds
+assert_contains "loop reset: missing max usage" "$(cat "$ERR")" '用法: peer loop reset'
+teardown
+
+setup
+assert_not_ok "loop reset: missing loop rejected" run_peer loop reset worker
+assert_contains "loop reset: missing loop error" "$(cat "$ERR")" '没有 loop.json'
+teardown
+
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",round:9,agent_id:"worker",role:"worker",type:"checkpoint",status:"failed",delta:"",next:"",needs:[]}' \
+  > "$PROJECT/.agent-duo/state/worker/r9.json"
+ln -s "r9.json" "$PROJECT/.agent-duo/state/worker/report.json"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],validation:[],max_rounds:3,frozen_at_round:1,status:"stopped",stop:{on_terminal:true,reason:"failed",stopped_at_round:9,stopped_at:"2026-06-21T00:00:00Z"}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_ok "loop reset: terminal report warns" run_peer loop reset worker
+assert_contains "loop reset: terminal warning" "$(cat "$ERR")" '下一 tick 会按同一 report 再次停止'
+assert_contains "loop reset: terminal reframe hint" "$(cat "$ERR")" 'peer reframe --force worker'
+teardown
+
 # ask:stopped loop 发送前 fail-closed,不写 buffer。
 setup
 mkdir -p "$PROJECT/.agent-duo/state/worker"
