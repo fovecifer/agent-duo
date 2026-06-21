@@ -84,7 +84,7 @@ peer report --type result --status <s> \
 - `role` = reviewer 自己的 `@agent_role`（`self_role`）——这是 done 门按 `acceptance.reviews[].role` 匹配的 key。
 - 原子 `tmp+mv`；`mkdir -p reviews/`。
 - 写入时机：**event append 成功之后**（同 gate `opened` 的顺序）——report 回滚则不留孤儿判决。
-- **写失败必须可见（评审 R1-③）**：判决路由写失败时,`peer report` **不得静默成功**——必须 stderr 明示 + **非零退出**:`"判决已记入本 agent report,但路由到 <target>/reviews/<role>-r<N>.json 失败;请重跑同一条 peer report --verdict … 重试。"` 否则 reviewer 以为已提交、worker 永远卡 pending。重跑安全:判决记录按 `target_round` 为 key,同 `--target-ref` 重写即覆盖（reviewer 自身多一轮 report 无妨）。
+- **写失败必须可见（评审 R1-③）**：判决路由写失败时,`peer report` **不得静默成功**——必须 stderr 明示 + **非零退出**:`"判决已记入本 agent report,但路由到 <target>/reviews/<role>-r<N>.json 失败;请重跑同一条 peer report --verdict … 重试。"` 否则 reviewer 以为已提交、worker 永远卡 pending。重跑：**保留同一 `--target-ref`**（判决记录按 `target_round` 为 key，重写即覆盖）；若原命令**显式带了 reviewer 自己的 `--round`**，重试需**换新 round 或省略 `--round`** 让其自增——否则会撞 reviewer 自身的 `report round 已存在`（评审 R4-②）。
 
 ### 2.4 与 reviewer 自身的关系
 
@@ -95,8 +95,10 @@ reviewer 跑 `peer report --verdict …` 写的是 **reviewer 自己的 report**
 ### 3.1 acceptance 判定：`ad_loop_acceptance_state <root> <worker> <round> <contract>`
 
 ```
-reviews = contract.acceptance.reviews[]
-reviews 空 → satisfied(无 review 门)
+acceptance 缺 / 无 acceptance.reviews 键 → satisfied(无 review 门,向后兼容)
+acceptance.reviews 非数组,或任一条缺 role(非 token)/缺 veto_on(非非空数组)
+    → blocked(config_invalid)        # fail-closed:坏 contract 不放行 done(评审 R4-①)
+acceptance.reviews == []           → satisfied(显式无 review)
 for each {role, veto_on}:
     rec = .agent-duo/state/<worker>/reviews/<role>-r<round>.json
     rec 不存在/不可读     → 该 role MISSING
@@ -104,6 +106,8 @@ for each {role, veto_on}:
     否则                  → 该 role OK
 全 OK → satisfied;否则 blocked(记下 missing[] / vetoed[])
 ```
+
+> **安全语义（R4-①）**：acceptance 是验收**安全门**——`acceptance.reviews` 存在但配置坏（手改 / 非数组 / 条目缺字段）时，最保守的行为是**不放行 done**（`config_invalid`），否则一个坏 contract 会让 worker 绕过 reviewer/evaluator。`peer loop init` 写入仍 fail-closed（坏 `--review` 直接拒），所以坏配置只来自手改，但门侧也必须兜住。
 
 ### 3.2 done 合门（`eval_contracts`，validation 之后）
 
@@ -135,7 +139,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
   "summary":"review vetoed: reviewer(request_changes)", "ref":".agent-duo/state/<worker>/r<N>.json" }
 ```
 
-- 每 tick(done∧vok∧!aok)算 `(missing[], vetoed[])`：`missing` 非空且 `…-pending` 未见 → 发 pending；`vetoed` 非空且 `…-vetoed` 未见 → 发 vetoed。**两类各自每轮一条**，`ad_loop_event_id_seen` 去重。
+- 每 tick(done∧vok∧!aok)：若 acceptance `config_invalid`（R4-①）→ 发 `…-configinvalid`（summary `acceptance config invalid`）；否则算 `(missing[], vetoed[])`，`missing` 非空且 `…-pending` 未见 → 发 pending，`vetoed` 非空且 `…-vetoed` 未见 → 发 vetoed。**各 phase 每轮一条**，`ad_loop_event_id_seen` 去重。
 - 这样 `pending → vetoed` 的转变会**新发一条 vetoed**(不同 id)，supervisor 拿得到：`pending`(没人审)→ 去派 reviewer；`vetoed(request_changes)` → 让 worker 改。
 - 优先级 **11**（高；blocked=10 与 validation_fail=15 之间）。
 - worker 改完报 round N+1 → done 门按 N+1 重判（需 N+1 的新判决）→ 旧 N 的 vetoed/pending 自然被新轮取代。
@@ -143,7 +147,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 ### 3.4 边界 + 看板
 
 - **无 review 超时（本刀）**：review 是 agent 判断、无 `timeout_seconds`。supervisor/人若一直不派 reviewer，worker 泊住等待（不烧 token，廉价）——水线下人在环路的责任，`review_required` 已 nudge。review 超时升级列为后续（YAGNI）。
-- 看板每个 worker 行追加 acceptance 摘要（有 `acceptance.reviews` 时）：`accept=reviewer:ok,evaluator:pending`。
+- 看板每个 worker 行追加 acceptance 摘要（有 `acceptance.reviews` 时）：`accept=reviewer:ok,evaluator:pending`；配置坏时 `accept=config_invalid`（R4-①）。
 
 ## 4. 错误处理 + 测试 + 影响面
 
@@ -153,7 +157,7 @@ elif rounds_used>=max_rounds → reason=max_rounds
 - **role/id token（评审 R1-②/R3-①/R3-②，fail-closed）**：`self_role` 或 `target_worker` 非 `is_role_token`（路径段安全、拒 `.`/`..`）→ `peer report --verdict` 报错退出；`peer add --role`、**`peer add --id`**、`start --with` 的 role/id 同样要求 token。
 - **判决路由写失败（评审 R1-③）**：stderr 明示 + 非零退出（**不静默成功**）；reviewer 重跑覆盖。
 - **`peer loop init --review` 格式非法**（缺 role / 空 veto-list / 坏 token）→ fail-closed。
-- **loop.json `acceptance` 手改坏**：单条 review 缺 `role`/`veto_on` → 跳过该条 + 告警（`peer loop init` 已在写入时校验，坏值仅来自手改，罕见）；全坏 → 无 review 门。
+- **loop.json `acceptance` 手改坏（评审 R4-①，fail-closed）**：`acceptance.reviews` 存在但坏（非数组 / 条目缺 `role`/`veto_on`）→ `ad_loop_acceptance_state` 返回 `blocked(config_invalid)`，**done 不放行**（坏 contract 不得绕过 review）；发 `review_required` 的 `…-configinvalid` phase、看板 `accept=config_invalid`。`peer loop init` 写入仍 fail-closed。
 - **`reviews/<role>-r<N>.json` 不可读/坏** → 当 **MISSING**（done 门侧 fail-closed：不拿坏判决放行 done）。
 
 ### 4.2 测试矩阵（`peer.test.sh` / `loop.test.sh`；tmux stub）
@@ -181,7 +185,8 @@ elif rounds_used>=max_rounds → reason=max_rounds
 - **pending→vetoed 转变（R1-①）**：先 MISSING 出 `…-pending`,reviewer 再给 request_changes 后同轮出 `…-vetoed`(两条不同 id,后者不被吞)。
 - done + validation **running** → **不发** `review_required`（先等 validation）。
 - 无 `acceptance` → done 仅凭 validation 停（**回归**）。
-- 幂等：`…-pending` / `…-vetoed` 各每轮一条。
+- **坏 acceptance 配置 fail-closed（R4-①）**：`acceptance.reviews` 手改成非数组 / 条目缺字段 → done **不停**、发 `…-configinvalid`、看板 `accept=config_invalid`；空数组 `[]` → 视为无 review、done 照常停。
+- 幂等：`…-pending` / `…-vetoed` / `…-configinvalid` 各每轮一条。
 - reviewer+evaluator 都必需、一过一缺 → blocked。
 - 看板含 `accept=…`。
 
@@ -215,3 +220,8 @@ elif rounds_used>=max_rounds → reason=max_rounds
 
 6. **`is_role_token` 改为路径段安全（§2.1/§4）**：原 `^[A-Za-z0-9._-]+$` 放行 `.`/`..`，而该 token 现也是 agent id / 路径段——`<target_worker>=..` 会逃出 `state/` 目录、`.` 别名到 `state` 本身。改为 `^[A-Za-z0-9][A-Za-z0-9._-]*$`（首字符字母/数字,拒 `.`/`..`）；测试补 `--id .`/`--id ..`/`--role ..`/`--with codex:..`/`--target-ref ..@1` 均拒。
 7. **错误处理段同步补 `peer add --id`（§4.1）**：上轮测试/影响面已含 `--id`，错误处理清单漏了,现补齐,避免实现按清单漏掉。
+
+### 第四轮评审
+
+8. **坏 `acceptance.reviews` 改为 fail-closed（§3.1/§3.3/§3.4/§4）**：acceptance 是验收**安全门**——`reviews` 存在但配置坏时,原设计"跳过/无门"会让 worker 绕过 reviewer。改为 `blocked(config_invalid)`、done 不放行,发 `…-configinvalid` phase、看板 `accept=config_invalid`;空数组 `[]` 仍视为显式无 review。（缺 acceptance 键 = 无门,向后兼容,不变。）
+9. **路由写失败的重跑文案修正（§2.3）**：原"重跑同一条命令"对显式 `--round` 不成立（撞 reviewer 自身 `report round 已存在`）。改为:保留同一 `--target-ref`;若显式带了 `--round`,重试换新 round 或省略 `--round`。
