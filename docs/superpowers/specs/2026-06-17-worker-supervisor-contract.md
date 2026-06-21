@@ -172,7 +172,7 @@ acceptance:
   policy: no_blocking_findings   # 或 all_approve
 ```
 
-> **CLI 现状（MVP 8）**：`peer loop init <id> --mission "..." --max-rounds N [--non-goal ...] [--success ...] [--validation id:cmd] [--validation-satisfies id:signal] [--validation-timeout id:N] [--detail-trap-rounds N]` 会写 `.agent-duo/state/<id>/loop.json`；`max_rounds` 是从 `frozen_at_round` 起算的相对 report 轮次预算。`loopd` 每 tick 读取该契约与最新 `report.json`：active 且本轮不会停止时，先检测 `drift` 非空并追加幂等 `direction_drift` 事件、检测连续 N 轮空 `delta` 并追加幂等 `detail_trap` 事件；之后再运行 validation 与 stop 判定。命中 `failed` 或预算耗尽时把契约翻成 `stopped` 并追加幂等 `loop_stop` 事件；命中 `done` 时，如果配置了 validation，则必须先跑完 validation 且机械满足 `success_signals`，才会停为 `done`。validation evidence 落在 `.agent-duo/state/<id>/validation-rN.json`，日志落在 `.agent-duo/logs/<id>/validation-rN-<validation-id>.log`，并追加 `validation_pass` / `validation_fail` 事件。`peer checkpoint <id> [--json]` 只读聚合 loop/report/task/validation 方向状态；`peer reframe <id> "..." [--force]` 下发 `verb=reframe` 并在成功发送后写 `.agent-duo/logs/checkpoints.jsonl`。validation 当前在 `loopd` tick 内同步执行，会阻塞 runtime 到命令退出或 timeout；异步执行留后续。未配置 validation 时，`success_signals` / `non_goals` 仍只作为 supervisor 的软护栏。
+> **CLI 现状（MVP 8）**：`peer loop init <id> --mission "..." --max-rounds N [--non-goal ...] [--success ...] [--validation id:cmd] [--validation-satisfies id:signal] [--validation-timeout id:N] [--detail-trap-rounds N]` 会写 `.agent-duo/state/<id>/loop.json`；`max_rounds` 是从 `frozen_at_round` 起算的相对 report 轮次预算。`loopd` 每 tick 读取该契约与最新 `report.json`：active 且本轮不会停止时，先检测 `drift` 非空并追加幂等 `direction_drift` 事件、检测连续 N 轮空 `delta` 并追加幂等 `detail_trap` 事件；之后查/启动 validation 并做 stop 判定。命中 `failed` 或预算耗尽时把契约翻成 `stopped` 并追加幂等 `loop_stop` 事件；命中 `done` 时，如果配置了 validation，则必须等该轮异步 validation 完成且机械满足 `success_signals`，才会停为 `done`。validation 由分离的 `loopd --run-validation <id> <round>` runner 执行；运行中 marker 落在 `.agent-duo/state/<id>/validation-rN.running/`，最终 evidence 落在 `.agent-duo/state/<id>/validation-rN.json`，日志落在 `.agent-duo/logs/<id>/validation-rN-<validation-id>.log`，并追加 `validation_pass` / `validation_fail` 事件。validation 命令超时时会尽量杀掉整个进程组；若 runner 入口不可用则退回 tick 内同步执行并告警。`peer loop reset <id> [--max-rounds N]` 会在最新 report 轮次重新冻结预算并清空停止状态；`peer checkpoint <id> [--json]` 只读聚合 loop/report/task/validation 方向状态；`peer reframe <id> "..." [--force]` 下发 `verb=reframe` 并在成功发送后写 `.agent-duo/logs/checkpoints.jsonl`。未配置 validation 时，`success_signals` / `non_goals` 仍只作为 supervisor 的软护栏。
 
 ### 2.6 broker 就绪门控（issue #9）
 
@@ -370,7 +370,7 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 | 上行任意 Report（写文件 + sentinel） | `peer report --type … --status … [--step …] --file …` |
 | `peer wait` 等回合边界 | `peer wait <id> --round N`（等 sentinel） |
 | 初始化 / 查看步骤账本 | `peer task init <id> --task … --step s1:…` / `peer task next <id>` |
-| 初始化 / 查看 loop contract | `peer loop init <id> --mission … --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` |
+| 初始化 / 查看 / 重置 loop contract | `peer loop init <id> --mission … --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` / `peer loop reset <id> [--max-rounds N]` |
 | 原子下行并等待新 report | `peer ask <id> "..."`（loop-gated tell + poll report.json） |
 | 读取方向快照 | `peer checkpoint <id> [--json]` |
 | answer approval | `peer approve` / `peer deny` |

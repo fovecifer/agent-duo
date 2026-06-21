@@ -121,7 +121,8 @@ A freshly created worker's Approval Broker starts **unverified** (the hook isn't
 | `... \| peer tell` | Deliver a **multi-line** message from stdin (tmux buffer + bracketed paste — quotes, backticks and newlines arrive verbatim, no escaping) |
 | `peer wait [seconds] [interval] [stable-samples]` | Block until the other agent's screen is unchanged for repeated samples (defaults: timeout 300s, interval 5s, stable samples 2) |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | Create and inspect a durable `task.json` step ledger for idempotent resume |
-| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional validations gate `done`, and empty-delta streaks raise direction events |
+| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional validations gate `done` asynchronously, and empty-delta streaks raise direction events |
+| `peer loop reset <id> [--max-rounds N]` | Re-freeze a loop at the latest report round, clear its stop state, and give it a fresh round budget |
 | `peer ask <id> "message"` | Send a loop-gated message, wait for the worker's next structured report, and print that report summary/ref |
 | `peer checkpoint <id> [--json]` | Read-only summary of loop, recent reports, task steps, and validation for direction decisions |
 | `peer reframe <id> "message" [--force]` | Send a loop/broker-gated direction correction as a `reframe` verb and append `checkpoints.jsonl` audit |

@@ -151,7 +151,8 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 | `... \| peer tell` | 从 stdin 投递多行消息(buffer + bracketed paste,引号/换行安全) |
 | `peer wait [秒] [采样间隔] [连续稳定次数]` | 等待对方输出连续多次采样一致(默认最长 300s、间隔 5s、连续 2 次) |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | 创建并查看持久化 `task.json` 步骤账本,供解阻后幂等续跑 |
-| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;可选 validation 门控 `done`,连续空 `delta` 会触发方向事件 |
+| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;可选 validation 异步门控 `done`,连续空 `delta` 会触发方向事件 |
+| `peer loop reset <id> [--max-rounds N]` | 在最新 report 轮次重新冻结 loop,清空停止状态,给 worker 一份新轮次预算 |
 | `peer ask <id> "消息"` | 发送一条受 loop 边界保护的消息,等待 worker 下一轮结构化 report,并打印摘要/ref |
 | `peer checkpoint <id> [--json]` | 只读汇总 loop、最近 report、task 步骤与 validation,辅助判断是否继续/纠偏/停止 |
 | `peer reframe <id> "消息" [--force]` | 发送受 loop/broker 保护的方向纠偏指令,以 `reframe` 动词下发并写入 `checkpoints.jsonl` 审计 |

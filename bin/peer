@@ -30,6 +30,8 @@
 #                  [--validation id:"cmd"] [--validation-satisfies id:"signal"] [--validation-timeout id:N]
 #                  [--detail-trap-rounds N]
 #                           初始化/冻结某 agent 的 supervisor loop 契约
+#   peer loop reset [<id>] [--max-rounds N]
+#                           在当前 report 轮次重新冻结 loop,给全新预算
 #   peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
 #                           原子 tell + 等待 target 写出新 report,并打印该 report 摘要
 #   peer reframe [<id>] "消息" [--force]
@@ -686,6 +688,78 @@ loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json
   mv "$tmp" "$loop_file"
 }
 
+loop_reset() { # <agent_id> [max_rounds]
+  local agent_id="$1" max_override="${2:-}" loop_file loop_dir tmp loop_json
+  local old_max old_frozen current_round new_frozen new_max report_file report_status
+  loop_file="$(loop_file_for_id "$agent_id")"
+  if [[ ! -f "$loop_file" ]]; then
+    echo "错误: 没有 loop.json: .agent-duo/state/$agent_id/loop.json，请先 peer loop init。" >&2
+    return 1
+  fi
+  if ! loop_json="$(jq -c '.' "$loop_file" 2>/dev/null)"; then
+    echo "错误: 无法读取 .agent-duo/state/$agent_id/loop.json。" >&2
+    return 1
+  fi
+  old_max="$(jq -r '.max_rounds // empty' <<EOF
+$loop_json
+EOF
+)"
+  old_frozen="$(jq -r '.frozen_at_round // empty' <<EOF
+$loop_json
+EOF
+)"
+  if [[ -n "$max_override" ]]; then
+    if ! is_positive_int "$max_override"; then
+      echo "错误: --max-rounds 必须是正整数。" >&2
+      return 1
+    fi
+    new_max="$max_override"
+  else
+    new_max="$old_max"
+  fi
+  if ! is_positive_int "$new_max"; then
+    echo "错误: loop.json 缺少有效 max_rounds；请用 --max-rounds N 指定新预算。" >&2
+    return 1
+  fi
+  current_round="$(report_round_for_id "$agent_id")"
+  if [[ "$current_round" == "0" ]]; then
+    new_frozen="$old_frozen"
+  else
+    new_frozen="$current_round"
+  fi
+  if ! is_positive_int "$new_frozen"; then
+    echo "错误: loop.json 缺少有效 frozen_at_round,且当前没有 report 可重冻。" >&2
+    return 1
+  fi
+  loop_dir="${loop_file%/*}"
+  tmp="$loop_dir/.loop.json.$$"
+  if ! jq -c \
+    --arg ts "$(iso_ts)" \
+    --argjson frozen "$new_frozen" \
+    --argjson max "$new_max" '
+      (.stop.on_terminal // true) as $on_terminal
+      | .status = "active"
+      | .frozen_at_round = $frozen
+      | .max_rounds = $max
+      | .stop = {on_terminal:$on_terminal, reason:null, stopped_at_round:null, stopped_at:null}
+      | .updated_at = $ts
+    ' "$loop_file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$loop_file"
+
+  report_file="$AGENT_DUO_DIR/state/$agent_id/report.json"
+  if [[ -e "$report_file" ]]; then
+    report_status="$(jq -r '.status // "unknown"' "$report_file" 2>/dev/null || printf 'unknown')"
+    if [[ "$report_status" == "done" || "$report_status" == "failed" ]]; then
+      echo "提醒: '$agent_id' 最新 report 是 $report_status,下一 tick 会按同一 report 再次停止。" >&2
+      echo "      先 'peer reframe --force $agent_id \"...\"' 让它写出新的非终态 report,再续跑。" >&2
+    fi
+  fi
+  echo "已重置 loop: $agent_id(frozen_at_round=$new_frozen, max_rounds=$new_max, active)。"
+}
+
 loop_print() { # <agent_id>
   local agent_id="$1" loop_file current_round
   loop_file="$(loop_file_for_id "$agent_id")"
@@ -739,7 +813,7 @@ $loop_json
 EOF
 )"
     echo "错误: worker '$agent_id' 的 loop 已到界(reason=$reason),已拒绝继续派发。" >&2
-    echo "      经人确认后用 'peer $command_name --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
+    echo "      经人确认后用 'peer $command_name --force $agent_id \"...\"' 越界,或后续用 'peer loop reset $agent_id' 重新给预算。" >&2
     return 1
   fi
   if ! is_positive_int "$max_rounds" || ! is_positive_int "$frozen_round"; then
@@ -750,7 +824,7 @@ EOF
   rounds_used="$(( current_round - frozen_round + 1 ))"
   if (( rounds_used > 0 && rounds_used >= max_rounds )); then
     echo "错误: worker '$agent_id' 的 loop 已到界(reason=max_rounds, ${rounds_used}/${max_rounds}),已拒绝继续派发。" >&2
-    echo "      经人确认后用 'peer $command_name --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
+    echo "      经人确认后用 'peer $command_name --force $agent_id \"...\"' 越界,或后续用 'peer loop reset $agent_id' 重新给预算。" >&2
     return 1
   fi
 }
@@ -1968,6 +2042,10 @@ case "$cmd" in
               shift 2
               ;;
             --max-rounds)
+              if [[ -z "${2:-}" ]]; then
+                echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
+                exit 1
+              fi
               loop_max_rounds="${2:-}"
               shift 2
               ;;
@@ -2017,16 +2095,42 @@ case "$cmd" in
         loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json" "$loop_validation_json" "$loop_detail_trap_rounds"
         echo "已初始化 loop.json: .agent-duo/state/$target_id/loop.json"
         ;;
+      reset)
+        shift
+        target_id="$ME"
+        if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+          target_id="$1"
+          shift
+        fi
+        loop_max_rounds=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --max-rounds)
+              if [[ -z "${2:-}" ]]; then
+                echo "用法: peer loop reset [<id>] [--max-rounds N]" >&2
+                exit 1
+              fi
+              loop_max_rounds="${2:-}"
+              shift 2
+              ;;
+            *)
+              echo "用法: peer loop reset [<id>] [--max-rounds N]" >&2
+              exit 1
+              ;;
+          esac
+        done
+        loop_reset "$target_id" "$loop_max_rounds"
+        ;;
       ""|--help|-h)
         if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
           exit 0
         fi
         loop_print "$ME"
         ;;
       *)
         if [[ -n "${2:-}" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
           exit 1
         fi
         loop_print "$subcmd"

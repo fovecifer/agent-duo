@@ -12,9 +12,23 @@ AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
 SESSION="${AGENT_SESSION:-agents}"
 INTERVAL="${LOOPD_INTERVAL:-2}"
 ONCE="${LOOPD_ONCE:-0}"
+RUN_VALIDATION_AGENT=""
+RUN_VALIDATION_ROUND=""
+
+: "${AGENT_DUO_LOOPD_BIN:=$SOURCE}"
+export AGENT_DUO_LOOPD_BIN
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --run-validation)
+      if [[ $# -lt 3 ]]; then
+        echo "用法: loopd [--once] [--interval 秒] | loopd --run-validation <agent> <round>" >&2
+        exit 1
+      fi
+      RUN_VALIDATION_AGENT="${2:-}"
+      RUN_VALIDATION_ROUND="${3:-}"
+      shift 3
+      ;;
     --once)
       ONCE=1
       shift
@@ -24,11 +38,26 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "用法: loopd [--once] [--interval 秒]" >&2
+      echo "用法: loopd [--once] [--interval 秒] | loopd --run-validation <agent> <round>" >&2
       exit 1
       ;;
   esac
 done
+
+if [[ -n "$RUN_VALIDATION_AGENT" ]]; then
+  if [[ -z "$RUN_VALIDATION_ROUND" || ! "$RUN_VALIDATION_ROUND" =~ ^[1-9][0-9]*$ ]]; then
+    echo "错误: --run-validation 需要 <agent> <正整数 round>。" >&2
+    exit 1
+  fi
+  contract="$(ad_loop_contract_path "$AGENT_DUO_ROOT" "$RUN_VALIDATION_AGENT")"
+  if [[ ! -f "$contract" ]]; then
+    echo "错误: 找不到 loop contract: $contract" >&2
+    ad_loop_clear_validation_running "$AGENT_DUO_ROOT" "$RUN_VALIDATION_AGENT" "$RUN_VALIDATION_ROUND"
+    exit 1
+  fi
+  ad_loop_run_validation_round "$AGENT_DUO_ROOT" "$RUN_VALIDATION_AGENT" "$contract" "$RUN_VALIDATION_ROUND" >/dev/null
+  exit $?
+fi
 
 if ! [[ "$INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "错误: --interval/LOOPD_INTERVAL 必须是数字秒数。" >&2
