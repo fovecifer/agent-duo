@@ -71,7 +71,12 @@ drift 比 trap 急（碰红线 vs 陷细节）。事件 schema（同现有运行
 
 ## 5. 检测器（核心逻辑）
 
-两个检测器都在 `ad_loop_eval_contracts` 内、对 `status==active` 的 contract 运行，**先于 validation**、stop 判定之前。**纯事件发射 + 确定性 id 去重，不写任何状态**。前置：`current_round > 0`（已有 report）。
+两个检测器都在 `ad_loop_eval_contracts` 内、对 `status==active` 的 contract 运行，**先于 validation**、stop 判定之前。**纯事件发射 + 确定性 id 去重，不写任何状态**。
+
+**前置（两个，全满足才检测）**：
+
+1. `current_round > 0`（已有 report）。
+2. **本轮 report 不会停止 loop**（评审 R2-①）：若 `report_status ∈ {done, failed}` 或 `rounds_used >= max_rounds` → **两个检测器都跳过**，不发 direction 事件。理由：这些是本 tick 会 `stop` 的 report（终态 / 到界），给一个正在停止的 worker 发 `detail_trap`/`direction_drift` 只会在队列里留下"请 reframe 一个已 stopped worker"的陈旧 nudge。这个判定**廉价、不依赖 validation**（`failed`/`max_rounds` 无条件停；`done` 时 worker 在声称完成而非卡细节，validation 失败的可执行信号由 `validation_fail` 承载，无需再叠 direction nudge），因此放在检测最前、仍先于慢 validation。
 
 > **顺序（F1）**：`eval_contracts` 内对每个 active contract 的顺序为 **direction 检测（drift + detail_trap）→ validation → stop 判定**。检测放在 validation 之前，是因为 MVP 5 的 validation 当前**同步执行、最长阻塞到 `timeout_seconds`**（`wait "$pid"`）；若放其后，红线信号 `direction_drift`（优先级 12，比 `validation_fail` 急）会被一个慢 `go test` 拖到测试结束才入队。检测纯文件读、瞬时，先发不影响 validation。
 
@@ -82,12 +87,13 @@ drift 比 trap 急（碰红线 vs 陷细节）。事件 schema（同现有运行
 若 (.drift // "") 含非空白字符:
     event_id = drift-<agent>-<current_round>
     若 queue 未见该 id → append direction_drift 事件
-        summary = "direction drift: " + one_line(drift)   # 截断到合理长度
+        summary = "direction drift: " + ad_loop_one_line(drift)
         ref     = .agent-duo/state/<agent>/r<current_round>.json
 ```
 
 - `peer report` 用 `json_nullable_str` 写 drift：空则 `null`，否则字符串。所以"非空白"= worker 确实自报了越界。
 - 每轮最多一条（id 含 round），`ad_loop_event_id_seen` 去重。
+- **`ad_loop_one_line(s)`（新增 helper，评审 R2-②）**：`bin/peer` 的 `one_line` 不在 loopd 运行时作用域，故在 `lib/loop.sh` 新增 `ad_loop_one_line`——把 `\r`/`\n`/`\t` 替换为单空格，再**截断到 200 字符**（超长加省略号 `…`）。drift summary、以及任何把 worker 文本塞进 event summary 的地方都用它。测试按 200 边界写。
 
 ### 5.2 detail_trap（delta 连续 N 轮空）
 
@@ -122,7 +128,7 @@ for i in (R-N+1 .. R):
 
 ### 5.3 与 stop 判定的关系
 
-检测纯**附加**：发 nudge 事件，**不影响** done/failed/max_rounds 的 stop 判定。一个 worker 可"卡在 detail-trap"同时 loop 仍 active（等 supervisor reframe 或最终 max_rounds 截停）。
+检测**不改变** stop 判定本身（done/failed/max_rounds 怎么停还怎么停）。但**反过来受 stop 抑制**：本轮 report 会停止 loop 时（终态 / 到界，见 §5 前置 2），跳过检测、不发 direction 事件，交由 `loop_stop` 接管——避免给一个正在停止的 worker 留陈旧 nudge。所以一个 worker 只在 **active 且本轮不停** 时才会被 nudge：`in_progress`/`partial`/`unknown` 且 `rounds_used < max_rounds`。它可以"卡在 detail-trap"同时 loop 仍 active，直到 supervisor reframe 或最终 `max_rounds` 截停（截停那一轮起不再发 detail_trap）。
 
 ## 6. `peer reframe`
 
@@ -231,8 +237,10 @@ VALIDATION	r7 fail — missing: tests pass
 **direction_drift（loop.test.sh，`loopd --once`）**
 
 - report.drift 非空 → 一条 direction_drift 事件；drift 为 null → 无事件。
+- **超长 drift → summary 经 `ad_loop_one_line` 截到 200 字符（断言长度边界 + `\n` 被替换为空格）**。
 - 幂等：连跑两次 `--once` → 不重复（同 id）。
 - stopped contract → 不评估、无事件。
+- **本轮会停止 → 无 direction 事件（评审 R2-①）**：report `failed`（drift 非空）→ 只出 loop_stop、**无** direction_drift；`rounds_used>=max`（delta 全空）→ 只出 loop_stop、**无** detail_trap；report `done` → 无 direction 事件。
 
 **detail_trap（loop.test.sh）**
 
@@ -261,7 +269,7 @@ VALIDATION	r7 fail — missing: tests pass
 ## 10. 实现影响面
 
 - `bin/peer`：`peer loop init` 加 `--detail-trap-rounds`；新增 `reframe`（复用 `check_target_dispatch_allowed` + `loop_guard_ask` 同条件窄守卫）、`checkpoint` 子命令；新增 checkpoints.jsonl 追加 helper。
-- `lib/loop.sh`：`ad_loop_eval_contracts` 内加 drift + detail_trap 两检测器（纯发事件、确定性 id 去重）；`ad_loop_event_priority` 加 `direction_drift) 12`、`detail_trap) 20`。
+- `lib/loop.sh`：`ad_loop_eval_contracts` 内加 drift + detail_trap 两检测器（纯发事件、确定性 id 去重、会停止则跳过）；新增 `ad_loop_one_line`（\r\n\t→空格 + 截 200）；`ad_loop_event_priority` 加 `direction_drift) 12`、`detail_trap) 20`。
 - 文档：README（en/zh）、AGENT-INSTRUCTIONS/AGENTS、worker-supervisor 契约（§5 方向控制章节）同步。
 - 不动：broker 门逻辑（reframe 复用 `check_target_dispatch_allowed`）、MVP 5 stop/validation 判定（检测纯附加）、loop_stop。
 
@@ -279,3 +287,8 @@ VALIDATION	r7 fail — missing: tests pass
 2. **`peer reframe` 加窄 loop 守卫**（§6）：复用 `loop_guard_ask` 同条件——`stopped` 或 `rounds_used>=max` 拒发（除非 `--force`），堵住"无 force 驱动已到界 worker"；near-budget 但 active 仍可 reframe。
 3. **`detail_trap_rounds` 无效处理与"无状态"自洽**（§5.2/§8）：缺失→静默默认 3；present 但非正整数→默认 3 + **每 tick** stderr 告警（不写状态，不再声称"只告警一次"）。
 4. **`peer checkpoint` 默认目标明确**（§7.1）：同 tell/ask/peek（`reg_pick_other`）——显式优先、两人默认对方、多 agent 必须显式。
+
+### 第二轮评审
+
+5. **本轮会停止的 report 不发 direction 事件（R2-①，§5/§5.3/§9）**：`report_status ∈ {done, failed}` 或 `rounds_used>=max_rounds` 时跳过两个检测器，避免给正在 `stop` 的 worker 留"reframe 一个已 stopped worker"的陈旧 nudge。判定廉价、不依赖 validation，仍排在慢 validation 之前。
+6. **`ad_loop_one_line` 定死（R2-②，§5.1/§10）**：检测在 `lib/loop.sh` 跑，`bin/peer` 的 `one_line` 不在作用域；新增 `ad_loop_one_line` = `\r\n\t`→空格 + 截 200 字符。drift summary 用它，测试按 200 边界写。
