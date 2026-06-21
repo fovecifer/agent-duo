@@ -92,6 +92,28 @@ write_event() { # <id> <agent> <type> <round> <summary> <ref>
     >> "$PROJECT/.agent-duo/events/queue.jsonl"
 }
 
+write_report() { # <agent> <round> <status>
+  local agent="$1" round="$2" status="$3" state
+  state="$PROJECT/.agent-duo/state/$agent"
+  mkdir -p "$state"
+  jq -cn \
+    --argjson round "$round" --arg agent "$agent" --arg status "$status" \
+    '{protocol:"1",round:$round,agent_id:$agent,role:"worker",type:"checkpoint",status:$status,delta:"",next:"",needs:[]}' \
+    > "$state/r${round}.json"
+  rm -f "$state/report.json"
+  ln -s "r${round}.json" "$state/report.json"
+}
+
+write_loop_contract() { # <agent> <max_rounds> <frozen_at_round>
+  local agent="$1" max_rounds="$2" frozen="$3" state
+  state="$PROJECT/.agent-duo/state/$agent"
+  mkdir -p "$state"
+  jq -cn \
+    --arg agent "$agent" --argjson max "$max_rounds" --argjson frozen "$frozen" \
+    '{protocol:"1",agent_id:$agent,mission:"m",non_goals:[],success_signals:[],max_rounds:$max,frozen_at_round:$frozen,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null},created_at:"2026-06-21T00:00:00Z",updated_at:"2026-06-21T00:00:00Z"}' \
+    > "$state/loop.json"
+}
+
 run_hook() {
   : > "$OUT"; : > "$ERR"
   PATH="$STUB_BIN:$PATH" AGENT_DUO_ROOT="$PROJECT" "$@" >"$OUT" 2>"$ERR"
@@ -218,6 +240,111 @@ printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tloopd\tdaemon\tbash\n' > "$TMUX_STUB_REGISTRY"
 assert_ok "loopd: no workers succeeds" run_loopd_once
 assert_contains "loopd: no workers dashboard" "$(cat "$OUT")" '(none)'
+teardown
+
+# loop evaluator: active + rounds_used<max 保持 active,无 loop_stop,看板显示 loop 预算。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 in_progress
+write_loop_contract worker 3 1
+assert_ok "loop eval: under budget stays active" run_loopd_once
+assert_contains "loop eval: contract still active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
+assert_not_contains "loop eval: no loop_stop under budget" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"loop_stop"'
+assert_contains "loop eval: dashboard loop active" "$(cat "$OUT")" 'loop=1/3 active'
+teardown
+
+# loop evaluator:只有 loop.json 还没有 report 时不触发 silent 噪声,但看板仍显示契约。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_loop_contract worker 3 1
+assert_ok "loop eval: no-report contract stays quiet" run_loopd_once
+assert_not_contains "loop eval: no-report no silent" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"silent"'
+assert_contains "loop eval: no-report dashboard loop" "$(cat "$OUT")" 'loop=0/3 active'
+teardown
+
+# loop evaluator:max_rounds 是相对预算,到界后 stopped(max_rounds) 且只追加一条 loop_stop。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 in_progress
+write_loop_contract worker 1 1
+assert_ok "loop eval: max rounds stops" run_loopd_once
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop eval: stopped status" "$loop_json" '"status":"stopped"'
+assert_contains "loop eval: stopped reason max" "$loop_json" '"reason":"max_rounds"'
+loop_stop_count="$(grep -c '"type":"loop_stop"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "loop eval: one loop_stop" "$loop_stop_count" "1"
+assert_contains "loop eval: deterministic id" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"id":"loopstop-worker-1"'
+teardown
+
+# loop evaluator:历史 report 不按绝对 round 截停。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 12 in_progress
+write_loop_contract worker 8 12
+assert_ok "loop eval: relative budget not absolute" run_loopd_once
+assert_contains "loop eval: historical stays active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
+assert_not_contains "loop eval: historical no stop" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"loop_stop"'
+teardown
+
+# loop evaluator:终态 done/failed 停止,且 done 在预算最后一轮优先于 max_rounds。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract worker 1 1
+assert_ok "loop eval: done priority stops" run_loopd_once
+assert_contains "loop eval: done reason wins" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"done"'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 failed
+write_loop_contract worker 8 1
+assert_ok "loop eval: failed stops" run_loopd_once
+assert_contains "loop eval: failed reason" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"failed"'
+teardown
+
+# loop evaluator:status stopped 后不重评,正常连跑两次不会重复 loop_stop。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 in_progress
+write_loop_contract worker 1 1
+assert_ok "loop eval: idempotent first run" run_loopd_once
+assert_ok "loop eval: idempotent second run" run_loopd_once
+loop_stop_count="$(grep -c '"type":"loop_stop"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "loop eval: loop_stop still once" "$loop_stop_count" "1"
+teardown
+
+# loop evaluator:崩溃重试场景,queue 已有确定性 id 但 loop.json 仍 active 时,不重复 append,只补 mv。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 in_progress
+write_loop_contract worker 1 1
+write_event loopstop-worker-1 worker loop_stop 1 "loop stopped: max_rounds (1/1)" ".agent-duo/state/worker/loop.json"
+assert_ok "loop eval: crash retry completes stop" run_loopd_once
+loop_stop_count="$(grep -c '"type":"loop_stop"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "loop eval: crash retry no duplicate" "$loop_stop_count" "1"
+assert_contains "loop eval: crash retry stopped" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"stopped"'
+teardown
+
+# loop evaluator:event append 失败时丢弃 tmp,loop.json 保持 active,不留半 stopped。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 in_progress
+write_loop_contract worker 1 1
+rm -f "$PROJECT/.agent-duo/events/queue.jsonl"
+mkdir -p "$PROJECT/.agent-duo/events/queue.jsonl"
+assert_ok "loop eval: append failure daemon survives" run_loopd_once
+assert_contains "loop eval: append failure remains active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
+teardown
+
+# loop evaluator:放在 idle_arrival 前,本 tick 产生的 loop_stop 会当 tick 注入 supervisor。
+setup
+printf 'idle\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 in_progress
+write_loop_contract worker 1 1
+assert_ok "loop eval: loop_stop injected same tick" run_loopd_once
+assert_contains "loop eval: peer got loop_stop" "$(cat "$PEER_STUB_LOG")" 'type=loop_stop'
+assert_contains "loop eval: dashboard stopped" "$(cat "$OUT")" 'loop=1/1 stopped:max_rounds'
 teardown
 
 # loopd appends dead once when a state-backed worker pane disappears.

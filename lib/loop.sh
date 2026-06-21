@@ -113,7 +113,7 @@ $1
 EOF
 )"
   case "$type" in
-    blocked|request)     printf '10' ;;
+    blocked|request|loop_stop) printf '10' ;;
     result)              printf '20' ;;
     stuck|dead)          printf '30' ;;
     budget_low)          printf '40' ;;
@@ -340,8 +340,25 @@ ad_loop_state_agents() { # <root>
   done
 }
 
+ad_loop_contract_agents() { # <root>
+  local state d base
+  state="$(ad_loop_state_dir "$1")"
+  for d in "$state"/*; do
+    [[ -d "$d" && -f "$d/loop.json" ]] || continue
+    base="${d##*/}"
+    case "$base" in
+      supervisor|daemon|loopd) continue ;;
+    esac
+    printf '%s\n' "$base"
+  done
+}
+
 ad_loop_report_path() { # <root> <agent_id>
   printf '%s/%s/report.json' "$(ad_loop_state_dir "$1")" "$2"
+}
+
+ad_loop_contract_path() { # <root> <agent_id>
+  printf '%s/%s/loop.json' "$(ad_loop_state_dir "$1")" "$2"
 }
 
 ad_loop_report_round() { # <report_path>
@@ -387,6 +404,14 @@ ad_loop_event_seen() { # <root> <agent> <type> <round> <ref>
   ' "$queue" >/dev/null 2>&1
 }
 
+ad_loop_event_id_seen() { # <root> <event_id>
+  local queue id
+  queue="$(ad_loop_queue_file "$1")"
+  id="$2"
+  [[ -f "$queue" ]] || return 1
+  grep -F "\"id\":\"${id}\"" "$queue" >/dev/null 2>&1
+}
+
 ad_loop_append_event() { # <root> <agent> <type> <round> <summary> <ref>
   local root="$1" agent="$2" type="$3" round="$4" summary="$5" ref="$6" queue id ts json
   ad_loop_ensure_dirs "$root"
@@ -400,11 +425,107 @@ ad_loop_append_event() { # <root> <agent> <type> <round> <summary> <ref>
   printf '%s\n' "$json" >> "$queue"
 }
 
+ad_loop_append_event_with_id() { # <root> <id> <agent> <type> <round> <summary> <ref>
+  local root="$1" id="$2" agent="$3" type="$4" round="$5" summary="$6" ref="$7" queue ts json
+  ad_loop_ensure_dirs "$root"
+  queue="$(ad_loop_queue_file "$root")"
+  ts="$(ad_loop_iso_ts)"
+  json="$(jq -cn \
+    --arg id "$id" --arg ts "$ts" --arg agent "$agent" --arg type "$type" \
+    --arg summary "$summary" --arg ref "$ref" --argjson round "$round" \
+    '{id:$id,ts:$ts,agent:$agent,type:$type,round:$round,summary:$summary,ref:$ref}')"
+  printf '%s\n' "$json" >> "$queue"
+}
+
 ad_loop_append_event_once() { # <root> <agent> <type> <round> <summary> <ref>
   if ad_loop_event_seen "$1" "$2" "$3" "$4" "$6"; then
     return 0
   fi
   ad_loop_append_event "$@"
+}
+
+ad_loop_stop_contract() { # <root> <agent> <reason> <current_round> <rounds_used> <max_rounds>
+  local root="$1" agent="$2" reason="$3" current_round="$4" rounds_used="$5" max_rounds="$6"
+  local contract tmp ts event_id summary ref
+  contract="$(ad_loop_contract_path "$root" "$agent")"
+  tmp="${contract}.$$"
+  ts="$(ad_loop_iso_ts)"
+  event_id="loopstop-${agent}-${current_round}"
+  ref=".agent-duo/state/${agent}/loop.json"
+  case "$reason" in
+    max_rounds) summary="loop stopped: max_rounds (${rounds_used}/${max_rounds})" ;;
+    done)       summary="loop stopped: done" ;;
+    failed)     summary="loop stopped: failed" ;;
+    *)          summary="loop stopped: ${reason}" ;;
+  esac
+  if ! jq -c --arg reason "$reason" --arg ts "$ts" --argjson round "$current_round" '
+    .status = "stopped"
+    | .stop.reason = $reason
+    | .stop.stopped_at_round = $round
+    | .stop.stopped_at = $ts
+    | .updated_at = $ts
+  ' "$contract" > "$tmp"; then
+    rm -f "$tmp"
+    echo "警告: 无法更新 ${contract},已跳过 loop stop。" >&2
+    return 1
+  fi
+  if ! ad_loop_event_id_seen "$root" "$event_id"; then
+    if ! ad_loop_append_event_with_id "$root" "$event_id" "$agent" loop_stop "$current_round" "$summary" "$ref"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  mv "$tmp" "$contract"
+}
+
+ad_loop_eval_contracts() { # <root> <session>
+  local root="$1" session="${2:-}" agent contract parsed status max_rounds frozen_round on_terminal
+  local report current_round report_status rounds_used reason
+  : "${session:-}"
+  ad_loop_contract_agents "$root" | while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    contract="$(ad_loop_contract_path "$root" "$agent")"
+    if ! parsed="$(jq -c '.' "$contract" 2>/dev/null)"; then
+      echo "警告: ${contract} 解析失败,已跳过 loop 评估。" >&2
+      continue
+    fi
+    status="$(jq -r '.status // "active"' <<EOF
+$parsed
+EOF
+)"
+    [[ "$status" == "active" ]] || continue
+    max_rounds="$(jq -r '.max_rounds // empty' <<EOF
+$parsed
+EOF
+)"
+    frozen_round="$(jq -r '.frozen_at_round // empty' <<EOF
+$parsed
+EOF
+)"
+    on_terminal="$(jq -r '.stop.on_terminal // true' <<EOF
+$parsed
+EOF
+)"
+    if ! ad_loop_is_nonnegative_int "$max_rounds" || [[ "$max_rounds" == "0" ]] \
+       || ! ad_loop_is_nonnegative_int "$frozen_round" || [[ "$frozen_round" == "0" ]]; then
+      echo "警告: ${contract} 缺少有效 max_rounds/frozen_at_round,已跳过 loop 评估。" >&2
+      continue
+    fi
+    report="$(ad_loop_report_path "$root" "$agent")"
+    current_round="$(ad_loop_report_round "$report")"
+    report_status="$(ad_loop_report_status "$report")"
+    rounds_used="$(( current_round - frozen_round + 1 ))"
+    reason=""
+    if [[ "$on_terminal" == "true" && "$report_status" == "done" ]]; then
+      reason="done"
+    elif [[ "$on_terminal" == "true" && "$report_status" == "failed" ]]; then
+      reason="failed"
+    elif (( rounds_used > 0 && rounds_used >= max_rounds )); then
+      reason="max_rounds"
+    fi
+    [[ -n "$reason" ]] || continue
+    ad_loop_stop_contract "$root" "$agent" "$reason" "$current_round" "$rounds_used" "$max_rounds" || true
+  done
 }
 
 ad_loop_pane_quiet() { # <pane> [sample_seconds]
@@ -493,13 +614,48 @@ ad_loop_idle_arrival() { # <root> <session>
   ad_loop_with_cursor_lock "$root" ad_loop_deliver_next_event_locked "$root" inject || true
 }
 
+ad_loop_dashboard_loop_info() { # <root> <agent>
+  local root="$1" agent="$2" contract parsed max_rounds frozen_round status reason current_round rounds_used
+  contract="$(ad_loop_contract_path "$root" "$agent")"
+  [[ -f "$contract" ]] || return 0
+  if ! parsed="$(jq -c '.' "$contract" 2>/dev/null)"; then
+    printf 'loop=invalid'
+    return 0
+  fi
+  max_rounds="$(jq -r '.max_rounds // 0' <<EOF
+$parsed
+EOF
+)"
+  frozen_round="$(jq -r '.frozen_at_round // 1' <<EOF
+$parsed
+EOF
+)"
+  status="$(jq -r '.status // "active"' <<EOF
+$parsed
+EOF
+)"
+  reason="$(jq -r '.stop.reason // ""' <<EOF
+$parsed
+EOF
+)"
+  if ! ad_loop_is_nonnegative_int "$max_rounds"; then max_rounds="0"; fi
+  if ! ad_loop_is_nonnegative_int "$frozen_round" || [[ "$frozen_round" == "0" ]]; then frozen_round="1"; fi
+  current_round="$(ad_loop_report_round "$(ad_loop_report_path "$root" "$agent")")"
+  rounds_used="$(( current_round - frozen_round + 1 ))"
+  if [[ "$status" == "stopped" && -n "$reason" ]]; then
+    printf 'loop=%s/%s stopped:%s' "$rounds_used" "$max_rounds" "$reason"
+  else
+    printf 'loop=%s/%s %s' "$rounds_used" "$max_rounds" "$status"
+  fi
+}
+
 ad_loop_render_dashboard() { # <root> <session>
-  local root="$1" session="$2" now turn pending workers agent pane report status round
+  local root="$1" session="$2" now turn pending workers agent pane report status round loop_info
   now="$(ad_loop_now_epoch)"
   turn="$(sed -n '1p' "$(ad_loop_state_dir "$root")/supervisor.turn" 2>/dev/null || true)"
   [[ -n "$turn" ]] || turn="unknown"
   pending="$(ad_loop_pending_count "$root")"
-  workers="$( { ad_loop_state_agents "$root"; ad_loop_active_workers "$session"; } | grep -v '^$' | sort -u || true )"
+  workers="$( { ad_loop_state_agents "$root"; ad_loop_contract_agents "$root"; ad_loop_active_workers "$session"; } | grep -v '^$' | sort -u || true )"
 
   printf 'agent-duo loopd\n'
   printf 'heartbeat: %s\n' "$now"
@@ -522,7 +678,12 @@ ad_loop_render_dashboard() { # <root> <session>
       round="0"
     fi
     [[ -n "$pane" ]] || pane="-"
-    printf '  %s pane=%s round=%s status=%s\n' "$agent" "$pane" "$round" "$status"
+    loop_info="$(ad_loop_dashboard_loop_info "$root" "$agent")"
+    printf '  %s pane=%s round=%s status=%s' "$agent" "$pane" "$round" "$status"
+    if [[ -n "$loop_info" ]]; then
+      printf '   %s' "$loop_info"
+    fi
+    printf '\n'
   done
 }
 
@@ -537,6 +698,7 @@ ad_loop_once() { # <root> <session>
   tick_t="${LOOPD_TICK_T:-1800}"
   ad_loop_check_liveness "$root" "$session" "$now" "$silent_t"
   ad_loop_maybe_tick "$root" "$session" "$now" "$tick_t"
+  ad_loop_eval_contracts "$root" "$session"
   ad_loop_idle_arrival "$root" "$session"
   ad_loop_render_dashboard "$root" "$session"
 }

@@ -172,6 +172,8 @@ acceptance:
   policy: no_blocking_findings   # 或 all_approve
 ```
 
+> **CLI 现状（MVP 5 收窄）**：`peer loop init <id> --mission "..." --max-rounds N [--non-goal ...] [--success ...]` 会写 `.agent-duo/state/<id>/loop.json`；`max_rounds` 是从 `frozen_at_round` 起算的相对 report 轮次预算。`loopd` 每 tick 读取该契约与最新 `report.json`，命中 `done`/`failed` 或预算耗尽时把契约翻成 `stopped` 并追加一条幂等 `loop_stop` 事件。`success_signals` / `non_goals` 目前只作为 supervisor 的软护栏，不做机械匹配。
+
 ### 2.6 broker 就绪门控（issue #9）
 
 Approval Broker 只在 hook 被 provider **实际调用**时才生效。Codex 非托管 hook 未信任时 fail-open（hook 不运行、工具照常执行），所以「派了 worker」不等于「该 worker 被 broker 保护」。
@@ -368,6 +370,8 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 | 上行任意 Report（写文件 + sentinel） | `peer report --type … --status … [--step …] --file …` |
 | `peer wait` 等回合边界 | `peer wait <id> --round N`（等 sentinel） |
 | 初始化 / 查看步骤账本 | `peer task init <id> --task … --step s1:…` / `peer task next <id>` |
+| 初始化 / 查看 loop contract | `peer loop init <id> --mission … --max-rounds N` / `peer loop <id>` |
+| 原子下行并等待新 report | `peer ask <id> "..."`（loop-gated tell + poll report.json） |
 | answer approval | `peer approve` / `peer deny` |
 | answer human gate | `peer gate resolve --choice …` |
 | create human gate | `peer gate open --title … [--option …]` |

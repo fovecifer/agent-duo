@@ -25,6 +25,11 @@
 #   peer task next [<id>]   打印 blocked / in_progress / pending 的下一个 resume step
 #   peer task init [<id>] --task "..." [--round N] --step s1:"..." [--step s2:"..."]
 #                           初始化/冻结某 agent 的 task.json 步骤账本
+#   peer loop [<id>]        查看某 agent 的 loop.json 契约与当前预算
+#   peer loop init [<id>] --mission "..." --max-rounds N [--non-goal "..."] [--success "..."] [--round N]
+#                           初始化/冻结某 agent 的 supervisor loop 契约
+#   peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
+#                           原子 tell + 等待 target 写出新 report,并打印该 report 摘要
 #   peer approvals          列出待审批的 Approval Broker 请求
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
@@ -147,6 +152,10 @@ is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+is_nonnegative_int() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 is_report_type() {
   case "$1" in
     plan|checkpoint|request|result) return 0 ;;
@@ -251,6 +260,24 @@ next_report_round() { # <state_dir>
     fi
   done
   printf '%s' "$(( max + 1 ))"
+}
+
+report_round_for_id() { # <agent_id>
+  local report round
+  report="$AGENT_DUO_DIR/state/$1/report.json"
+  if [[ ! -e "$report" ]]; then
+    printf '0'
+    return 0
+  fi
+  round="$(jq -r '.round // 0' "$report" 2>/dev/null || true)"
+  if ! is_nonnegative_int "$round"; then
+    round="0"
+  fi
+  printf '%s' "$round"
+}
+
+report_file_for_round() { # <agent_id> <round>
+  printf '%s/state/%s/r%s.json' "$AGENT_DUO_DIR" "$1" "$2"
 }
 
 one_line() {
@@ -483,6 +510,191 @@ task_next() { # <agent_id>
     (one("blocked") // one("in_progress") // one("pending")) as $step
     | if $step == null then "done" else "\($step.id)\t\($step.status // "pending")\t\($step.desc // "")" end
   ' "$task_file"
+}
+
+loop_file_for_id() { # <agent_id>
+  printf '%s/state/%s/loop.json' "$AGENT_DUO_DIR" "$1"
+}
+
+write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json>
+  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" now
+  now="$(iso_ts)"
+  {
+    printf '{"protocol":"1",'
+    printf '"agent_id":'; json_str "$agent_id"; printf ','
+    printf '"mission":'; json_str "$mission"; printf ','
+    printf '"non_goals":%s,' "$non_goals_json"
+    printf '"success_signals":%s,' "$success_json"
+    printf '"max_rounds":%s,' "$max_rounds"
+    printf '"frozen_at_round":%s,' "$frozen_round"
+    printf '"status":"active",'
+    printf '"stop":{"on_terminal":true,"reason":null,"stopped_at_round":null,"stopped_at":null},'
+    printf '"created_at":'; json_str "$now"; printf ','
+    printf '"updated_at":'; json_str "$now"
+    printf '}\n'
+  } > "$path"
+}
+
+loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json>
+  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6"
+  local loop_file loop_dir tmp
+  if [[ -z "$mission" ]]; then
+    echo "错误: peer loop init 需要 --mission。" >&2
+    return 1
+  fi
+  if ! is_positive_int "$max_rounds"; then
+    echo "错误: --max-rounds 必须是正整数。" >&2
+    return 1
+  fi
+  if ! is_positive_int "$frozen_round"; then
+    echo "错误: --round 必须是正整数。" >&2
+    return 1
+  fi
+  loop_file="$(loop_file_for_id "$agent_id")"
+  loop_dir="${loop_file%/*}"
+  mkdir -p "$loop_dir"
+  if [[ -e "$loop_file" ]]; then
+    echo "错误: loop.json 已存在: .agent-duo/state/$agent_id/loop.json" >&2
+    return 1
+  fi
+  tmp="$loop_dir/.loop.json.$$"
+  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$loop_file"
+}
+
+loop_print() { # <agent_id>
+  local agent_id="$1" loop_file current_round
+  loop_file="$(loop_file_for_id "$agent_id")"
+  if [[ ! -f "$loop_file" ]]; then
+    echo "没有 loop.json: .agent-duo/state/$agent_id/loop.json" >&2
+    return 1
+  fi
+  current_round="$(report_round_for_id "$agent_id")"
+  jq -r --argjson current_round "$current_round" '
+    (.frozen_at_round // 1) as $frozen
+    | (.max_rounds // 0) as $max
+    | ($current_round - $frozen + 1) as $used
+    | "MISSION\t\(.mission // "")",
+      "STATUS\t\(.status // "active")",
+      "ROUND\t\($current_round)",
+      "FROZEN_AT_ROUND\t\($frozen)",
+      "MAX_ROUNDS\t\($max)",
+      "ROUNDS_USED\t\($used)",
+      "REMAINING\t\($max - $used)",
+      "STOP_REASON\t\(.stop.reason // "")",
+      "NON_GOALS\t\((.non_goals // []) | join("; "))",
+      "SUCCESS_SIGNALS\t\((.success_signals // []) | join("; "))"
+  ' "$loop_file"
+}
+
+loop_guard_ask() { # <agent_id>
+  local agent_id="$1" loop_file loop_json status reason max_rounds frozen_round current_round rounds_used
+  loop_file="$(loop_file_for_id "$agent_id")"
+  [[ -e "$loop_file" ]] || return 0
+  if ! loop_json="$(jq -c '.' "$loop_file" 2>/dev/null)"; then
+    echo "警告: 无法读取 .agent-duo/state/$agent_id/loop.json，loop 边界本次 fail-open；broker 门仍会照常执行。" >&2
+    return 0
+  fi
+  status="$(jq -r '.status // "active"' <<EOF
+$loop_json
+EOF
+)"
+  max_rounds="$(jq -r '.max_rounds // empty' <<EOF
+$loop_json
+EOF
+)"
+  frozen_round="$(jq -r '.frozen_at_round // empty' <<EOF
+$loop_json
+EOF
+)"
+  if [[ "$status" == "stopped" ]]; then
+    reason="$(jq -r '.stop.reason // "unknown"' <<EOF
+$loop_json
+EOF
+)"
+    echo "错误: worker '$agent_id' 的 loop 已到界(reason=$reason),已拒绝继续派发。" >&2
+    echo "      经人确认后用 'peer ask --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
+    return 1
+  fi
+  if ! is_positive_int "$max_rounds" || ! is_positive_int "$frozen_round"; then
+    echo "警告: .agent-duo/state/$agent_id/loop.json 边界字段无效，loop 边界本次 fail-open；broker 门仍会照常执行。" >&2
+    return 0
+  fi
+  current_round="$(report_round_for_id "$agent_id")"
+  rounds_used="$(( current_round - frozen_round + 1 ))"
+  if (( rounds_used > 0 && rounds_used >= max_rounds )); then
+    echo "错误: worker '$agent_id' 的 loop 已到界(reason=max_rounds, ${rounds_used}/${max_rounds}),已拒绝继续派发。" >&2
+    echo "      经人确认后用 'peer ask --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
+    return 1
+  fi
+}
+
+report_summary_from_file() { # <report_file>
+  jq -r '
+    def clean: if . == null then "" else tostring | gsub("[\r\n\t]"; " ") end;
+    (.delta | clean) as $delta
+    | (.next | clean) as $next
+    | ((.needs // [])[0] // {}) as $need
+    | ($need.detail | clean) as $detail
+    | ($need.kind | clean) as $kind
+    | if $delta != "" then $delta
+      elif $next != "" then $next
+      elif $detail != "" then $detail
+      elif $kind != "" then "needs:\($kind)"
+      else "\(.type // "report")/\(.status // "unknown")"
+      end
+  ' "$1"
+}
+
+ask_print_report() { # <agent_id> <round>
+  local agent_id="$1" round="$2" file ref status delta next_text needs summary
+  file="$(report_file_for_round "$agent_id" "$round")"
+  ref=".agent-duo/state/$agent_id/r${round}.json"
+  if [[ ! -f "$file" ]]; then
+    file="$AGENT_DUO_DIR/state/$agent_id/report.json"
+    ref=".agent-duo/state/$agent_id/report.json"
+  fi
+  if [[ ! -f "$file" ]]; then
+    echo "错误: 找不到新 report 文件: .agent-duo/state/$agent_id/r${round}.json" >&2
+    return 1
+  fi
+  status="$(jq -r '.status // "unknown"' "$file")"
+  delta="$(jq -r '.delta // ""' "$file")"
+  next_text="$(jq -r '.next // ""' "$file")"
+  needs="$(jq -c '.needs // []' "$file")"
+  summary="$(report_summary_from_file "$file")"
+  printf 'ROUND\t%s\n' "$round"
+  printf 'STATUS\t%s\n' "$status"
+  printf 'SUMMARY\t%s\n' "$summary"
+  printf 'DELTA\t%s\n' "$delta"
+  printf 'NEXT\t%s\n' "$next_text"
+  printf 'NEEDS\t%s\n' "$needs"
+  printf 'REF\t%s\n' "$ref"
+}
+
+check_target_dispatch_allowed() { # <target_id> <target_pane>
+  local target_id="$1" target="$2" gate_role bg_out bg_status
+  # Broker 硬门:发给工作型角色(非 supervisor/daemon/loopd)时,broker 必须 fresh ready,否则拒发
+  # (fail-closed)。worker/reviewer/自定义工作角色都受保护,与 lib/loop.sh 的 active-worker 模型一致。
+  # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
+  gate_role="$(role_for_id "$target_id")"
+  if role_is_gated "$gate_role" \
+     && [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
+    bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
+    case "$bg_out" in
+      *'"status":"ready"'*) ;;  # fresh ready → 放行
+      *)
+        bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
+        echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
+        echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
+        return 1
+        ;;
+    esac
+  fi
+  check_safe_to_send_keys "$target"
 }
 
 task_step_exists() { # <task_file> <step_id>
@@ -870,6 +1082,22 @@ check_safe_to_send_keys() { # <pane>
   fi
 }
 
+paste_buffer_and_enter() { # <pane> <buffer_name>
+  local pane="$1" buf="$2"
+  # -p: bracketed paste,TUI 将其识别为一次完整粘贴(多行不会被逐行提交)
+  # -d: 粘贴后删除缓冲区
+  tmux paste-buffer -b "$buf" -t "$pane" -d -p
+  # 给 TUI 一点处理粘贴的时间,立刻回车可能被吞掉。
+  sleep 0.5
+  tmux send-keys -t "$pane" Enter
+}
+
+send_text_to_pane() { # <pane> <buffer_name> <text>
+  local pane="$1" buf="$2" text="$3"
+  printf '%s' "$text" | tmux load-buffer -b "$buf" -
+  paste_buffer_and_enter "$pane" "$buf"
+}
+
 FORCE_SEND=0
 if [[ "${1:-}" == "--force" ]]; then
   FORCE_SEND=1
@@ -993,10 +1221,7 @@ case "$cmd" in
     prompt="agent-duo broker self-check。请立刻原样执行下面这条 shell 命令,不要解释、不要询问、不要改写: ${probe_cmd}"
     check_safe_to_send_keys "$target"
     buf="peer-brokercheck-${maybe_id}"
-    printf '%s' "$prompt" | tmux load-buffer -b "$buf" -
-    tmux paste-buffer -b "$buf" -t "$target" -d -p
-    sleep 0.5
-    tmux send-keys -t "$target" Enter
+    send_text_to_pane "$target" "$buf" "$prompt"
     echo "已向 '$maybe_id' 投递 broker 自检探针(nonce=$nonce),等待 hook 拦截…"
     timeout="${AGENT_DUO_BROKER_CHECK_TIMEOUT:-60}"
     marker="$AGENT_DUO_DIR/state/$maybe_id/broker.json"
@@ -1051,24 +1276,7 @@ case "$cmd" in
     else
       target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
     fi
-    # Broker 硬门:发给工作型角色(非 supervisor/daemon/loopd)时,broker 必须 fresh ready,否则拒发
-    # (fail-closed)。worker/reviewer/自定义工作角色都受保护,与 lib/loop.sh 的 active-worker 模型一致。
-    # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
-    gate_role="$(role_for_id "$target_id")"
-    if role_is_gated "$gate_role" \
-       && [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
-      bg_out="$(run_approval_broker status --agent-id "$target_id" --root "$AGENT_DUO_ROOT" 2>/dev/null)"
-      case "$bg_out" in
-        *'"status":"ready"'*) ;;  # fresh ready → 放行
-        *)
-          bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
-          echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-          echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
-          exit 1
-          ;;
-      esac
-    fi
-    check_safe_to_send_keys "$target"
+    check_target_dispatch_allowed "$target_id" "$target"
     buf="peer-${ME}2${target_id}"
     if [[ $# -gt 0 ]]; then
       printf '%s' "$*" | tmux load-buffer -b "$buf" -
@@ -1078,13 +1286,85 @@ case "$cmd" in
       echo "用法: peer tell [<id>] \"消息\"  或  echo \"消息\" | peer tell [<id>]" >&2
       exit 1
     fi
-    # -p: bracketed paste,TUI 将其识别为一次完整粘贴(多行不会被逐行提交)
-    # -d: 粘贴后删除缓冲区
-    tmux paste-buffer -b "$buf" -t "$target" -d -p
-    # 给 TUI 一点处理粘贴的时间,立刻回车可能被吞掉
-    sleep 0.5
-    tmux send-keys -t "$target" Enter
+    paste_buffer_and_enter "$target" "$buf"
     echo "已投递。(提示: 'peer wait' 等它完成,再 'peer peek' 查看回复)"
+    ;;
+
+  ask)
+    ensure_session
+    maybe_id=""
+    ask_timeout="${PEER_ASK_TIMEOUT:-300}"
+    ask_interval="${PEER_ASK_INTERVAL:-5}"
+    ask_parts=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --timeout)
+          ask_timeout="${2:-}"
+          shift 2
+          ;;
+        --interval)
+          ask_interval="${2:-}"
+          shift 2
+          ;;
+        --force)
+          FORCE_SEND=1
+          shift
+          ;;
+        --)
+          shift
+          while [[ $# -gt 0 ]]; do ask_parts+=("$1"); shift; done
+          ;;
+        *)
+          if [[ -z "$maybe_id" && ${#ask_parts[@]} -eq 0 ]] && agent_ids | grep -qx "$1"; then
+            maybe_id="$1"
+          else
+            ask_parts+=("$1")
+          fi
+          shift
+          ;;
+      esac
+    done
+    if ! is_positive_int "$ask_timeout"; then
+      echo "错误: peer ask --timeout 必须是正整数。" >&2
+      exit 1
+    fi
+    if ! is_positive_int "$ask_interval"; then
+      echo "错误: peer ask --interval 必须是正整数。" >&2
+      exit 1
+    fi
+    if [[ ${#ask_parts[@]} -eq 0 ]]; then
+      echo "用法: peer ask [<id>] \"消息\" [--timeout N] [--interval N] [--force]" >&2
+      exit 1
+    fi
+    target="$(resolve_target_pane "$maybe_id")"
+    if [[ -n "$maybe_id" ]]; then
+      target_id="$maybe_id"
+    else
+      target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+    fi
+    if [[ "${FORCE_SEND:-0}" != "1" ]]; then
+      loop_guard_ask "$target_id"
+    fi
+    pre_round="$(report_round_for_id "$target_id")"
+    check_target_dispatch_allowed "$target_id" "$target"
+    buf="peer-${ME}2${target_id}-ask"
+    send_text_to_pane "$target" "$buf" "${ask_parts[*]}"
+
+    elapsed=0
+    while (( elapsed < ask_timeout )); do
+      current_round="$(report_round_for_id "$target_id")"
+      if (( current_round > pre_round )); then
+        ask_print_report "$target_id" "$current_round"
+        exit 0
+      fi
+      sleep "$ask_interval"
+      elapsed="$(( elapsed + ask_interval ))"
+    done
+    echo "错误: peer ask 等待 '$target_id' 写出新 report 超时(${ask_timeout}s)。" >&2
+    echo "===== 目标末屏(best-effort) =====" >&2
+    capture "$target" 80 >&2 || true
+    echo "===== 目标末屏结束 =====" >&2
+    exit 2
     ;;
 
   wait)
@@ -1261,6 +1541,75 @@ case "$cmd" in
           exit 1
         fi
         task_print "$subcmd"
+        ;;
+    esac
+    ;;
+
+  loop)
+    subcmd="${1:-}"
+    case "$subcmd" in
+      init)
+        shift
+        target_id="$ME"
+        if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+          target_id="$1"
+          shift
+        fi
+        loop_mission=""
+        loop_max_rounds=""
+        loop_round=""
+        loop_non_goals=()
+        loop_success=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --mission)
+              loop_mission="${2:-}"
+              shift 2
+              ;;
+            --max-rounds)
+              loop_max_rounds="${2:-}"
+              shift 2
+              ;;
+            --non-goal)
+              loop_non_goals+=("${2:-}")
+              shift 2
+              ;;
+            --success)
+              loop_success+=("${2:-}")
+              shift 2
+              ;;
+            --round)
+              loop_round="${2:-}"
+              shift 2
+              ;;
+            *)
+              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N]" >&2
+              exit 1
+              ;;
+          esac
+        done
+        if [[ -z "$loop_round" ]]; then
+          loop_round="$(report_round_for_id "$target_id")"
+          if [[ "$loop_round" == "0" ]]; then loop_round="1"; fi
+        fi
+        loop_non_goals_json="$(json_array ${loop_non_goals[@]+"${loop_non_goals[@]}"})"
+        loop_success_json="$(json_array ${loop_success[@]+"${loop_success[@]}"})"
+        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json"
+        echo "已初始化 loop.json: .agent-duo/state/$target_id/loop.json"
+        ;;
+      ""|--help|-h)
+        if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N]" >&2
+          exit 0
+        fi
+        loop_print "$ME"
+        ;;
+      *)
+        if [[ -n "${2:-}" ]]; then
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N]" >&2
+          exit 1
+        fi
+        loop_print "$subcmd"
         ;;
     esac
     ;;
@@ -1604,10 +1953,7 @@ case "$cmd" in
         if [[ -n "$note" ]]; then
           gate_text="${gate_text}"$'\n'"$note"
         fi
-        printf '%s' "$gate_text" | tmux load-buffer -b "$buf" -
-        tmux paste-buffer -b "$buf" -t "$target" -d -p
-        sleep 0.5
-        tmux send-keys -t "$target" Enter
+        send_text_to_pane "$target" "$buf" "$gate_text"
         if [[ -n "$gate_id" ]]; then
           echo "已解决 human gate $gate_id 并发送 decision(choice=$choice)。"
         else

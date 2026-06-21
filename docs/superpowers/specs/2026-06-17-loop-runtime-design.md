@@ -302,6 +302,7 @@ daemon 不是神秘服务——它是**一个跑在可见 tmux pane 里的 bash 
   state/supervisor.turn    # "busy"/"idle"，由 supervisor 的 hook 写
   state/<id>/report.json   # 各 worker 最新报告（peer report 写）
   state/<id>/task.json     # worker 步骤账本（peer task init 写，peer report --step 更新）
+  state/<id>/loop.json     # worker loop 契约（peer loop init 写，loopd 机械截停）
   state/daemon.expected    # start/loopd 写入，表示本 session 预期有 daemon
   state/daemon.heartbeat   # daemon 自己的心跳时间戳
 ```
@@ -326,8 +327,10 @@ while true; do
   (( $(active_workers|wc -l) && now-last_tick > TICK_T )) \
      && { emit_event "-" tick; last_tick=$now; }          # ③ 时间 tick（仅活跃时）
 
+  eval_contracts                                             # ④ max_rounds/终态 → loop_stop
+
   if [[ "$(cat .agent-duo/state/supervisor.turn)" == idle ]] \
-     && has_pending && draft_guard_ok; then               # ④ idle-arrival 唤醒
+     && has_pending && draft_guard_ok; then               # ⑤ idle-arrival 唤醒
        flock .agent-duo/events/cursor.lock -c deliver_pending
   fi
 

@@ -132,6 +132,25 @@ case "$cmd" in
     cat > "$TMUX_STUB_BUFFER_DIR/$buf"
     ;;
   paste-buffer|send-keys)
+    if [[ "$cmd" == "send-keys" && -n "${TMUX_STUB_ON_SEND_REPORT_AGENT:-}" ]]; then
+      root="${TMUX_STUB_ON_SEND_REPORT_ROOT:-}"
+      agent="${TMUX_STUB_ON_SEND_REPORT_AGENT}"
+      round="${TMUX_STUB_ON_SEND_REPORT_ROUND:-1}"
+      status="${TMUX_STUB_ON_SEND_REPORT_STATUS:-in_progress}"
+      delta="${TMUX_STUB_ON_SEND_REPORT_DELTA:-ask answered}"
+      next="${TMUX_STUB_ON_SEND_REPORT_NEXT:-continue}"
+      if [[ -n "$root" ]]; then
+        state="$root/.agent-duo/state/$agent"
+        mkdir -p "$state"
+        jq -cn \
+          --argjson round "$round" --arg agent "$agent" --arg status "$status" \
+          --arg delta "$delta" --arg next "$next" \
+          '{protocol:"1",round:$round,agent_id:$agent,role:"worker",type:"checkpoint",status:$status,goal_ref:null,step_ref:null,delta:$delta,drift:null,evidence:[],needs:[],next:$next}' \
+          > "$state/r${round}.json"
+        rm -f "$state/report.json"
+        ln -s "r${round}.json" "$state/report.json"
+      fi
+    fi
     ;;
   *)
     exit 1
@@ -171,6 +190,12 @@ run_peer() {
     TMUX_STUB_CAPTURE_MODE="${TMUX_STUB_CAPTURE_MODE:-stable}" \
     TMUX_STUB_SENTINEL="${TMUX_STUB_SENTINEL:-}" \
     TMUX_STUB_CODEC_TAG="${TMUX_STUB_CODEC_TAG:-}" \
+    TMUX_STUB_ON_SEND_REPORT_ROOT="${TMUX_STUB_ON_SEND_REPORT_ROOT:-}" \
+    TMUX_STUB_ON_SEND_REPORT_AGENT="${TMUX_STUB_ON_SEND_REPORT_AGENT:-}" \
+    TMUX_STUB_ON_SEND_REPORT_ROUND="${TMUX_STUB_ON_SEND_REPORT_ROUND:-}" \
+    TMUX_STUB_ON_SEND_REPORT_STATUS="${TMUX_STUB_ON_SEND_REPORT_STATUS:-}" \
+    TMUX_STUB_ON_SEND_REPORT_DELTA="${TMUX_STUB_ON_SEND_REPORT_DELTA:-}" \
+    TMUX_STUB_ON_SEND_REPORT_NEXT="${TMUX_STUB_ON_SEND_REPORT_NEXT:-}" \
     PEER_FORCE="${TEST_PEER_FORCE:-0}" \
     AGENT_DUO_NO_BROKER_GATE="${AGENT_DUO_NO_BROKER_GATE:-0}" \
     AGENT_DUO_ROOT="${TEST_AGENT_DUO_ROOT:-$PROJECT}" \
@@ -193,6 +218,12 @@ run_peer_without_agent() {
       TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
       "$ROOT/bin/peer" "$@" >"$OUT" 2>"$ERR"
   )
+}
+
+mark_broker_ready() { # <agent_id>
+  mkdir -p "$PROJECT/.agent-duo/state/$1"
+  printf '{"agent":"%s","status":"ready","updated_epoch":%s,"nonce":"n1"}\n' "$1" "$(date +%s)" \
+    > "$PROJECT/.agent-duo/state/$1/broker.json"
 }
 
 # 运行时和安装路径不应再依赖额外 Python 运行时。
@@ -494,6 +525,109 @@ TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "task result: partial d
 assert_contains "task result: report downgraded partial" "$(cat "$PROJECT/.agent-duo/state/worker/r1.json")" '"status":"partial"'
 assert_contains "task result: sentinel partial" "$(cat "$OUT")" 'status=partial'
 assert_contains "task result: s1 still done" "$(cat "$PROJECT/.agent-duo/state/worker/task.json")" '"status":"done"'
+teardown
+
+# loop:init 创建 loop.json,默认 frozen_at_round 取当前最新 report 轮次。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",round:12,agent_id:"worker",role:"worker",type:"checkpoint",status:"in_progress",delta:"",next:"",needs:[]}' \
+  > "$PROJECT/.agent-duo/state/worker/r12.json"
+ln -s "r12.json" "$PROJECT/.agent-duo/state/worker/report.json"
+assert_ok "loop init: succeeds" run_peer loop init worker --mission "finish login copy" --max-rounds 8 \
+  --non-goal "no auth refactor" --success "tests pass"
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop init: mission" "$loop_json" '"mission":"finish login copy"'
+assert_contains "loop init: max rounds" "$loop_json" '"max_rounds":8'
+assert_contains "loop init: frozen from report" "$loop_json" '"frozen_at_round":12'
+assert_contains "loop init: non goal" "$loop_json" '"non_goals":["no auth refactor"]'
+assert_contains "loop init: success" "$loop_json" '"success_signals":["tests pass"]'
+assert_ok "loop print: succeeds" run_peer loop worker
+assert_contains "loop print: rounds used" "$(cat "$OUT")" $'ROUNDS_USED\t1'
+assert_contains "loop print: remaining" "$(cat "$OUT")" $'REMAINING\t7'
+teardown
+
+# loop:init 无 report 时 frozen_at_round 默认 1,且已存在/非法输入 fail-closed。
+setup
+assert_ok "loop init default no report: succeeds" run_peer loop init worker --mission "do work" --max-rounds 3
+assert_contains "loop init default no report: frozen one" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"frozen_at_round":1'
+assert_not_ok "loop init: existing rejected" run_peer loop init worker --mission "again" --max-rounds 3
+assert_contains "loop init: existing error" "$(cat "$ERR")" 'loop.json 已存在'
+teardown
+
+setup
+assert_not_ok "loop init: missing mission rejected" run_peer loop init worker --max-rounds 3
+assert_contains "loop init: missing mission error" "$(cat "$ERR")" '--mission'
+assert_not_ok "loop init: bad max rejected" run_peer loop init worker --mission "do work" --max-rounds nope
+assert_contains "loop init: bad max error" "$(cat "$ERR")" '--max-rounds'
+teardown
+
+# ask:stopped loop 发送前 fail-closed,不写 buffer。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],max_rounds:1,frozen_at_round:1,status:"stopped",stop:{on_terminal:true,reason:"max_rounds",stopped_at_round:1,stopped_at:"2026-06-21T00:00:00Z"}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_not_ok "ask: stopped loop rejected" run_peer ask worker "continue"
+assert_contains "ask: stopped loop error" "$(cat "$ERR")" 'loop 已到界'
+assert_ok "ask: stopped no buffer" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker-ask"
+teardown
+
+# ask:active 但 rounds_used>=max 时同样拒发,挡住 loopd 尚未 tick 的竞态。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",round:1,agent_id:"worker",role:"worker",type:"checkpoint",status:"in_progress",delta:"",next:"",needs:[]}' \
+  > "$PROJECT/.agent-duo/state/worker/r1.json"
+ln -s "r1.json" "$PROJECT/.agent-duo/state/worker/report.json"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],max_rounds:1,frozen_at_round:1,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_not_ok "ask: max rounds rejected" run_peer ask worker "continue"
+assert_contains "ask: max rounds error" "$(cat "$ERR")" 'reason=max_rounds'
+assert_ok "ask: max rounds no buffer" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker-ask"
+teardown
+
+# ask:相对预算不因历史 round 误拒;发送后轮询新 report 并打印派生 summary/ref。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+mark_broker_ready worker
+jq -cn '{protocol:"1",round:12,agent_id:"worker",role:"worker",type:"checkpoint",status:"in_progress",delta:"baseline",next:"",needs:[]}' \
+  > "$PROJECT/.agent-duo/state/worker/r12.json"
+ln -s "r12.json" "$PROJECT/.agent-duo/state/worker/report.json"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],max_rounds:8,frozen_at_round:12,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+TMUX_STUB_ON_SEND_REPORT_ROOT="$PROJECT" TMUX_STUB_ON_SEND_REPORT_AGENT=worker TMUX_STUB_ON_SEND_REPORT_ROUND=13 \
+  TMUX_STUB_ON_SEND_REPORT_DELTA="answered ask" assert_ok "ask: historical budget sends and reads report" \
+  run_peer ask worker "what changed?" --timeout 2 --interval 1
+assert_eq "ask: buffer content" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker-ask")" "what changed?"
+assert_contains "ask: summary printed" "$(cat "$OUT")" $'SUMMARY\tanswered ask'
+assert_contains "ask: ref printed" "$(cat "$OUT")" $'REF\t.agent-duo/state/worker/r13.json'
+teardown
+
+# ask:broker 门仍独立生效;loop active 但 broker 非 ready 时拒发。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],max_rounds:8,frozen_at_round:1,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_not_ok "ask: broker gate still rejects" run_peer ask worker "work"
+assert_contains "ask: broker gate error" "$(cat "$ERR")" 'Approval Broker'
+assert_ok "ask: broker no buffer" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker-ask"
+teardown
+
+# ask:--force 同时越过 loop 边界与 broker 门。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],max_rounds:1,frozen_at_round:1,status:"stopped",stop:{on_terminal:true,reason:"max_rounds",stopped_at_round:1,stopped_at:"2026-06-21T00:00:00Z"}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+TMUX_STUB_ON_SEND_REPORT_ROOT="$PROJECT" TMUX_STUB_ON_SEND_REPORT_AGENT=worker TMUX_STUB_ON_SEND_REPORT_ROUND=1 \
+  assert_ok "ask: force sends" run_peer ask --force worker "override" --timeout 2 --interval 1
+assert_eq "ask: force buffer content" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker-ask")" "override"
+assert_contains "ask: force report printed" "$(cat "$OUT")" $'ROUND\t1'
+teardown
+
+# ask:无新 report 时非零退出并打印末屏兜底。
+setup
+mark_broker_ready worker
+assert_not_ok "ask: timeout without new report" run_peer ask worker "status?" --timeout 1 --interval 1
+assert_contains "ask: timeout error" "$(cat "$ERR")" '等待'
+assert_contains "ask: timeout peek fallback" "$(cat "$ERR")" '目标末屏'
 teardown
 
 # report:写 rN.json、更新 latest 指针、追加极小 event、打印 sentinel。
