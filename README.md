@@ -27,7 +27,7 @@ Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / 
 
 ## How it works
 
-One tmux session starts with a supervisor tab and a visible `loopd` dashboard. Add workers with `peer add` or start one immediately with `agent-duo-start --with codex:worker`. iTerm2's native tmux integration (`tmux -CC`) renders tmux windows as ordinary tabs, and `peer` gives each agent eyes and a keyboard for the others:
+One tmux session starts with a supervisor tab and a visible `loopd` dashboard. Add workers with `peer add` or start one immediately with `agent-duo-start --with codex:worker`; use `--worktree` / `:isolated` when a worker should edit in its own git worktree. iTerm2's native tmux integration (`tmux -CC`) renders tmux windows as ordinary tabs, and `peer` gives each agent eyes and a keyboard for the others:
 
 ```mermaid
 flowchart TB
@@ -85,6 +85,7 @@ git clone https://github.com/<you>/agent-duo && cd agent-duo
 
 cd ~/your-project
 agent-duo-start --with codex:worker
+agent-duo-start --with codex:worker:isolated
 tmux -CC attach -t agents         # iTerm2 renders tmux windows as native tabs
 ```
 
@@ -102,7 +103,7 @@ Answer `y` once and it won't ask again (the marker block records your consent); 
 - Non-interactive shells (CI, pipes) skip injection by default — pass `-y` or set `AGENT_DUO_AUTO_INJECT=1` to inject without the prompt.
 - Prefer to wire it up by hand? Append the body of `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` and `AGENTS.md` yourself. Same snippet for both — `peer` resolves identity from the tmux pane `@agent_id` marker, with `AGENT_NAME` kept only as a migration fallback.
 
-`agent-duo-start` without `--with` creates only the supervisor and loopd; run `peer add --provider codex --role worker` from the supervisor when you want a worker later.
+`agent-duo-start` without `--with` creates only the supervisor and loopd; run `peer add --provider codex --role worker` from the supervisor when you want a worker later. Add `--worktree` to give that worker an isolated checkout while keeping `.agent-duo` control state shared in the main repository.
 
 Then just talk naturally:
 
@@ -120,6 +121,8 @@ A freshly created worker's Approval Broker starts **unverified** (the hook isn't
 | `peer tell "message"` | Send a one-line message into the other agent's input box and press Enter |
 | `... \| peer tell` | Deliver a **multi-line** message from stdin (tmux buffer + bracketed paste — quotes, backticks and newlines arrive verbatim, no escaping) |
 | `peer wait [seconds] [interval] [stable-samples]` | Block until the other agent's screen is unchanged for repeated samples (defaults: timeout 300s, interval 5s, stable samples 2) |
+| `peer add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | Create a visible teammate tab; `--worktree` starts it in an isolated git worktree with shared control state |
+| `peer rm [--force] <id>` | Remove a teammate tab; isolated worktrees are deleted only when clean, or with `--force` |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | Create and inspect a durable `task.json` step ledger for idempotent resume |
 | `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional validations gate `done` asynchronously, and empty-delta streaks raise direction events |
 | `peer loop reset <id> [--max-rounds N]` | Re-freeze a loop at the latest report round, clear its stop state, and give it a fresh round budget |

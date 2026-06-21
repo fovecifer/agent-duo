@@ -166,6 +166,13 @@ STUB
   chmod +x "$STUB_BIN/sleep"
 }
 
+init_git_project() {
+  git -C "$PROJECT" init -q
+  printf 'hello\n' > "$PROJECT/README.md"
+  git -C "$PROJECT" add README.md
+  git -C "$PROJECT" -c user.name='Agent Duo Test' -c user.email='agent-duo@example.invalid' commit -m init -q
+}
+
 teardown() {
   if [[ -n "${SCENARIO_TMP:-}" && -d "$SCENARIO_TMP" && "$SCENARIO_TMP" != "/" ]]; then
     rm -rf "$SCENARIO_TMP"
@@ -199,6 +206,7 @@ run_peer() {
     PEER_FORCE="${TEST_PEER_FORCE:-0}" \
     AGENT_DUO_NO_BROKER_GATE="${AGENT_DUO_NO_BROKER_GATE:-0}" \
     AGENT_DUO_ROOT="${TEST_AGENT_DUO_ROOT:-$PROJECT}" \
+    AGENT_DUO_WORKTREES_DIR="${TEST_AGENT_DUO_WORKTREES_DIR:-${AGENT_DUO_WORKTREES_DIR:-}}" \
     TMUX_STUB_HAS_SESSION="${TMUX_STUB_HAS_SESSION:-1}" \
     TMUX_STUB_PANE_EXISTS="${TMUX_STUB_PANE_EXISTS:-1}" \
     TMUX_STUB_PANE_SESSION="${TMUX_STUB_PANE_SESSION:-${TEST_AGENT_SESSION:-agents}}" \
@@ -1141,11 +1149,148 @@ assert_not_ok "add: bad provider" run_peer add --provider gpt --role worker
 assert_contains "add: bad provider error" "$(cat "$ERR")" 'provider 必须是 claude 或 codex'
 teardown
 
+# add --worktree:创建隔离 worktree,worker cwd/写域指向 worktree,控制面仍指主仓。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree: succeeds" run_peer add --provider codex --role worker --id helper --worktree
+record="$PROJECT/.agent-duo/state/helper/worktree.json"
+assert_ok "add worktree: record exists" test -f "$record"
+wt_path="$(jq -r '.path' "$record")"
+assert_ok "add worktree: path exists" test -d "$wt_path"
+assert_contains "add worktree: branch recorded" "$(cat "$record")" '"branch":"agent-duo/helper"'
+assert_contains "add worktree: git registered path" "$(git -C "$PROJECT" worktree list --porcelain)" "worktree $wt_path"
+assert_contains "add worktree: git registered branch" "$(git -C "$PROJECT" worktree list --porcelain)" 'branch refs/heads/agent-duo/helper'
+assert_contains "add worktree: window cwd" "$(cat "$TMUX_STUB_LOG")" "new-window -t agents -n helper -c $wt_path"
+assert_contains "add worktree: pane option" "$(cat "$TMUX_STUB_LOG")" "@agent_worktree $wt_path"
+assert_contains "add worktree: root stays main" "$(cat "$TMUX_STUB_LOG")" "AGENT_DUO_ROOT=$PROJECT"
+assert_contains "add worktree: worker worktree env" "$(cat "$TMUX_STUB_LOG")" "AGENT_DUO_WORKTREE=$wt_path"
+assert_contains "add worktree: broker scoped to worktree" "$(cat "$PROJECT/.agent-duo/state/helper/session-settings.json")" "\"worktree\":\"$wt_path\""
+teardown
+
+# add --worktree:非 git root fail-closed,不建窗口/记录。
+setup
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+assert_not_ok "add worktree: non git rejected" run_peer add --provider codex --role worker --id helper --worktree
+assert_contains "add worktree: non git error" "$(cat "$ERR")" '隔离需要 git 仓库'
+assert_not_contains "add worktree: non git no window" "$(cat "$TMUX_STUB_LOG")" 'new-window'
+assert_ok "add worktree: non git no record" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
+teardown
+
+# add --worktree:分支已存在但 worktree 已删时,复用分支重新 checkout。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+git -C "$PROJECT" branch agent-duo/helper
+TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree: reuses existing branch" run_peer add --provider codex --role worker --id helper --worktree
+wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
+assert_eq "add worktree: branch checkout" "$(git -C "$wt_path" branch --show-current)" "agent-duo/helper"
+teardown
+
+# add --worktree:dirty rm 保留过的有效 wt_path 可原地复用。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree reuse: first succeeds" run_peer add --provider codex --role worker --id helper --worktree
+wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
+printf 'dirty\n' > "$wt_path/dirty.txt"
+TMUX_STUB_NEW_PANE="%6" assert_ok "add worktree reuse: second succeeds" run_peer add --provider codex --role worker --id helper --worktree
+assert_ok "add worktree reuse: dirty file preserved" test -f "$wt_path/dirty.txt"
+assert_contains "add worktree reuse: window cwd" "$(cat "$TMUX_STUB_LOG")" "new-window -t agents -n helper -c $wt_path"
+teardown
+
+# add --worktree:目标路径存在但不是 git worktree 时拒绝,避免覆盖外部目录。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+mkdir -p "$TEST_AGENT_DUO_WORKTREES_DIR/agents/helper"
+assert_not_ok "add worktree: external dir rejected" run_peer add --provider codex --role worker --id helper --worktree
+assert_contains "add worktree: external dir error" "$(cat "$ERR")" '不是预期 worktree'
+assert_not_contains "add worktree: external dir no window" "$(cat "$TMUX_STUB_LOG")" 'new-window'
+teardown
+
 # rm:按 id 找到 pane 并 kill-window。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
 assert_ok "rm: succeeds" run_peer rm worker
 assert_contains "rm: kills window" "$(cat "$TMUX_STUB_LOG")" 'kill-window -t %2'
+teardown
+
+# rm:干净隔离 worktree 会被删除,分支保留,记录清掉。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree clean setup" run_peer add --provider codex --role worker --id helper --worktree
+wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm worktree clean: succeeds" run_peer rm helper
+assert_contains "rm worktree clean: kills window" "$(cat "$TMUX_STUB_LOG")" 'kill-window -t %5'
+assert_ok "rm worktree clean: dir removed" test ! -e "$wt_path"
+assert_ok "rm worktree clean: record removed" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
+assert_ok "rm worktree clean: branch kept" git -C "$PROJECT" show-ref --verify --quiet refs/heads/agent-duo/helper
+teardown
+
+# rm:脏隔离 worktree 非 force 时保留 worktree 与记录,但 agent 仍被移除。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree dirty setup" run_peer add --provider codex --role worker --id helper --worktree
+wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
+printf 'dirty\n' > "$wt_path/dirty.txt"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm worktree dirty: succeeds" run_peer rm helper
+assert_contains "rm worktree dirty: warning" "$(cat "$ERR")" '有未提交改动'
+assert_ok "rm worktree dirty: dir kept" test -d "$wt_path"
+assert_ok "rm worktree dirty: record kept" test -f "$PROJECT/.agent-duo/state/helper/worktree.json"
+teardown
+
+# rm:--force 可在 id 前,脏 worktree 会被丢弃。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree force before setup" run_peer add --provider codex --role worker --id helper --worktree
+wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
+printf 'dirty\n' > "$wt_path/dirty.txt"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm worktree force before: succeeds" run_peer rm --force helper
+assert_ok "rm worktree force before: dir removed" test ! -e "$wt_path"
+teardown
+
+# rm:--force 可在 id 后。
+setup
+init_git_project
+TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree force after setup" run_peer add --provider codex --role worker --id helper --worktree
+wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
+printf 'dirty\n' > "$wt_path/dirty.txt"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm worktree force after: succeeds" run_peer rm helper --force
+assert_ok "rm worktree force after: dir removed" test ! -e "$wt_path"
+teardown
+
+# rm:记录路径指向同 repo 其他 branch 的 worktree 时,即便 --force 也拒绝自动删除。
+setup
+init_git_project
+git -C "$PROJECT" worktree add -b agent-duo/other "$SCENARIO_TMP/other-wt" HEAD >/dev/null 2>&1
+mkdir -p "$PROJECT/.agent-duo/state/helper"
+jq -cn --arg path "$SCENARIO_TMP/other-wt" --arg branch "agent-duo/helper" '{path:$path,branch:$branch}' \
+  > "$PROJECT/.agent-duo/state/helper/worktree.json"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm worktree invalid: succeeds" run_peer rm --force helper
+assert_contains "rm worktree invalid: warning" "$(cat "$ERR")" '记录与 git 不符'
+assert_ok "rm worktree invalid: other kept" test -d "$SCENARIO_TMP/other-wt"
+assert_ok "rm worktree invalid: record kept" test -f "$PROJECT/.agent-duo/state/helper/worktree.json"
+teardown
+
+# rm:记录存在但目录和 git worktree 均已消失时,幂等清理记录。
+setup
+init_git_project
+mkdir -p "$PROJECT/.agent-duo/state/helper"
+jq -cn --arg path "$SCENARIO_TMP/missing-wt" --arg branch "agent-duo/helper" '{path:$path,branch:$branch}' \
+  > "$PROJECT/.agent-duo/state/helper/worktree.json"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+assert_ok "rm worktree missing: succeeds" run_peer rm helper
+assert_ok "rm worktree missing: record removed" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
 teardown
 
 # rm:未知 id 报错。

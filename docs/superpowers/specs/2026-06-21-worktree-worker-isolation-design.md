@@ -1,7 +1,7 @@
 # Worktree Worker 隔离（MVP 4）设计
 
 日期：2026-06-21
-状态：设计稿，待实现（交付 Codex 实现，作者 review）
+状态：已实现（2026-06-21）
 关联：[supervisor-loop roadmap](../../../agent-duo-supervisor-loop-roadmap.md) §MVP 4 / §Worktree 隔离、[Approval Broker 设计](./2026-06-17-approval-broker-design.md)（写域 `path.outside_worktree`）、[registry MVP 3 design](./2026-06-16-registry-mvp3-design.md)
 
 ## 1. 架构 + opt-in 面

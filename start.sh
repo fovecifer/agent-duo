@@ -3,10 +3,11 @@
 #            并注入 peer 工具,使 supervisor 可按需 `peer add` 长出更多 agent。
 #
 # 用法:
-#   ./start.sh [工作目录] [--supervisor claude|codex] [--with <provider>:<role>]
+#   ./start.sh [工作目录] [--supervisor claude|codex] [--with <provider>:<role>[:isolated]]
 #   ./start.sh                       # 默认为当前目录,supervisor=claude,无额外 worker
 #   ./start.sh --supervisor codex    # supervisor 用 codex
 #   ./start.sh --with codex:worker   # 额外起一个 codex worker(等价稍后 peer add)
+#   ./start.sh --with codex:worker:isolated  # worker 在隔离 git worktree 中启动
 #
 # 启动后在 iTerm2 里执行:
 #   tmux -CC attach -t agents
@@ -18,14 +19,15 @@ set -euo pipefail
 
 SESSION="${AGENT_SESSION:-agents}"
 
-# 解析 -y/--yes、--supervisor <provider>、--with <provider>:<role>(其余参数原样保留);
+# 解析 -y/--yes、--supervisor <provider>、--with <provider>:<role>[:isolated](其余参数原样保留);
 # AGENT_DUO_AUTO_INJECT=1 等价于 -y。
 AUTO=0
 [[ "${AGENT_DUO_AUTO_INJECT:-0}" == "1" ]] && AUTO=1
 SUPERVISOR_PROVIDER="claude"
-WITH_SPEC=""   # 形如 codex:worker
+WITH_SPEC=""   # 形如 codex:worker 或 codex:worker:isolated
 WITH_PROVIDER=""
 WITH_ROLE=""
+WITH_ISOLATED=0
 _args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -74,11 +76,26 @@ if ! reg_validate_provider "$SUPERVISOR_PROVIDER"; then
 fi
 if [[ -n "$WITH_SPEC" ]]; then
   if [[ "$WITH_SPEC" != *:* ]]; then
-    echo "错误: --with 必须形如 <provider>:<role>,当前为 '$WITH_SPEC'。" >&2
+    echo "错误: --with 必须形如 <provider>:<role> 或 <provider>:<role>:isolated,当前为 '$WITH_SPEC'。" >&2
+    exit 1
+  fi
+  if [[ "$WITH_SPEC" == *:*:*:* ]]; then
+    echo "错误: --with 必须形如 <provider>:<role> 或 <provider>:<role>:isolated,当前为 '$WITH_SPEC'。" >&2
     exit 1
   fi
   WITH_PROVIDER="${WITH_SPEC%%:*}"
-  WITH_ROLE="${WITH_SPEC#*:}"
+  WITH_REST="${WITH_SPEC#*:}"
+  if [[ "$WITH_REST" == *:* ]]; then
+    WITH_ROLE="${WITH_REST%%:*}"
+    WITH_MODE="${WITH_REST#*:}"
+    if [[ "$WITH_MODE" != "isolated" ]]; then
+      echo "错误: --with 的第三段只支持 isolated,当前为 '$WITH_MODE'。" >&2
+      exit 1
+    fi
+    WITH_ISOLATED=1
+  else
+    WITH_ROLE="$WITH_REST"
+  fi
   if ! reg_validate_provider "$WITH_PROVIDER"; then
     echo "错误: --with 的 provider 必须是 claude 或 codex,当前为 '$WITH_PROVIDER'。" >&2
     exit 1
@@ -249,16 +266,25 @@ tmux send-keys -t "$LOOPD_PANE" \
 if [[ -n "$WITH_SPEC" ]]; then
   W_PROVIDER="$WITH_PROVIDER"
   W_ROLE="$WITH_ROLE"
-  W_PANE="$(tmux new-window -t "$SESSION" -n "$W_ROLE" -c "$WORKDIR" -P -F '#{pane_id}')"
+  W_WORKDIR="$WORKDIR"
+  if [[ "$WITH_ISOLATED" == "1" ]]; then
+    W_WORKDIR="$(reg_create_worktree "$W_ROLE" "$WORKDIR" "$SESSION")"
+    reg_write_worktree_record "$WORKDIR" "$W_ROLE" "$W_WORKDIR" "$(reg_worktree_branch "$W_ROLE")"
+  fi
+  W_WORKDIR_Q="$(shell_quote "$W_WORKDIR")"
+  W_PANE="$(tmux new-window -t "$SESSION" -n "$W_ROLE" -c "$W_WORKDIR" -P -F '#{pane_id}')"
   tmux set-option -p -t "$W_PANE" @agent_id "$W_ROLE"
   tmux set-option -p -t "$W_PANE" @agent_role "$W_ROLE"
   tmux set-option -p -t "$W_PANE" @agent_provider "$W_PROVIDER"
+  if [[ "$WITH_ISOLATED" == "1" ]]; then
+    tmux set-option -p -t "$W_PANE" @agent_worktree "$W_WORKDIR"
+  fi
   W_SETTINGS="$(bash "$APPROVAL_BROKER" install \
     --agent-id "$W_ROLE" \
     --provider "$W_PROVIDER" \
     --hook "$APPROVAL_HOOK" \
     --root "$WORKDIR" \
-    --worktree "$WORKDIR")"
+    --worktree "$W_WORKDIR")"
   W_LAUNCH="$(reg_provider_launch_cmd "$W_PROVIDER" "$INSTR")"
   if [[ "$W_PROVIDER" == "claude" ]]; then
     W_LAUNCH="$W_LAUNCH --settings $(shell_quote "$W_SETTINGS")"
@@ -271,7 +297,7 @@ if [[ -n "$WITH_SPEC" ]]; then
   APPROVAL_HOOK_Q="$(shell_quote "$APPROVAL_HOOK")"
   W_SETTINGS_Q="$(shell_quote "$W_SETTINGS")"
   tmux send-keys -t "$W_PANE" \
-    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_WORKTREE=$WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
+    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
   # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效(等价 peer add)。
   # 必须覆盖同一 workdir 旧 session 可能残留的 fresh ready marker,否则硬门会误放行未信任的新 worker。
   bash "$APPROVAL_BROKER" mark --agent-id "$W_ROLE" --status unverified --root "$WORKDIR" >/dev/null 2>&1 || true
