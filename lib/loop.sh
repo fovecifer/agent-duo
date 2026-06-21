@@ -118,8 +118,9 @@ EOF
 )"
   case "$type" in
     blocked|request|loop_stop) printf '10' ;;
+    direction_drift)    printf '12' ;;
     validation_fail)     printf '15' ;;
-    result)              printf '20' ;;
+    result|detail_trap)  printf '20' ;;
     stuck|dead)          printf '30' ;;
     budget_low)          printf '40' ;;
     silent)              printf '50' ;;
@@ -387,6 +388,18 @@ ad_loop_safe_validation_id() {
   printf '%s' "${1:-validation}" | sed 's/[^A-Za-z0-9._-]/_/g'
 }
 
+ad_loop_one_line() {
+  local s="${1:-}"
+  s="${s//$'\r'/ }"
+  s="${s//$'\n'/ }"
+  s="${s//$'\t'/ }"
+  if (( ${#s} > 200 )); then
+    printf '%s…' "${s:0:200}"
+  else
+    printf '%s' "$s"
+  fi
+}
+
 ad_loop_report_round() { # <report_path>
   local round
   round="$(jq -r '.round // 0' "$1" 2>/dev/null || true)"
@@ -398,6 +411,10 @@ ad_loop_report_round() { # <report_path>
 
 ad_loop_report_status() { # <report_path>
   jq -r '.status // "unknown"' "$1" 2>/dev/null || printf 'unknown'
+}
+
+ad_loop_round_report_path() { # <root> <agent_id> <round>
+  printf '%s/%s/r%s.json' "$(ad_loop_state_dir "$1")" "$2" "$3"
 }
 
 ad_loop_report_ref() { # <root> <agent_id> <round>
@@ -671,6 +688,66 @@ EOF
   printf '%s' "$status"
 }
 
+ad_loop_detail_trap_rounds() { # <contract_path>
+  local contract="$1" value
+  value="$(jq -r 'if has("detail_trap_rounds") then (.detail_trap_rounds | tostring) else "" end' "$contract" 2>/dev/null || printf '')"
+  if [[ -z "$value" ]]; then
+    printf '3'
+    return 0
+  fi
+  if ! ad_loop_is_nonnegative_int "$value" || [[ "$value" == "0" ]]; then
+    echo "警告: ${contract} detail_trap_rounds 无效,按默认 3 处理。" >&2
+    printf '3'
+    return 0
+  fi
+  printf '%s' "$value"
+}
+
+ad_loop_delta_is_empty() { # <report_path>
+  local delta
+  delta="$(jq -r '.delta // ""' "$1" 2>/dev/null)" || return 1
+  [[ ! "$delta" =~ [^[:space:]] ]]
+}
+
+ad_loop_eval_direction() { # <root> <agent> <contract_path> <current_round> <rounds_used> <report_path>
+  local root="$1" agent="$2" contract="$3" current_round="$4" rounds_used="$5" report="$6"
+  local drift event_id ref summary n start i file empty_streak
+
+  drift="$(jq -r '.drift // ""' "$report" 2>/dev/null || printf '')"
+  if [[ "$drift" =~ [^[:space:]] ]]; then
+    event_id="drift-${agent}-${current_round}"
+    ref="$(ad_loop_report_ref "$root" "$agent" "$current_round")"
+    summary="direction drift: $(ad_loop_one_line "$drift")"
+    if ! ad_loop_event_id_seen "$root" "$event_id"; then
+      ad_loop_append_event_with_id "$root" "$event_id" "$agent" direction_drift "$current_round" "$summary" "$ref" || true
+    fi
+  fi
+
+  n="$(ad_loop_detail_trap_rounds "$contract")"
+  if ! ad_loop_is_nonnegative_int "$n" || [[ "$n" == "0" ]]; then
+    n="3"
+  fi
+  (( rounds_used >= n )) || return 0
+  start="$(( current_round - n + 1 ))"
+  empty_streak=true
+  i="$start"
+  while (( i <= current_round )); do
+    file="$(ad_loop_round_report_path "$root" "$agent" "$i")"
+    if [[ ! -f "$file" ]] || ! ad_loop_delta_is_empty "$file"; then
+      empty_streak=false
+      break
+    fi
+    i="$(( i + 1 ))"
+  done
+  [[ "$empty_streak" == "true" ]] || return 0
+  event_id="detailtrap-${agent}-${current_round}"
+  ref="$(ad_loop_report_ref "$root" "$agent" "$current_round")"
+  summary="detail trap: delta empty for ${n} rounds (r${start}-r${current_round})"
+  if ! ad_loop_event_id_seen "$root" "$event_id"; then
+    ad_loop_append_event_with_id "$root" "$event_id" "$agent" detail_trap "$current_round" "$summary" "$ref" || true
+  fi
+}
+
 ad_loop_eval_contracts() { # <root> <session>
   local root="$1" session="${2:-}" agent contract parsed status max_rounds frozen_round on_terminal
   local report current_round report_status rounds_used reason validation_count validation_status
@@ -708,6 +785,10 @@ EOF
     current_round="$(ad_loop_report_round "$report")"
     report_status="$(ad_loop_report_status "$report")"
     rounds_used="$(( current_round - frozen_round + 1 ))"
+    if (( current_round > 0 && rounds_used > 0 && rounds_used < max_rounds )) \
+       && [[ "$report_status" != "done" && "$report_status" != "failed" ]]; then
+      ad_loop_eval_direction "$root" "$agent" "$contract" "$current_round" "$rounds_used" "$report"
+    fi
     validation_count="$(jq -r '(.validation // []) | length' <<EOF
 $parsed
 EOF

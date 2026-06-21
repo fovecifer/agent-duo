@@ -21,9 +21,11 @@
 - `peer rm <id>` — 移除一个队友 tab
 - `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>`
   — supervisor 初始化/查看 worker 的持久化 `task.json` 步骤账本;worker 解阻后按 next 从 `blocked` 或下一个 `pending` 步续跑
-- `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"]` / `peer loop <id>`
+- `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"] [--detail-trap-rounds N]` / `peer loop <id>`
   — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并在配置 validation 时用客观验收结果门控 `done`
 - `peer ask <id> "消息"` — supervisor 原子下发一条 loop-gated 消息,等待 worker 下一轮结构化 report,再只读取这轮新结果
+- `peer checkpoint <id> [--json]` — supervisor 只读汇总 worker 的 loop、最近 report、task 与 validation 状态,用于判断继续/纠偏/停止
+- `peer reframe <id> "消息" [--force]` — supervisor 向 worker 下发方向纠偏(`verb=reframe`),并写入 `checkpoints.jsonl` 审计
 - `peer report --type request --status blocked --needs decision --needs-detail "..." --needs-option "..."`
   — worker 需要人类做业务/部署/成本/网络等判断时,写结构化阻塞报告并打开 Human Decision Gate
 - `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...`
@@ -32,7 +34,7 @@
 
 ### 使用规则
 
-1. **仅在用户明确要求时**才向对方发送指令(`peer tell` / `peer ask` / `peer esc`)或改变团队
+1. **仅在用户明确要求时**才向对方发送指令(`peer tell` / `peer ask` / `peer reframe` / `peer esc`)或改变团队
    编制(`peer add` / `peer rm`);`peer peek` / `peer ls` 用于查看状态,可在用户
    询问时主动使用。
 2. 典型流程:`peer tell "..."` → `peer wait` → `peer peek 120`,

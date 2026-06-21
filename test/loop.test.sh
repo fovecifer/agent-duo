@@ -93,12 +93,16 @@ write_event() { # <id> <agent> <type> <round> <summary> <ref>
 }
 
 write_report() { # <agent> <round> <status>
-  local agent="$1" round="$2" status="$3" state
+  write_report_with_direction "$1" "$2" "$3" "" ""
+}
+
+write_report_with_direction() { # <agent> <round> <status> <delta> <drift>
+  local agent="$1" round="$2" status="$3" delta="$4" drift="$5" state
   state="$PROJECT/.agent-duo/state/$agent"
   mkdir -p "$state"
   jq -cn \
-    --argjson round "$round" --arg agent "$agent" --arg status "$status" \
-    '{protocol:"1",round:$round,agent_id:$agent,role:"worker",type:"checkpoint",status:$status,delta:"",next:"",needs:[]}' \
+    --argjson round "$round" --arg agent "$agent" --arg status "$status" --arg delta "$delta" --arg drift "$drift" \
+    '{protocol:"1",round:$round,agent_id:$agent,role:"worker",type:"checkpoint",status:$status,delta:$delta,drift:(if $drift == "" then null else $drift end),next:"",needs:[]}' \
     > "$state/r${round}.json"
   rm -f "$state/report.json"
   ln -s "r${round}.json" "$state/report.json"
@@ -271,6 +275,138 @@ write_loop_contract worker 3 1
 assert_ok "loop eval: no-report contract stays quiet" run_loopd_once
 assert_not_contains "loop eval: no-report no silent" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"silent"'
 assert_contains "loop eval: no-report dashboard loop" "$(cat "$OUT")" 'loop=0/3 active'
+teardown
+
+# direction_drift:worker 自报 drift 时追加高优先方向事件,同轮幂等。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "progress" "碰 non_goal: 不改 auth"
+write_loop_contract worker 3 1
+assert_ok "direction drift: emits event" run_loopd_once
+queue="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "direction drift: event type" "$queue" '"type":"direction_drift"'
+assert_contains "direction drift: deterministic id" "$queue" '"id":"drift-worker-1"'
+assert_contains "direction drift: summary" "$queue" '"summary":"direction drift: 碰 non_goal: 不改 auth"'
+assert_ok "direction drift: idempotent second run" run_loopd_once
+drift_count="$(grep -c '"id":"drift-worker-1"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "direction drift: still once" "$drift_count" "1"
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "progress" ""
+write_loop_contract worker 3 1
+assert_ok "direction drift: null drift no event" run_loopd_once
+assert_not_contains "direction drift: null suppresses" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"direction_drift"'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+long_drift=$'line1\nline2\t'
+long_drift="${long_drift}$(printf '%0205d' 0 | tr '0' x)"
+write_report_with_direction worker 1 in_progress "progress" "$long_drift"
+write_loop_contract worker 3 1
+assert_ok "direction drift: long one-line succeeds" run_loopd_once
+summary="$(jq -r 'select(.type == "direction_drift") | .summary' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "direction drift: newline replaced" "$summary" 'line1 line2 '
+assert_not_contains "direction drift: no newline in summary" "$summary" $'\n'
+assert_not_contains "direction drift: no tab in summary" "$summary" $'\t'
+assert_contains "direction drift: truncated with ellipsis" "$summary" '…'
+summary_chars="$(printf '%s' "$summary" | wc -m | tr -d ' ')"
+assert_ok "direction drift: summary capped" test "$summary_chars" -le 218
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "progress" "drift while stopped"
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+jq -cn '{protocol:"1",agent_id:"worker",mission:"m",non_goals:[],success_signals:[],validation:[],max_rounds:3,frozen_at_round:1,status:"stopped",stop:{on_terminal:true,reason:"max_rounds",stopped_at_round:1,stopped_at:"2026-06-21T00:00:00Z"}}' \
+  > "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_ok "direction drift: stopped contract skipped" run_loopd_once
+assert_not_contains "direction drift: stopped no event" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"direction_drift"'
+teardown
+
+# detail_trap:连续 N 轮 delta 为空时追加方向事件;缺轮/非空 delta/轮次不足都保守不报。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "" ""
+write_report_with_direction worker 2 in_progress "" ""
+write_report_with_direction worker 3 in_progress "" ""
+write_loop_contract worker 5 1
+assert_ok "detail trap: emits event" run_loopd_once
+queue="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "detail trap: event type" "$queue" '"type":"detail_trap"'
+assert_contains "detail trap: deterministic id" "$queue" '"id":"detailtrap-worker-3"'
+assert_contains "detail trap: summary" "$queue" '"summary":"detail trap: delta empty for 3 rounds (r1-r3)"'
+assert_ok "detail trap: idempotent second run" run_loopd_once
+trap_count="$(grep -c '"id":"detailtrap-worker-3"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "detail trap: still once" "$trap_count" "1"
+write_report_with_direction worker 4 in_progress "" ""
+assert_ok "detail trap: continuing emits next round" run_loopd_once
+assert_contains "detail trap: next deterministic id" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"id":"detailtrap-worker-4"'
+trap_count="$(grep -c '"type":"detail_trap"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "detail trap: continuing count" "$trap_count" "2"
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "" ""
+write_report_with_direction worker 2 in_progress "made progress" ""
+write_report_with_direction worker 3 in_progress "" ""
+write_loop_contract worker 5 1
+assert_ok "detail trap: nonempty delta suppresses" run_loopd_once
+assert_not_contains "detail trap: no event with progress" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"detail_trap"'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "" ""
+write_report_with_direction worker 2 in_progress "" ""
+write_loop_contract worker 5 1
+assert_ok "detail trap: insufficient rounds suppresses" run_loopd_once
+assert_not_contains "detail trap: no event before N" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"detail_trap"'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "" ""
+write_report_with_direction worker 3 in_progress "" ""
+write_loop_contract worker 5 1
+assert_ok "detail trap: missing report suppresses" run_loopd_once
+assert_not_contains "detail trap: missing window no event" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"detail_trap"'
+teardown
+
+# 本轮会停止 loop 时跳过 direction 检测,只保留 loop_stop。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 failed "failed" "drift on failed"
+write_loop_contract worker 5 1
+assert_ok "direction stop suppress: failed" run_loopd_once
+queue="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "direction stop suppress: failed loop stop" "$queue" '"type":"loop_stop"'
+assert_not_contains "direction stop suppress: failed no drift" "$queue" '"type":"direction_drift"'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 done "done" "drift on done"
+write_loop_contract worker 5 1
+assert_ok "direction stop suppress: done" run_loopd_once
+queue="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "direction stop suppress: done loop stop" "$queue" 'loop stopped: done'
+assert_not_contains "direction stop suppress: done no drift" "$queue" '"type":"direction_drift"'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report_with_direction worker 1 in_progress "" ""
+write_report_with_direction worker 2 in_progress "" ""
+write_report_with_direction worker 3 in_progress "" ""
+write_loop_contract worker 3 1
+assert_ok "direction stop suppress: max rounds" run_loopd_once
+queue="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "direction stop suppress: max loop stop" "$queue" 'loop stopped: max_rounds'
+assert_not_contains "direction stop suppress: max no trap" "$queue" '"type":"detail_trap"'
 teardown
 
 # loop evaluator:max_rounds 是相对预算,到界后 stopped(max_rounds) 且只追加一条 loop_stop。

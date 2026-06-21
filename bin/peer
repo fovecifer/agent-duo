@@ -28,9 +28,14 @@
 #   peer loop [<id>]        查看某 agent 的 loop.json 契约与当前预算
 #   peer loop init [<id>] --mission "..." --max-rounds N [--non-goal "..."] [--success "..."] [--round N]
 #                  [--validation id:"cmd"] [--validation-satisfies id:"signal"] [--validation-timeout id:N]
+#                  [--detail-trap-rounds N]
 #                           初始化/冻结某 agent 的 supervisor loop 契约
 #   peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
 #                           原子 tell + 等待 target 写出新 report,并打印该 report 摘要
+#   peer reframe [<id>] "消息" [--force]
+#                           发送方向纠偏指令,并写 checkpoints.jsonl 审计
+#   peer checkpoint [<id>] [--json]
+#                           只读聚合 loop/report/task/validation 方向摘要
 #   peer approvals          列出待审批的 Approval Broker 请求
 #   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
 #   peer deny <id> [--reason "..."]
@@ -626,8 +631,8 @@ build_validation_json() {
   printf ']'
 }
 
-write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json>
-  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" validation_json="$8" now
+write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json> <detail_trap_rounds>
+  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" validation_json="$8" detail_trap_rounds="$9" now
   now="$(iso_ts)"
   {
     printf '{"protocol":"1",'
@@ -636,6 +641,7 @@ write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <n
     printf '"non_goals":%s,' "$non_goals_json"
     printf '"success_signals":%s,' "$success_json"
     printf '"validation":%s,' "$validation_json"
+    printf '"detail_trap_rounds":%s,' "$detail_trap_rounds"
     printf '"max_rounds":%s,' "$max_rounds"
     printf '"frozen_at_round":%s,' "$frozen_round"
     printf '"status":"active",'
@@ -646,8 +652,8 @@ write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <n
   } > "$path"
 }
 
-loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json>
-  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6" validation_json="$7"
+loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json> <detail_trap_rounds>
+  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6" validation_json="$7" detail_trap_rounds="$8"
   local loop_file loop_dir tmp
   if [[ -z "$mission" ]]; then
     echo "错误: peer loop init 需要 --mission。" >&2
@@ -661,6 +667,10 @@ loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json
     echo "错误: --round 必须是正整数。" >&2
     return 1
   fi
+  if ! is_positive_int "$detail_trap_rounds"; then
+    echo "错误: --detail-trap-rounds 必须是正整数。" >&2
+    return 1
+  fi
   loop_file="$(loop_file_for_id "$agent_id")"
   loop_dir="${loop_file%/*}"
   mkdir -p "$loop_dir"
@@ -669,7 +679,7 @@ loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json
     return 1
   fi
   tmp="$loop_dir/.loop.json.$$"
-  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json" "$validation_json"; then
+  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json" "$validation_json" "$detail_trap_rounds"; then
     rm -f "$tmp"
     return 1
   fi
@@ -693,6 +703,7 @@ loop_print() { # <agent_id>
       "ROUND\t\($current_round)",
       "FROZEN_AT_ROUND\t\($frozen)",
       "MAX_ROUNDS\t\($max)",
+      "DETAIL_TRAP_ROUNDS\t\(.detail_trap_rounds // 3)",
       "ROUNDS_USED\t\($used)",
       "REMAINING\t\($max - $used)",
       "STOP_REASON\t\(.stop.reason // "")",
@@ -702,8 +713,8 @@ loop_print() { # <agent_id>
   ' "$loop_file"
 }
 
-loop_guard_ask() { # <agent_id>
-  local agent_id="$1" loop_file loop_json status reason max_rounds frozen_round current_round rounds_used
+loop_guard_command() { # <agent_id> <command_name>
+  local agent_id="$1" command_name="${2:-ask}" loop_file loop_json status reason max_rounds frozen_round current_round rounds_used
   loop_file="$(loop_file_for_id "$agent_id")"
   [[ -e "$loop_file" ]] || return 0
   if ! loop_json="$(jq -c '.' "$loop_file" 2>/dev/null)"; then
@@ -728,7 +739,7 @@ $loop_json
 EOF
 )"
     echo "错误: worker '$agent_id' 的 loop 已到界(reason=$reason),已拒绝继续派发。" >&2
-    echo "      经人确认后用 'peer ask --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
+    echo "      经人确认后用 'peer $command_name --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
     return 1
   fi
   if ! is_positive_int "$max_rounds" || ! is_positive_int "$frozen_round"; then
@@ -739,9 +750,17 @@ EOF
   rounds_used="$(( current_round - frozen_round + 1 ))"
   if (( rounds_used > 0 && rounds_used >= max_rounds )); then
     echo "错误: worker '$agent_id' 的 loop 已到界(reason=max_rounds, ${rounds_used}/${max_rounds}),已拒绝继续派发。" >&2
-    echo "      经人确认后用 'peer ask --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
+    echo "      经人确认后用 'peer $command_name --force $agent_id \"...\"' 越界,或后续用 peer loop reset(待实现)。" >&2
     return 1
   fi
+}
+
+loop_guard_ask() { # <agent_id>
+  loop_guard_command "$1" "ask"
+}
+
+loop_guard_reframe() { # <agent_id>
+  loop_guard_command "$1" "reframe"
 }
 
 report_summary_from_file() { # <report_file>
@@ -787,8 +806,8 @@ ask_print_report() { # <agent_id> <round>
   printf 'REF\t%s\n' "$ref"
 }
 
-check_target_dispatch_allowed() { # <target_id> <target_pane>
-  local target_id="$1" target="$2" gate_role bg_out bg_status
+check_target_dispatch_allowed() { # <target_id> <target_pane> [command_name]
+  local target_id="$1" target="$2" command_name="${3:-tell}" gate_role bg_out bg_status
   # Broker 硬门:发给工作型角色(非 supervisor/daemon/loopd)时,broker 必须 fresh ready,否则拒发
   # (fail-closed)。worker/reviewer/自定义工作角色都受保护,与 lib/loop.sh 的 active-worker 模型一致。
   # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
@@ -801,7 +820,7 @@ check_target_dispatch_allowed() { # <target_id> <target_pane>
       *)
         bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
         echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-        echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer tell --force $target_id ...' 强制发送。" >&2
+        echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer $command_name --force $target_id ...' 强制发送。" >&2
         return 1
         ;;
     esac
@@ -910,6 +929,183 @@ gates_dir() {
 
 logs_dir() {
   printf '%s/logs' "$AGENT_DUO_DIR"
+}
+
+validation_file_for_round() { # <agent_id> <round>
+  printf '%s/state/%s/validation-r%s.json' "$AGENT_DUO_DIR" "$1" "$2"
+}
+
+checkpoints_log_file() {
+  printf '%s/checkpoints.jsonl' "$(logs_dir)"
+}
+
+append_checkpoint_log() { # <agent_id> <round> <message>
+  local agent_id="$1" round_s="$2" message="$3" line
+  mkdir -p "$(logs_dir)"
+  line="$(
+    printf '{"ts":'; json_str "$(iso_ts)"
+    printf ',"type":"reframe"'
+    printf ',"agent":'; json_str "$agent_id"
+    printf ',"by":'; json_str "$ME"
+    printf ',"round":%s' "$round_s"
+    printf ',"message":'; json_str "$message"
+    printf '}'
+  )"
+  printf '%s\n' "$line" >> "$(checkpoints_log_file)"
+}
+
+checkpoint_detail_trap_rounds() { # <agent_id>
+  local loop_file value
+  loop_file="$(loop_file_for_id "$1")"
+  value="3"
+  if [[ -f "$loop_file" ]]; then
+    value="$(jq -r '.detail_trap_rounds // 3' "$loop_file" 2>/dev/null || printf '3')"
+  fi
+  if ! is_positive_int "$value"; then
+    value="3"
+  fi
+  printf '%s' "$value"
+}
+
+checkpoint_loop_json() { # <agent_id> <current_round>
+  local agent_id="$1" current_round="$2" loop_file
+  loop_file="$(loop_file_for_id "$agent_id")"
+  if [[ ! -f "$loop_file" ]]; then
+    printf 'null'
+    return 0
+  fi
+  jq -c --argjson current_round "$current_round" '
+    (.frozen_at_round // 1) as $frozen
+    | (.max_rounds // 0) as $max
+    | (if $current_round > 0 then ($current_round - $frozen + 1) else 0 end) as $used
+    | {
+        mission:(.mission // ""),
+        non_goals:(.non_goals // []),
+        success_signals:(.success_signals // []),
+        status:(.status // "active"),
+        max_rounds:$max,
+        frozen_at_round:$frozen,
+        detail_trap_rounds:(.detail_trap_rounds // 3),
+        current_round:$current_round,
+        rounds_used:$used,
+        remaining:($max - $used),
+        stop_reason:(.stop.reason // null)
+      }
+  ' "$loop_file" 2>/dev/null || printf 'null'
+}
+
+checkpoint_recent_json() { # <agent_id> <current_round>
+  local agent_id="$1" current_round="$2" n start i file item first
+  n="$(checkpoint_detail_trap_rounds "$agent_id")"
+  if ! is_positive_int "$current_round" || [[ "$current_round" == "0" ]]; then
+    printf '[]'
+    return 0
+  fi
+  start="$(( current_round - n + 1 ))"
+  if (( start < 1 )); then start=1; fi
+  printf '['
+  first=1
+  i="$start"
+  while (( i <= current_round )); do
+    file="$(report_file_for_round "$agent_id" "$i")"
+    if [[ -f "$file" ]]; then
+      item="$(jq -c '{round:(.round // 0),status:(.status // "unknown"),delta:(.delta // ""),drift:(.drift // null)}' "$file" 2>/dev/null || true)"
+      if [[ -n "$item" ]]; then
+        if [[ $first -eq 1 ]]; then first=0; else printf ','; fi
+        printf '%s' "$item"
+      fi
+    fi
+    i="$(( i + 1 ))"
+  done
+  printf ']'
+}
+
+checkpoint_steps_json() { # <agent_id>
+  local task_file
+  task_file="$(task_file_for_id "$1")"
+  if [[ ! -f "$task_file" ]]; then
+    printf 'null'
+    return 0
+  fi
+  jq -c '
+    (.steps // []) as $steps
+    | {
+        task:(.task // ""),
+        current_step:(.current_step // null),
+        counts:{
+          done:($steps | map(select(((.status // "pending") == "done") or ((.status // "pending") == "kept"))) | length),
+          in_progress:($steps | map(select((.status // "pending") == "in_progress")) | length),
+          blocked:($steps | map(select((.status // "pending") == "blocked")) | length),
+          pending:($steps | map(select((.status // "pending") == "pending")) | length),
+          failed:($steps | map(select((.status // "pending") == "failed")) | length)
+        }
+      }
+  ' "$task_file" 2>/dev/null || printf 'null'
+}
+
+checkpoint_validation_json() { # <agent_id> <current_round>
+  local agent_id="$1" current_round="$2" validation_file
+  if ! is_positive_int "$current_round" || [[ "$current_round" == "0" ]]; then
+    printf 'null'
+    return 0
+  fi
+  validation_file="$(validation_file_for_round "$agent_id" "$current_round")"
+  if [[ ! -f "$validation_file" ]]; then
+    printf 'null'
+    return 0
+  fi
+  jq -c '{round:(.round // 0),status:(.status // "unknown"),missing_signals:(.missing_signals // []),failed_validations:(.failed_validations // [])}' \
+    "$validation_file" 2>/dev/null || printf 'null'
+}
+
+checkpoint_json() { # <agent_id>
+  local agent_id="$1" current_round loop_json recent_json steps_json validation_json
+  current_round="$(report_round_for_id "$agent_id")"
+  loop_json="$(checkpoint_loop_json "$agent_id" "$current_round")"
+  recent_json="$(checkpoint_recent_json "$agent_id" "$current_round")"
+  steps_json="$(checkpoint_steps_json "$agent_id")"
+  validation_json="$(checkpoint_validation_json "$agent_id" "$current_round")"
+  jq -cn \
+    --arg agent "$agent_id" \
+    --argjson round "$current_round" \
+    --argjson loop "$loop_json" \
+    --argjson recent "$recent_json" \
+    --argjson steps "$steps_json" \
+    --argjson validation "$validation_json" '
+      {agent:$agent, round:$round, recent:$recent}
+      | if $loop == null then . else . + {loop:$loop} end
+      | if $steps == null then . else . + {steps:$steps} end
+      | if $validation == null then . else . + {validation:$validation} end
+    '
+}
+
+checkpoint_print() { # <agent_id>
+  local json
+  json="$(checkpoint_json "$1")"
+  jq -r '
+    def clean: if . == null then "" else tostring | gsub("[\r\n\t]"; " ") end;
+    def drift_text:
+      (.drift | clean) as $d
+      | if $d == "" then "-" else "\"" + $d + "\"" end;
+    [
+      ("CHECKPOINT\t\(.agent) @ r\(.round) " +
+        (if .loop? then "(loop \(.loop.status), used \(.loop.rounds_used)/\(.loop.max_rounds))" else "(loop none)" end)),
+      (if .loop? then "MISSION\t\(.loop.mission // "")" else empty end),
+      (if .loop? then "NON_GOALS\t\((.loop.non_goals // []) | join("; "))" else empty end),
+      (if .loop? then "SUCCESS_SIGNALS\t\((.loop.success_signals // []) | join("; "))" else empty end),
+      (.recent[]? | "RECENT\tr\(.round) \(.status) delta=\"\(.delta | clean)\" drift=\(drift_text)"),
+      (if .steps? then
+        "STEPS\t\(.steps.counts.done) done, \(.steps.counts.in_progress) in_progress, \(.steps.counts.blocked) blocked, \(.steps.counts.pending) pending, \(.steps.counts.failed) failed (current: \(.steps.current_step // "-"))"
+       else empty end),
+      (if .validation? then
+        "VALIDATION\tr\(.validation.round) \(.validation.status)" +
+        (if ((.validation.missing_signals // []) | length) > 0 then " - missing: \((.validation.missing_signals // []) | join("; "))" else "" end) +
+        (if ((.validation.failed_validations // []) | length) > 0 then " - failed: \((.validation.failed_validations // []) | join("; "))" else "" end)
+       else empty end)
+    ] | .[]
+  ' <<EOF
+$json
+EOF
 }
 
 gate_path() { # <gate_id>
@@ -1388,7 +1584,7 @@ case "$cmd" in
     else
       target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
     fi
-    check_target_dispatch_allowed "$target_id" "$target"
+    check_target_dispatch_allowed "$target_id" "$target" "tell"
     buf="peer-${ME}2${target_id}"
     if [[ $# -gt 0 ]]; then
       printf '%s' "$*" | tmux load-buffer -b "$buf" -
@@ -1458,7 +1654,7 @@ case "$cmd" in
       loop_guard_ask "$target_id"
     fi
     pre_round="$(report_round_for_id "$target_id")"
-    check_target_dispatch_allowed "$target_id" "$target"
+    check_target_dispatch_allowed "$target_id" "$target" "ask"
     buf="peer-${ME}2${target_id}-ask"
     send_text_to_pane "$target" "$buf" "${ask_parts[*]}"
 
@@ -1477,6 +1673,95 @@ case "$cmd" in
     capture "$target" 80 >&2 || true
     echo "===== 目标末屏结束 =====" >&2
     exit 2
+    ;;
+
+  reframe)
+    ensure_session
+    maybe_id=""
+    reframe_parts=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --force)
+          FORCE_SEND=1
+          shift
+          ;;
+        --)
+          shift
+          while [[ $# -gt 0 ]]; do reframe_parts+=("$1"); shift; done
+          ;;
+        *)
+          if [[ -z "$maybe_id" && ${#reframe_parts[@]} -eq 0 ]] && agent_ids | grep -qx "$1"; then
+            maybe_id="$1"
+          else
+            reframe_parts+=("$1")
+          fi
+          shift
+          ;;
+      esac
+    done
+    if [[ ${#reframe_parts[@]} -eq 0 ]]; then
+      echo "用法: peer reframe [<id>] \"消息\" [--force]" >&2
+      exit 1
+    fi
+    reframe_message="${reframe_parts[*]}"
+    if [[ ! "$reframe_message" =~ [^[:space:]] ]]; then
+      echo "错误: peer reframe 需要非空消息。" >&2
+      exit 1
+    fi
+    target="$(resolve_target_pane "$maybe_id")"
+    if [[ -n "$maybe_id" ]]; then
+      target_id="$maybe_id"
+    else
+      target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+    fi
+    if [[ "${FORCE_SEND:-0}" != "1" ]]; then
+      loop_guard_reframe "$target_id"
+    fi
+    check_target_dispatch_allowed "$target_id" "$target" "reframe"
+    target_round="$(report_round_for_id "$target_id")"
+    buf="peer-${ME}2${target_id}-reframe"
+    send_text_to_pane "$target" "$buf" "«AGENTDUO verb=reframe»"$'\n'"$reframe_message"
+    append_checkpoint_log "$target_id" "$target_round" "$reframe_message"
+    echo "已发送 reframe 给 '$target_id'。"
+    ;;
+
+  checkpoint)
+    ensure_session
+    maybe_id=""
+    checkpoint_json_mode=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json)
+          checkpoint_json_mode=1
+          shift
+          ;;
+        *)
+          if [[ -z "$maybe_id" ]]; then
+            maybe_id="$1"
+            shift
+          else
+            echo "用法: peer checkpoint [<id>] [--json]" >&2
+            exit 1
+          fi
+          ;;
+      esac
+    done
+    target="$(resolve_target_pane "$maybe_id")"
+    : "${target:-}"
+    if [[ -n "$maybe_id" ]]; then
+      target_id="$maybe_id"
+    else
+      target_id="$(reg_pick_other "$ME" "$(agent_ids)")"
+    fi
+    if [[ ! -e "$(loop_file_for_id "$target_id")" && ! -e "$AGENT_DUO_DIR/state/$target_id/report.json" ]]; then
+      echo "错误: '$target_id' 无可汇报的方向状态(loop.json/report.json 都不存在)。" >&2
+      exit 1
+    fi
+    if [[ "$checkpoint_json_mode" == "1" ]]; then
+      checkpoint_json "$target_id"
+    else
+      checkpoint_print "$target_id"
+    fi
     ;;
 
   wait)
@@ -1675,6 +1960,7 @@ case "$cmd" in
         loop_validations=()
         loop_validation_satisfies=()
         loop_validation_timeouts=()
+        loop_detail_trap_rounds="3"
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --mission)
@@ -1705,12 +1991,16 @@ case "$cmd" in
               loop_validation_timeouts+=("${2:-}")
               shift 2
               ;;
+            --detail-trap-rounds)
+              loop_detail_trap_rounds="${2:-}"
+              shift 2
+              ;;
             --round)
               loop_round="${2:-}"
               shift 2
               ;;
             *)
-              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N]" >&2
+              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
               exit 1
               ;;
           esac
@@ -1724,19 +2014,19 @@ case "$cmd" in
         if ! loop_validation_json="$(build_validation_json)"; then
           exit 1
         fi
-        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json" "$loop_validation_json"
+        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json" "$loop_validation_json" "$loop_detail_trap_rounds"
         echo "已初始化 loop.json: .agent-duo/state/$target_id/loop.json"
         ;;
       ""|--help|-h)
         if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
           exit 0
         fi
         loop_print "$ME"
         ;;
       *)
         if [[ -n "${2:-}" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
           exit 1
         fi
         loop_print "$subcmd"
