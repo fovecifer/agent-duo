@@ -25,7 +25,7 @@
 
 ## 工作原理
 
-一个 tmux 会话会先启动 supervisor tab 和可见的 `loopd` 看板。worker 可以用 `peer add` 按需创建，也可以用 `agent-duo-start --with codex:worker` 启动时直接带一个。iTerm2 的 tmux 原生集成（`tmux -CC`）把 tmux window 渲染成普通 tab，`peer` 命令则给每个 agent 一双"看对方屏幕"的眼睛和一只"往对方输入框打字"的手：
+一个 tmux 会话会先启动 supervisor tab 和可见的 `loopd` 看板。worker 可以用 `peer add` 按需创建，也可以用 `agent-duo-start --with codex:worker` 启动时直接带一个；需要代码隔离时用 `--worktree` / `:isolated` 让 worker 在自己的 git worktree 中编辑。iTerm2 的 tmux 原生集成（`tmux -CC`）把 tmux window 渲染成普通 tab，`peer` 命令则给每个 agent 一双"看对方屏幕"的眼睛和一只"往对方输入框打字"的手：
 
 ```mermaid
 flowchart TB
@@ -117,6 +117,7 @@ Claude Code 与 Codex CLI 仍需你自行安装并登录。
 ```bash
 cd ~/your-project
 agent-duo-start --with codex:worker
+agent-duo-start --with codex:worker:isolated
 tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 ```
 
@@ -125,7 +126,7 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 这一步由 iTerm2 决定;`agent-duo` 只负责创建 tmux window。
 
 不带 `--with` 时只创建 supervisor 和 loopd;之后可在 supervisor 里运行
-`peer add --provider codex --role worker` 按需创建 worker。
+`peer add --provider codex --role worker` 按需创建 worker。加 `--worktree` 会给 worker 单独的 checkout,但 `.agent-duo` 控制状态仍共享在主仓。
 
 之后正常在各个 tab 里分别和 Claude Code、Codex 对话。需要它们交互时,
 直接用自然语言指挥,例如:
@@ -150,6 +151,8 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 | `peer tell "消息"` | 发送单行消息并回车 |
 | `... \| peer tell` | 从 stdin 投递多行消息(buffer + bracketed paste,引号/换行安全) |
 | `peer wait [秒] [采样间隔] [连续稳定次数]` | 等待对方输出连续多次采样一致(默认最长 300s、间隔 5s、连续 2 次) |
+| `peer add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | 新建可见队友 tab;`--worktree` 让它在隔离 git worktree 中编辑,控制状态仍共享 |
+| `peer rm [--force] <id>` | 移除队友 tab;隔离 worktree 干净才删除,脏时保留,`--force` 可丢弃 |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | 创建并查看持久化 `task.json` 步骤账本,供解阻后幂等续跑 |
 | `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;可选 validation 异步门控 `done`,连续空 `delta` 会触发方向事件 |
 | `peer loop reset <id> [--max-rounds N]` | 在最新 report 轮次重新冻结 loop,清空停止状态,给 worker 一份新轮次预算 |

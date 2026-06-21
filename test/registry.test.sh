@@ -34,4 +34,26 @@ assert_eq "pick: the other" "$(reg_pick_other supervisor $'supervisor\nworker')"
 assert_exit_code "pick: none"      2 reg_pick_other lonely $'lonely'
 assert_exit_code "pick: ambiguous" 3 reg_pick_other supervisor $'supervisor\nworker\nreviewer'
 
+# worktree path:同 basename 但不同绝对路径的 repo 不应撞默认路径。
+WT_ROOT="$(mktemp -d)"
+REPO_A="$WT_ROOT/a/repo"
+REPO_B="$WT_ROOT/b/repo"
+mkdir -p "$REPO_A" "$REPO_B"
+path_a="$(reg_worktree_path "$REPO_A" agents worker)"
+path_b="$(reg_worktree_path "$REPO_B" agents worker)"
+if [[ "$path_a" != "$path_b" ]]; then
+  printf 'ok   worktree path: repo key prevents collisions\n'
+else
+  printf 'FAIL worktree path: [%s] unexpectedly equals [%s]\n' "$path_a" "$path_b"
+  ADK_FAIL=1
+fi
+case "$path_a" in
+  */.agent-duo-worktrees/repo-*/agents/worker) printf 'ok   worktree path: default shape\n' ;;
+  *)
+    printf 'FAIL worktree path: unexpected shape [%s]\n' "$path_a"
+    ADK_FAIL=1
+    ;;
+esac
+rm -rf "$WT_ROOT"
+
 exit "$ADK_FAIL"

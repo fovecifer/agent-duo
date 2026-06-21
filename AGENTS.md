@@ -18,6 +18,10 @@
 - `peer status` — 查看双方身份与窗口状态
 - `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>`
   — supervisor 初始化/查看 worker 的持久化 `task.json` 步骤账本;worker 解阻后按 next 从 `blocked` 或下一个 `pending` 步续跑
+- `peer add --provider claude|codex --role <role> [--id <id>] [--worktree]`
+  — supervisor 新建可见队友 tab;`--worktree` 让 worker 在隔离 git worktree 中编辑,控制状态仍写主仓 `.agent-duo`
+- `peer rm [--force] <id>`
+  — supervisor 移除队友 tab;隔离 worktree 干净才自动删除,脏时保留并提示,`--force` 可丢弃未提交改动
 - `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"] [--detail-trap-rounds N]` / `peer loop <id>`
   — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并在配置 validation 时用异步客观验收结果门控 `done`
 - `peer loop reset <id> [--max-rounds N]`

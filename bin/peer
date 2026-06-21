@@ -3,9 +3,9 @@
 #
 # 用法:
 #   peer ls                 列出本会话所有 agent(id / role / provider / pane)
-#   peer add --provider claude|codex --role <role> [--id <id>]
+#   peer add --provider claude|codex --role <role> [--id <id>] [--worktree]
 #                           新建并注册一个可见队友(新窗口),返回其 id
-#   peer rm <id>            移除一个队友(关闭其窗口)
+#   peer rm [--force] <id>  移除一个队友(关闭其窗口),并安全清理隔离 worktree
 #   peer peek [<id>] [行数]  查看某个 agent 终端最近 N 行输出(默认 80)
 #   peer tell [--force] [<id>] "消息"
 #                           发送单行消息到目标输入框并回车
@@ -1510,13 +1510,14 @@ case "$cmd" in
 
   add)
     ensure_session
-    provider=""; role=""; want_id=""
+    provider=""; role=""; want_id=""; use_worktree=0
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --provider) provider="${2:-}"; shift 2 ;;
         --role)     role="${2:-}"; shift 2 ;;
         --id)       want_id="${2:-}"; shift 2 ;;
-        *) echo "错误: 未知参数 '$1'。用法: peer add --provider claude|codex --role <role> [--id <id>]" >&2; exit 1 ;;
+        --worktree) use_worktree=1; shift ;;
+        *) echo "错误: 未知参数 '$1'。用法: peer add --provider claude|codex --role <role> [--id <id>] [--worktree]" >&2; exit 1 ;;
       esac
     done
     if ! reg_validate_provider "$provider"; then
@@ -1531,12 +1532,20 @@ case "$cmd" in
     elif agent_ids | grep -qx "$new_id"; then
       echo "错误: id '$new_id' 已被占用。" >&2; exit 1
     fi
+    agent_worktree="$PWD"
+    if [[ "$use_worktree" == "1" ]]; then
+      agent_worktree="$(reg_create_worktree "$new_id" "$AGENT_DUO_ROOT" "$SESSION")"
+      reg_write_worktree_record "$AGENT_DUO_ROOT" "$new_id" "$agent_worktree" "$(reg_worktree_branch "$new_id")"
+    fi
     # 新建 window(裸 shell),捕获 pane;按 start.sh 模式 send-keys 导出环境并启动 provider。
-    new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$PWD" -P -F '#{pane_id}')"
+    new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$agent_worktree" -P -F '#{pane_id}')"
     tmux set-option -p -t "$new_pane" @agent_id "$new_id"
     tmux set-option -p -t "$new_pane" @agent_role "$role"
     tmux set-option -p -t "$new_pane" @agent_provider "$provider"
-    approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$PWD")"
+    if [[ "$use_worktree" == "1" ]]; then
+      tmux set-option -p -t "$new_pane" @agent_worktree "$agent_worktree"
+    fi
+    approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$agent_worktree")"
     launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
     if [[ "$provider" == "claude" ]]; then
       launch="$launch --settings $(printf '%q' "$approval_settings")"
@@ -1548,7 +1557,7 @@ case "$cmd" in
     bin_dir="$(dirname "$PEER_SRC")"
     root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
     agent_q="$(printf '%q' "$new_id")"
-    worktree_q="$(printf '%q' "$PWD")"
+    worktree_q="$(printf '%q' "$agent_worktree")"
     hook_q="$(printf '%q' "$APPROVAL_HOOK")"
     settings_q="$(printf '%q' "$approval_settings")"
     tmux send-keys -t "$new_pane" \
@@ -2549,9 +2558,22 @@ case "$cmd" in
 
   rm)
     ensure_session
-    rm_id="${1:-}"
+    rm_id=""
+    rm_force="$FORCE_SEND"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --force) rm_force=1; shift ;;
+        *)
+          if [[ -n "$rm_id" ]]; then
+            echo "用法: peer rm [--force] <id>" >&2; exit 1
+          fi
+          rm_id="$1"
+          shift
+          ;;
+      esac
+    done
     if [[ -z "$rm_id" ]]; then
-      echo "用法: peer rm <id>" >&2; exit 1
+      echo "用法: peer rm [--force] <id>" >&2; exit 1
     fi
     if [[ "$rm_id" == "$ME" ]]; then
       echo "错误: 不能移除自己。" >&2; exit 1
@@ -2561,6 +2583,12 @@ case "$cmd" in
     fi
     tmux kill-window -t "$rm_pane"
     echo "已移除 agent '$rm_id'(pane=$rm_pane)。"
+    if ! reg_remove_worktree "$AGENT_DUO_ROOT" "$rm_id" "$rm_force"; then
+      rc="$?"
+      if [[ "$rc" != "2" ]]; then
+        exit "$rc"
+      fi
+    fi
     ;;
 
   esc)

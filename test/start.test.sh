@@ -39,6 +39,14 @@ STUB
   printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/codex"
   chmod +x "$STUB_BIN/claude" "$STUB_BIN/codex"
 }
+
+init_git_project() {
+  git -C "$PROJECT" init -q
+  printf 'hello\n' > "$PROJECT/README.md"
+  git -C "$PROJECT" add README.md
+  git -C "$PROJECT" -c user.name='Agent Duo Test' -c user.email='agent-duo@example.invalid' commit -m init -q
+}
+
 teardown() {
   if [[ -n "${SCENARIO_TMP:-}" && -d "$SCENARIO_TMP" && "$SCENARIO_TMP" != "/" ]]; then
     rm -rf "$SCENARIO_TMP"
@@ -178,6 +186,24 @@ assert_contains  "H: worker exports approval hook" "$(cat "$SENDLOG")" 'AGENT_DU
 assert_contains  "H: codex worker has pretool hook config" "$(cat "$SENDLOG")" 'hooks.PreToolUse'
 assert_contains  "H: codex worker has permission hook config" "$(cat "$SENDLOG")" 'hooks.PermissionRequest'
 assert_contains  "H: prints broker-check hint for new worker" "$(cat "$SCENARIO_TMP/out.txt")" 'peer broker-check worker'
+teardown
+
+# 场景 H-iso:--with codex:worker:isolated → worker 在隔离 worktree 中启动,控制面仍用主仓。
+setup
+init_git_project
+PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees" \
+  bash "$ROOT/start.sh" "$PROJECT" --with codex:worker:isolated \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
+record="$PROJECT/.agent-duo/state/worker/worktree.json"
+assert_ok        "H-iso: worktree record created" test -f "$record"
+wt_path="$(jq -r '.path' "$record")"
+assert_ok        "H-iso: worktree exists" test -d "$wt_path"
+assert_contains  "H-iso: branch recorded" "$(cat "$record")" '"branch":"agent-duo/worker"'
+assert_contains  "H-iso: worker window cwd" "$(cat "$SENDLOG")" "new-window -t adktest -n worker -c $wt_path"
+assert_contains  "H-iso: pane worktree option" "$(cat "$SENDLOG")" "@agent_worktree $wt_path"
+assert_contains  "H-iso: root stays main" "$(cat "$SENDLOG")" "AGENT_DUO_ROOT=$PROJECT"
+assert_contains  "H-iso: worker worktree env" "$(cat "$SENDLOG")" "AGENT_DUO_WORKTREE=$wt_path"
+assert_contains  "H-iso: broker scoped to worktree" "$(cat "$PROJECT/.agent-duo/state/worker/session-settings.json")" "\"worktree\":\"$wt_path\""
 teardown
 
 # 场景 H2(F1):--with 必须把新 worker 的 broker marker 重置为 unverified,覆盖同一 workdir

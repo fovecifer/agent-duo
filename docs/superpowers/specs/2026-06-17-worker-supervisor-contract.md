@@ -369,6 +369,7 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 |---|---|
 | 上行任意 Report（写文件 + sentinel） | `peer report --type … --status … [--step …] --file …` |
 | `peer wait` 等回合边界 | `peer wait <id> --round N`（等 sentinel） |
+| 创建 / 移除可见 worker | `peer add --provider <p> --role <role> [--id <id>] [--worktree]` / `peer rm [--force] <id>` |
 | 初始化 / 查看步骤账本 | `peer task init <id> --task … --step s1:…` / `peer task next <id>` |
 | 初始化 / 查看 / 重置 loop contract | `peer loop init <id> --mission … --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` / `peer loop reset <id> [--max-rounds N]` |
 | 原子下行并等待新 report | `peer ask <id> "..."`（loop-gated tell + poll report.json） |
