@@ -104,6 +104,10 @@ if [[ -n "$WITH_SPEC" ]]; then
     echo "错误: --with 必须指定非空 role,当前为 '$WITH_SPEC'。" >&2
     exit 1
   fi
+  if ! reg_is_role_token "$WITH_ROLE"; then
+    echo "错误: --with 的 role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头,当前为 '$WITH_ROLE'。" >&2
+    exit 1
+  fi
 fi
 
 if ! command -v tmux >/dev/null; then

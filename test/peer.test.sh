@@ -592,6 +592,29 @@ assert_contains "loop init validation default: timeout" "$loop_json" '"timeout_s
 assert_contains "loop init validation default: satisfies id" "$loop_json" '"satisfies":["go-test"]'
 teardown
 
+# loop:init review 写入 acceptance.reviews,role 允许点号,坏格式 fail-closed。
+setup
+assert_ok "loop init review: succeeds" run_peer loop init worker --mission "ship with review" --max-rounds 4 \
+  --review reviewer.v2:request_changes,reject --review evaluator:fail
+loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
+assert_contains "loop init review: role with dot" "$loop_json" '"role":"reviewer.v2"'
+assert_contains "loop init review: veto list" "$loop_json" '"veto_on":["request_changes","reject"]'
+assert_ok "loop init review: print succeeds" run_peer loop worker
+assert_contains "loop init review: print" "$(cat "$OUT")" $'ACCEPTANCE\treviewer.v2:request_changes,reject; evaluator:fail'
+teardown
+
+setup
+assert_not_ok "loop init review: bad role rejected" run_peer loop init worker --mission "ship" --max-rounds 4 --review '../reviewer:reject'
+assert_contains "loop init review: bad role error" "$(cat "$ERR")" '--review'
+assert_ok "loop init review: bad role no file" test ! -e "$PROJECT/.agent-duo/state/worker/loop.json"
+teardown
+
+setup
+assert_not_ok "loop init review: empty veto rejected" run_peer loop init worker --mission "ship" --max-rounds 4 --review reviewer:reject,
+assert_contains "loop init review: empty veto error" "$(cat "$ERR")" '空 verdict'
+assert_ok "loop init review: empty veto no file" test ! -e "$PROJECT/.agent-duo/state/worker/loop.json"
+teardown
+
 # loop:init 无 report 时 frozen_at_round 默认 1,且已存在/非法输入 fail-closed。
 setup
 assert_ok "loop init default no report: succeeds" run_peer loop init worker --mission "do work" --max-rounds 3
@@ -926,6 +949,73 @@ assert_contains "report: done without evidence downgraded" "$(cat "$PROJECT/.age
 assert_contains "report: downgraded sentinel status" "$(cat "$OUT")" 'status=unknown'
 teardown
 
+# report:reviewer verdict 写入自身 report,并路由到目标 worker reviews/。
+setup
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\treviewer\treviewer\tcodex\n%%3\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report verdict: succeeds" \
+  run_peer report --type result --status done --round 1 \
+    --verdict approve --target-ref worker@5 --finding blocking:"401/403 反了"
+reviewer_report="$(cat "$PROJECT/.agent-duo/state/reviewer/r1.json")"
+verdict_record="$(cat "$PROJECT/.agent-duo/state/worker/reviews/reviewer-r5.json")"
+assert_contains "report verdict: report verdict field" "$reviewer_report" '"verdict":"approve"'
+assert_contains "report verdict: report target ref" "$reviewer_report" '"target_ref":"worker@5"'
+assert_contains "report verdict: finding severity" "$reviewer_report" '"severity":"blocking"'
+assert_contains "report verdict: routed verdict" "$verdict_record" '"verdict":"approve"'
+assert_contains "report verdict: routed by" "$verdict_record" '"by":"reviewer"'
+assert_contains "report verdict: routed role" "$verdict_record" '"role":"reviewer"'
+assert_contains "report verdict: routed target round" "$verdict_record" '"target_round":5'
+teardown
+
+# report:verdict 相关耦合错误 fail-closed。
+setup
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: missing target ref rejected" \
+  run_peer report --type result --status done --round 1 --verdict approve
+assert_contains "report verdict: missing target ref error" "$(cat "$ERR")" '--verdict'
+assert_ok "report verdict: missing target writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+setup
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: target without verdict rejected" \
+  run_peer report --type result --status done --round 1 --target-ref worker@5
+assert_contains "report verdict: target without verdict error" "$(cat "$ERR")" '--target-ref'
+assert_ok "report verdict: target without verdict writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+setup
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: finding without verdict rejected" \
+  run_peer report --type result --status done --round 1 --finding note:"needs work"
+assert_contains "report verdict: finding without verdict error" "$(cat "$ERR")" '--verdict'
+assert_ok "report verdict: finding without verdict writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+setup
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: non-result rejected" \
+  run_peer report --type checkpoint --status done --round 1 --verdict approve --target-ref worker@5
+assert_contains "report verdict: non-result error" "$(cat "$ERR")" '--type result'
+assert_ok "report verdict: non-result writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+setup
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: bad target ref rejected" \
+  run_peer report --type result --status done --round 1 --verdict approve --target-ref '..@5'
+assert_contains "report verdict: bad target ref error" "$(cat "$ERR")" 'worker'
+assert_ok "report verdict: bad target ref writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+# report:判决路由失败时 report/event/latest 保留,但命令非零且不打印 sentinel。
+setup
+printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\treviewer\treviewer\tcodex\n%%3\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
+mkdir -p "$PROJECT/.agent-duo/state/worker"
+printf 'not a directory\n' > "$PROJECT/.agent-duo/state/worker/reviews"
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: route failure fails visibly" \
+  run_peer report --type result --status done --round 1 --verdict approve --target-ref worker@5
+assert_contains "report verdict: route failure error" "$(cat "$ERR")" '路由到 worker/reviews/reviewer-r5.json 失败'
+assert_eq "report verdict: route failure no sentinel" "$(cat "$OUT")" ""
+assert_ok "report verdict: route failure keeps report" test -f "$PROJECT/.agent-duo/state/reviewer/r1.json"
+assert_ok "report verdict: route failure keeps latest" test -L "$PROJECT/.agent-duo/state/reviewer/report.json"
+assert_contains "report verdict: route failure keeps event" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"agent":"reviewer"'
+teardown
+
 # report:runtime event 追加失败时不得先打印 sentinel，避免屏幕/队列分裂。
 setup
 mkdir -p "$PROJECT/.agent-duo/events/queue.jsonl"
@@ -1147,6 +1237,26 @@ teardown
 setup
 assert_not_ok "add: bad provider" run_peer add --provider gpt --role worker
 assert_contains "add: bad provider error" "$(cat "$ERR")" 'provider 必须是 claude 或 codex'
+teardown
+
+setup
+assert_not_ok "add: bad role token rejected" run_peer add --provider codex --role 'bad/role'
+assert_contains "add: bad role token error" "$(cat "$ERR")" '--role'
+teardown
+
+setup
+assert_not_ok "add: dot role rejected" run_peer add --provider codex --role '..'
+assert_contains "add: dot role error" "$(cat "$ERR")" '--role'
+teardown
+
+setup
+assert_not_ok "add: bad id token rejected" run_peer add --provider codex --role worker --id 'bad/id'
+assert_contains "add: bad id token error" "$(cat "$ERR")" '--id'
+teardown
+
+setup
+assert_not_ok "add: dot id rejected" run_peer add --provider codex --role worker --id '..'
+assert_contains "add: dot id error" "$(cat "$ERR")" '--id'
 teardown
 
 # add --worktree:创建隔离 worktree,worker cwd/写域指向 worktree,控制面仍指主仓。

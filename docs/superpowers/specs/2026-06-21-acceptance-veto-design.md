@@ -1,7 +1,7 @@
 # Acceptance Veto（reviewer/evaluator 验收门）设计
 
 日期：2026-06-21
-状态：设计稿，待实现（交付 Codex 实现，作者 review）
+状态：已实现（2026-06-21）
 关联：[worker↔supervisor 契约](./2026-06-17-worker-supervisor-contract.md)（§2.1 reviewer 字段 / §2.5 acceptance / §4 awaiting_acceptance）、[Supervisor Loop（MVP 5）设计](./2026-06-21-supervisor-loop-mvp5-design.md)、[Loop Validation 设计](./2026-06-21-loop-validation-success-signals-mvp-design.md)
 
 ## 1. 架构 + acceptance 配置

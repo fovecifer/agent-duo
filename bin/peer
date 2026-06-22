@@ -17,6 +17,7 @@
 #   peer report --type <plan|checkpoint|request|result>
 #               --status <in_progress|blocked|partial|done|failed|unknown>
 #               [--step sN] [--round N] [--delta ...] [--next ...]
+#               [--verdict v --target-ref worker@round [--finding severity:note]]
 #               [--needs <approval|decision|info|scope|discovery>
 #                  [--needs-detail ...] [--needs-option ...]]
 #                           写结构化 report、追加 runtime event、打印 sentinel
@@ -28,7 +29,7 @@
 #   peer loop [<id>]        查看某 agent 的 loop.json 契约与当前预算
 #   peer loop init [<id>] --mission "..." --max-rounds N [--non-goal "..."] [--success "..."] [--round N]
 #                  [--validation id:"cmd"] [--validation-satisfies id:"signal"] [--validation-timeout id:N]
-#                  [--detail-trap-rounds N]
+#                  [--review role:veto1,veto2] [--detail-trap-rounds N]
 #                           初始化/冻结某 agent 的 supervisor loop 契约
 #   peer loop reset [<id>] [--max-rounds N]
 #                           在当前 report 轮次重新冻结 loop,给全新预算
@@ -162,6 +163,14 @@ is_positive_int() {
 
 is_nonnegative_int() {
   [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_role_token() {
+  reg_is_role_token "$1"
+}
+
+is_verdict_token() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9_-]+$ ]]
 }
 
 is_report_type() {
@@ -380,10 +389,151 @@ build_needs_json() {
   printf ']}]'
 }
 
+parse_finding_spec() { # <severity:note>|<note>; sets FINDING_SEVERITY FINDING_NOTE
+  local spec="${1:-}"
+  if [[ "$spec" == *:* ]]; then
+    FINDING_SEVERITY="${spec%%:*}"
+    FINDING_NOTE="${spec#*:}"
+    [[ -n "$FINDING_SEVERITY" ]] || FINDING_SEVERITY="note"
+  else
+    FINDING_SEVERITY="note"
+    FINDING_NOTE="$spec"
+  fi
+}
+
+build_findings_json() { # [finding...]
+  local first=1 finding
+  printf '['
+  for finding in "$@"; do
+    parse_finding_spec "$finding"
+    if [[ $first -eq 1 ]]; then first=0; else printf ','; fi
+    printf '{"severity":'; json_str "$FINDING_SEVERITY"
+    printf ',"note":'; json_str "$FINDING_NOTE"
+    printf '}'
+  done
+  printf ']'
+}
+
+parse_target_ref() { # <worker>@<round|rround>; sets TARGET_WORKER TARGET_ROUND
+  local ref="${1:-}" round_part
+  if [[ "$ref" != *@* ]]; then
+    echo "错误: --target-ref 必须形如 <worker>@<round>。" >&2
+    return 1
+  fi
+  TARGET_WORKER="${ref%@*}"
+  round_part="${ref##*@}"
+  if [[ "$round_part" == r* ]]; then
+    round_part="${round_part#r}"
+  fi
+  if [[ -z "$TARGET_WORKER" || -z "$round_part" ]]; then
+    echo "错误: --target-ref 必须形如 <worker>@<round>。" >&2
+    return 1
+  fi
+  if ! is_role_token "$TARGET_WORKER"; then
+    echo "错误: --target-ref 的 worker 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2
+    return 1
+  fi
+  if ! is_positive_int "$round_part"; then
+    echo "错误: --target-ref 的 round 必须是正整数。" >&2
+    return 1
+  fi
+  TARGET_ROUND="$round_part"
+}
+
+write_verdict_record_json() { # <path> <verdict> <by> <role> <target> <round> <findings_json> <ts>
+  local path="$1" verdict="$2" by="$3" role="$4" target="$5" round_s="$6" findings_json="$7" ts="$8"
+  {
+    printf '{"verdict":'; json_str "$verdict"
+    printf ',"by":'; json_str "$by"
+    printf ',"role":'; json_str "$role"
+    printf ',"target":'; json_str "$target"
+    printf ',"target_round":%s' "$round_s"
+    printf ',"findings":%s' "$findings_json"
+    printf ',"ts":'; json_str "$ts"
+    printf '}\n'
+  } > "$path"
+}
+
+route_verdict_record() { # <target> <round> <reviewer_role> <verdict> <findings_json> <ts>
+  local target="$1" round_s="$2" reviewer_role="$3" verdict="$4" findings_json="$5" ts="$6"
+  local dir path tmp
+  dir="$AGENT_DUO_DIR/state/$target/reviews"
+  path="$dir/${reviewer_role}-r${round_s}.json"
+  tmp="$dir/.${reviewer_role}-r${round_s}.json.$$"
+  mkdir -p "$dir" || return 1
+  rm -f "$tmp"
+  if ! write_verdict_record_json "$tmp" "$verdict" "$ME" "$reviewer_role" "$target" "$round_s" "$findings_json" "$ts"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$path"
+}
+
+parse_review_spec() { # <role:veto1,veto2>; sets REVIEW_ROLE REVIEW_VETO_CSV
+  local spec="${1:-}" veto_csv verdict
+  if [[ "$spec" != *:* ]]; then
+    echo "错误: --review 必须形如 <role>:<veto1,veto2>。" >&2
+    return 1
+  fi
+  REVIEW_ROLE="${spec%%:*}"
+  veto_csv="${spec#*:}"
+  if ! is_role_token "$REVIEW_ROLE"; then
+    echo "错误: --review 的 role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2
+    return 1
+  fi
+  if [[ -z "$veto_csv" ]]; then
+    echo "错误: --review 的 veto-list 不能为空。" >&2
+    return 1
+  fi
+  if [[ "$veto_csv" == ,* || "$veto_csv" == *, || "$veto_csv" == *,,* ]]; then
+    echo "错误: --review 的 veto-list 不能包含空 verdict。" >&2
+    return 1
+  fi
+  IFS=',' read -r -a REVIEW_VETO_PARTS <<< "$veto_csv"
+  if (( ${#REVIEW_VETO_PARTS[@]} == 0 )); then
+    echo "错误: --review 的 veto-list 不能为空。" >&2
+    return 1
+  fi
+  for verdict in "${REVIEW_VETO_PARTS[@]}"; do
+    if ! is_verdict_token "$verdict"; then
+      echo "错误: --review 的 verdict 只能包含字母、数字、下划线和连字符。" >&2
+      return 1
+    fi
+  done
+  REVIEW_VETO_CSV="$veto_csv"
+}
+
+build_acceptance_json() {
+  local spec role veto_csv verdict first_review first_veto
+  if (( ${#loop_reviews[@]} == 0 )); then
+    printf '{}'
+    return 0
+  fi
+  printf '{"reviews":['
+  first_review=1
+  for spec in ${loop_reviews[@]+"${loop_reviews[@]}"}; do
+    parse_review_spec "$spec" || return 1
+    role="$REVIEW_ROLE"
+    veto_csv="$REVIEW_VETO_CSV"
+    if [[ $first_review -eq 1 ]]; then first_review=0; else printf ','; fi
+    printf '{"role":'; json_str "$role"
+    printf ',"veto_on":['
+    first_veto=1
+    IFS=',' read -r -a REVIEW_VETO_PARTS <<< "$veto_csv"
+    for verdict in "${REVIEW_VETO_PARTS[@]}"; do
+      if [[ $first_veto -eq 1 ]]; then first_veto=0; else printf ','; fi
+      json_str "$verdict"
+    done
+    printf ']}'
+  done
+  printf ']}'
+}
+
 write_report_json() {
   local path="$1" round_s="$2" agent_id="$3" role="$4" report_type="$5" status="$6"
   local goal_ref="$7" step_ref="$8" delta="$9" drift="${10}" next_text="${11}"
   local evidence_cmd="${12}" evidence_result="${13}" evidence_ref="${14}" needs_json="${15:-[]}"
+  local verdict="${16:-}" target_ref="${17:-}" findings_json="${18:-[]}"
   {
     printf '{"protocol":"1","round":%s,' "$round_s"
     printf '"agent_id":'; json_str "$agent_id"; printf ','
@@ -403,7 +553,11 @@ write_report_json() {
     else
       printf '[]'
     fi
-    printf ',"needs":%s,"next":' "$needs_json"; json_str "$next_text"
+    printf ',"needs":%s,' "$needs_json"
+    printf '"verdict":'; json_nullable_str "$verdict"; printf ','
+    printf '"target_ref":'; json_nullable_str "$target_ref"; printf ','
+    printf '"findings":%s,' "$findings_json"
+    printf '"next":'; json_str "$next_text"
     printf '}\n'
   } > "$path"
 }
@@ -633,8 +787,8 @@ build_validation_json() {
   printf ']'
 }
 
-write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json> <detail_trap_rounds>
-  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" validation_json="$8" detail_trap_rounds="$9" now
+write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json> <acceptance_json> <detail_trap_rounds>
+  local path="$1" agent_id="$2" mission="$3" max_rounds="$4" frozen_round="$5" non_goals_json="$6" success_json="$7" validation_json="$8" acceptance_json="$9" detail_trap_rounds="${10}" now
   now="$(iso_ts)"
   {
     printf '{"protocol":"1",'
@@ -643,6 +797,7 @@ write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <n
     printf '"non_goals":%s,' "$non_goals_json"
     printf '"success_signals":%s,' "$success_json"
     printf '"validation":%s,' "$validation_json"
+    printf '"acceptance":%s,' "$acceptance_json"
     printf '"detail_trap_rounds":%s,' "$detail_trap_rounds"
     printf '"max_rounds":%s,' "$max_rounds"
     printf '"frozen_at_round":%s,' "$frozen_round"
@@ -654,8 +809,8 @@ write_loop_json() { # <path> <agent_id> <mission> <max_rounds> <frozen_round> <n
   } > "$path"
 }
 
-loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json> <detail_trap_rounds>
-  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6" validation_json="$7" detail_trap_rounds="$8"
+loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json> <success_json> <validation_json> <acceptance_json> <detail_trap_rounds>
+  local agent_id="$1" mission="$2" max_rounds="$3" frozen_round="$4" non_goals_json="$5" success_json="$6" validation_json="$7" acceptance_json="$8" detail_trap_rounds="$9"
   local loop_file loop_dir tmp
   if [[ -z "$mission" ]]; then
     echo "错误: peer loop init 需要 --mission。" >&2
@@ -681,7 +836,7 @@ loop_init() { # <agent_id> <mission> <max_rounds> <frozen_round> <non_goals_json
     return 1
   fi
   tmp="$loop_dir/.loop.json.$$"
-  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json" "$validation_json" "$detail_trap_rounds"; then
+  if ! write_loop_json "$tmp" "$agent_id" "$mission" "$max_rounds" "$frozen_round" "$non_goals_json" "$success_json" "$validation_json" "$acceptance_json" "$detail_trap_rounds"; then
     rm -f "$tmp"
     return 1
   fi
@@ -783,7 +938,8 @@ loop_print() { # <agent_id>
       "STOP_REASON\t\(.stop.reason // "")",
       "NON_GOALS\t\((.non_goals // []) | join("; "))",
       "SUCCESS_SIGNALS\t\((.success_signals // []) | join("; "))",
-      "VALIDATION\t\((.validation // []) | map(((.id // "") | tostring) + ":" + ((.cmd // "") | tostring)) | join("; "))"
+      "VALIDATION\t\((.validation // []) | map(((.id // "") | tostring) + ":" + ((.cmd // "") | tostring)) | join("; "))",
+      "ACCEPTANCE\t\((.acceptance.reviews // []) | map(((.role // "") | tostring) + ":" + ((.veto_on // []) | join(","))) | join("; "))"
   ' "$loop_file"
 }
 
@@ -1526,9 +1682,14 @@ case "$cmd" in
     if [[ -z "$role" ]]; then
       echo "错误: 必须用 --role 指定角色。" >&2; exit 1
     fi
+    if ! is_role_token "$role"; then
+      echo "错误: --role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
+    fi
     new_id="$want_id"
     if [[ -z "$new_id" ]]; then
       new_id="$(reg_derive_id "$role" "$(agent_ids)")"
+    elif ! is_role_token "$new_id"; then
+      echo "错误: --id 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
     elif agent_ids | grep -qx "$new_id"; then
       echo "错误: id '$new_id' 已被占用。" >&2; exit 1
     fi
@@ -2043,6 +2204,7 @@ case "$cmd" in
         loop_validations=()
         loop_validation_satisfies=()
         loop_validation_timeouts=()
+        loop_reviews=()
         loop_detail_trap_rounds="3"
         while [[ $# -gt 0 ]]; do
           case "$1" in
@@ -2052,7 +2214,7 @@ case "$cmd" in
               ;;
             --max-rounds)
               if [[ -z "${2:-}" ]]; then
-                echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
+                echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N]" >&2
                 exit 1
               fi
               loop_max_rounds="${2:-}"
@@ -2078,6 +2240,10 @@ case "$cmd" in
               loop_validation_timeouts+=("${2:-}")
               shift 2
               ;;
+            --review)
+              loop_reviews+=("${2:-}")
+              shift 2
+              ;;
             --detail-trap-rounds)
               loop_detail_trap_rounds="${2:-}"
               shift 2
@@ -2087,7 +2253,7 @@ case "$cmd" in
               shift 2
               ;;
             *)
-              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N]" >&2
+              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N]" >&2
               exit 1
               ;;
           esac
@@ -2101,7 +2267,10 @@ case "$cmd" in
         if ! loop_validation_json="$(build_validation_json)"; then
           exit 1
         fi
-        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json" "$loop_validation_json" "$loop_detail_trap_rounds"
+        if ! loop_acceptance_json="$(build_acceptance_json)"; then
+          exit 1
+        fi
+        loop_init "$target_id" "$loop_mission" "$loop_max_rounds" "$loop_round" "$loop_non_goals_json" "$loop_success_json" "$loop_validation_json" "$loop_acceptance_json" "$loop_detail_trap_rounds"
         echo "已初始化 loop.json: .agent-duo/state/$target_id/loop.json"
         ;;
       reset)
@@ -2132,14 +2301,14 @@ case "$cmd" in
         ;;
       ""|--help|-h)
         if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
           exit 0
         fi
         loop_print "$ME"
         ;;
       *)
         if [[ -n "${2:-}" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
+          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
           exit 1
         fi
         loop_print "$subcmd"
@@ -2162,6 +2331,11 @@ case "$cmd" in
     needs_kind=""
     needs_detail=""
     needs_options=()
+    verdict=""
+    target_ref=""
+    findings=()
+    verdict_target_worker=""
+    verdict_target_round=""
 
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -2221,8 +2395,20 @@ case "$cmd" in
           needs_options+=("${2:-}")
           shift 2
           ;;
+        --verdict)
+          verdict="${2:-}"
+          shift 2
+          ;;
+        --target-ref)
+          target_ref="${2:-}"
+          shift 2
+          ;;
+        --finding)
+          findings+=("${2:-}")
+          shift 2
+          ;;
         *)
-          echo "用法: peer report --type <plan|checkpoint|request|result> --status <in_progress|blocked|partial|done|failed|unknown> [--step sN] [--round N] [--delta ...] [--next ...] [--needs <approval|decision|info|scope|discovery> [--needs-detail ...] [--needs-option ...]]" >&2
+          echo "用法: peer report --type <plan|checkpoint|request|result> --status <in_progress|blocked|partial|done|failed|unknown> [--step sN] [--round N] [--delta ...] [--next ...] [--verdict v --target-ref worker@round [--finding severity:note]] [--needs <approval|decision|info|scope|discovery> [--needs-detail ...] [--needs-option ...]]" >&2
           exit 1
           ;;
       esac
@@ -2251,6 +2437,31 @@ case "$cmd" in
     fi
 
     role="$(self_role)"
+    if [[ -n "$verdict" || -n "$target_ref" || ${#findings[@]} -gt 0 ]]; then
+      if [[ -z "$verdict" || -z "$target_ref" ]]; then
+        echo "错误: --verdict 与 --target-ref 必须同时指定。" >&2
+        exit 1
+      fi
+      if [[ "$report_type" != "result" ]]; then
+        echo "错误: --verdict 只能用于 --type result。" >&2
+        exit 1
+      fi
+      if ! is_verdict_token "$verdict"; then
+        echo "错误: --verdict 只能包含字母、数字、下划线和连字符。" >&2
+        exit 1
+      fi
+      if ! is_role_token "$role"; then
+        echo "错误: 当前 agent role '$role' 不能用于 verdict 路由;role 必须以字母或数字开头,且只能包含字母、数字、点、下划线和连字符。" >&2
+        exit 1
+      fi
+      if ! parse_target_ref "$target_ref"; then
+        exit 1
+      fi
+      verdict_target_worker="$TARGET_WORKER"
+      verdict_target_round="$TARGET_ROUND"
+      target_ref="${verdict_target_worker}@${verdict_target_round}"
+    fi
+    findings_json="$(build_findings_json ${findings[@]+"${findings[@]}"})"
     state_dir="$AGENT_DUO_DIR/state/$ME"
     events_dir="$AGENT_DUO_DIR/events"
     mkdir -p "$state_dir" "$events_dir"
@@ -2308,7 +2519,8 @@ case "$cmd" in
     tmp_report="$state_dir/.r${round}.json.$$"
     write_report_json "$tmp_report" "$round" "$ME" "$role" "$report_type" "$effective_status" \
       "$goal_ref" "$step_ref" "$delta" "$drift" "$next_text" \
-      "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_json"
+      "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_json" \
+      "$verdict" "$target_ref" "$findings_json"
     mv "$tmp_report" "$report_file"
 
     sha="$(sha256_file "$report_file")"
@@ -2356,6 +2568,13 @@ case "$cmd" in
     rm -f "$tmp_latest"
     ln -s "r${round}.json" "$tmp_latest"
     mv -f "$tmp_latest" "$latest_file"
+
+    if [[ -n "$verdict" ]]; then
+      if ! route_verdict_record "$verdict_target_worker" "$verdict_target_round" "$role" "$verdict" "$findings_json" "$ts"; then
+        echo "错误: 判决已记入本 agent report,但路由到 ${verdict_target_worker}/reviews/${role}-r${verdict_target_round}.json 失败;请保留同一 --target-ref 重报;若原命令显式带了 --round,重试时换新 round 或省略 --round。" >&2
+        exit 1
+      fi
+    fi
 
     printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
       "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"

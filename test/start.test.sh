@@ -137,6 +137,20 @@ assert_not_contains "E2: no session launched" "$(cat "$SENDLOG")" 'new-session'
 assert_contains "E2: error mentions provider" "$(cat "$SCENARIO_TMP/out.txt")" 'provider 必须是 claude 或 codex'
 teardown
 
+# 场景 E3:--with role 必须是路径段安全 token,坏 role 预检失败。
+setup
+if PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
+  bash "$ROOT/start.sh" "$PROJECT" --with codex:'..' \
+  </dev/null >"$SCENARIO_TMP/out.txt" 2>&1; then
+  printf 'FAIL E3: invalid --with role should fail\n'
+  ADK_FAIL=1
+else
+  printf 'ok   E3: invalid --with role fails before launch\n'
+fi
+assert_not_contains "E3: no session launched" "$(cat "$SENDLOG")" 'new-session'
+assert_contains "E3: error mentions role" "$(cat "$SCENARIO_TMP/out.txt")" 'role 只能包含'
+teardown
+
 # 场景 F:默认 → supervisor + loopd 窗口,都打 @agent_* 标签。
 # 注意:不设 AGENT_SESSION,以验证默认会话名 "agents"。
 setup

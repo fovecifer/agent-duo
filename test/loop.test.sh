@@ -129,6 +129,26 @@ write_loop_contract_with_validation() { # <agent> <max_rounds> <frozen_at_round>
     > "$state/loop.json"
 }
 
+write_loop_contract_with_acceptance() { # <agent> <max_rounds> <frozen_at_round> <reviews_json>
+  local agent="$1" max_rounds="$2" frozen="$3" reviews="$4" state
+  state="$PROJECT/.agent-duo/state/$agent"
+  mkdir -p "$state"
+  jq -cn \
+    --arg agent "$agent" --argjson max "$max_rounds" --argjson frozen "$frozen" --argjson reviews "$reviews" \
+    '{protocol:"1",agent_id:$agent,mission:"m",non_goals:[],success_signals:[],validation:[],acceptance:{reviews:$reviews},max_rounds:$max,frozen_at_round:$frozen,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null},created_at:"2026-06-21T00:00:00Z",updated_at:"2026-06-21T00:00:00Z"}' \
+    > "$state/loop.json"
+}
+
+write_review_record() { # <agent> <role> <round> <verdict>
+  local agent="$1" role="$2" round="$3" verdict="$4" dir
+  dir="$PROJECT/.agent-duo/state/$agent/reviews"
+  mkdir -p "$dir"
+  jq -cn \
+    --arg verdict "$verdict" --arg role "$role" --arg target "$agent" --argjson round "$round" \
+    '{verdict:$verdict,by:"reviewer",role:$role,target:$target,target_round:$round,findings:[],ts:"2026-06-21T00:00:00Z"}' \
+    > "$dir/${role}-r${round}.json"
+}
+
 write_validation_result() { # <agent> <round> <status> <satisfied_json> <missing_json> <failed_json>
   local agent="$1" round="$2" status="$3" satisfied="$4" missing="$5" failed="$6" state
   state="$PROJECT/.agent-duo/state/$agent"
@@ -482,6 +502,79 @@ write_report worker 1 done
 write_loop_contract worker 1 1
 assert_ok "loop eval: done priority stops" run_loopd_once
 assert_contains "loop eval: done reason wins" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"done"'
+teardown
+
+# loop evaluator:acceptance 非 veto 判决在场时 done 才能停。
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract_with_acceptance worker 3 1 '[{"role":"reviewer","veto_on":["request_changes","reject"]}]'
+write_review_record worker reviewer 1 approve
+assert_ok "loop eval acceptance: approve stops done" run_loopd_once
+assert_contains "loop eval acceptance: done after approve" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"done"'
+assert_contains "loop eval acceptance: dashboard ok" "$(cat "$OUT")" 'accept=reviewer:ok'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract_with_acceptance worker 3 1 '[{"role":"reviewer","veto_on":["request_changes","reject"]}]'
+assert_ok "loop eval acceptance: missing keeps active" run_loopd_once
+queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "loop eval acceptance: missing active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
+assert_contains "loop eval acceptance: pending event" "$queue_json" '"id":"reviewreq-worker-1-pending"'
+assert_contains "loop eval acceptance: pending summary" "$queue_json" '"summary":"review pending: reviewer"'
+assert_contains "loop eval acceptance: dashboard pending" "$(cat "$OUT")" 'accept=reviewer:pending'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract_with_acceptance worker 3 1 '[{"role":"reviewer","veto_on":["request_changes","reject"]}]'
+write_review_record worker reviewer 1 request_changes
+assert_ok "loop eval acceptance: veto keeps active" run_loopd_once
+queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "loop eval acceptance: veto active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
+assert_contains "loop eval acceptance: veto event" "$queue_json" '"id":"reviewreq-worker-1-vetoed"'
+assert_contains "loop eval acceptance: veto summary" "$queue_json" '"summary":"review vetoed: reviewer(request_changes)"'
+assert_contains "loop eval acceptance: dashboard veto" "$(cat "$OUT")" 'accept=reviewer:vetoed(request_changes)'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract_with_acceptance worker 3 1 '[{"role":"reviewer","veto_on":["request_changes"]},{"role":"evaluator","veto_on":["fail"]}]'
+assert_ok "loop eval acceptance: pending first" run_loopd_once
+write_review_record worker reviewer 1 request_changes
+assert_ok "loop eval acceptance: veto after pending" run_loopd_once
+queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_contains "loop eval acceptance: pending id present" "$queue_json" '"id":"reviewreq-worker-1-pending"'
+assert_contains "loop eval acceptance: veto id present" "$queue_json" '"id":"reviewreq-worker-1-vetoed"'
+pending_count="$(grep -c '"id":"reviewreq-worker-1-pending"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+veto_count="$(grep -c '"id":"reviewreq-worker-1-vetoed"' "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "loop eval acceptance: pending idempotent" "$pending_count" "1"
+assert_eq "loop eval acceptance: veto idempotent" "$veto_count" "1"
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract_with_acceptance worker 3 1 '[{"role":"reviewer","veto_on":["reject"]}]'
+jq '.acceptance.reviews[0].veto_on = [null]' "$PROJECT/.agent-duo/state/worker/loop.json" > "$PROJECT/.agent-duo/state/worker/.loop.json"
+mv "$PROJECT/.agent-duo/state/worker/.loop.json" "$PROJECT/.agent-duo/state/worker/loop.json"
+assert_ok "loop eval acceptance: bad veto config keeps active" run_loopd_once
+queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
+assert_eq "loop eval acceptance: config invalid active" "$(jq -r '.status' "$PROJECT/.agent-duo/state/worker/loop.json")" "active"
+assert_contains "loop eval acceptance: config invalid event" "$queue_json" '"id":"reviewreq-worker-1-configinvalid"'
+assert_contains "loop eval acceptance: config invalid dashboard" "$(cat "$OUT")" 'accept=config_invalid'
+teardown
+
+setup
+printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
+write_report worker 1 done
+write_loop_contract_with_acceptance worker 3 1 '[]'
+assert_ok "loop eval acceptance: empty reviews no gate" run_loopd_once
+assert_contains "loop eval acceptance: empty reviews done" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"done"'
 teardown
 
 # loop evaluator:validation 异步启动后,done 等待 running 结果,不阻塞 tick、不立即停止。

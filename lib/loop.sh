@@ -52,6 +52,14 @@ ad_loop_is_nonnegative_int() {
   [[ "${1:-}" =~ ^[0-9]+$ ]]
 }
 
+ad_loop_is_role_token() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+ad_loop_is_verdict_token() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9_-]+$ ]]
+}
+
 ad_loop_read_cursor() { # <root>
   local cursor_file value
   cursor_file="$(ad_loop_cursor_file "$1")"
@@ -118,6 +126,7 @@ EOF
 )"
   case "$type" in
     blocked|request|loop_stop) printf '10' ;;
+    review_required)  printf '11' ;;
     direction_drift)    printf '12' ;;
     validation_fail)     printf '15' ;;
     result|detail_trap)  printf '20' ;;
@@ -394,6 +403,175 @@ ad_loop_validation_log_ref() { # <agent_id> <round> <validation_id>
 
 ad_loop_safe_validation_id() {
   printf '%s' "${1:-validation}" | sed 's/[^A-Za-z0-9._-]/_/g'
+}
+
+ad_loop_csv_join() {
+  local sep="" item
+  for item in "$@"; do
+    printf '%s%s' "$sep" "$item"
+    sep=","
+  done
+}
+
+ad_loop_csv_human() {
+  printf '%s' "$1" | sed 's/,/, /g'
+}
+
+ad_loop_csv_contains() { # <csv> <needle>
+  case ",$1," in
+    *",$2,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ad_loop_review_record_path() { # <root> <agent> <role> <round>
+  printf '%s/%s/reviews/%s-r%s.json' "$(ad_loop_state_dir "$1")" "$2" "$3" "$4"
+}
+
+ad_loop_acceptance_state() { # <root> <agent> <round> <contract_path>
+  local root="$1" agent="$2" round="$3" contract="$4"
+  local gate_state valid count line role veto_csv record verdict
+  local missing vetoed ok
+  missing=()
+  vetoed=()
+  ok=()
+
+  gate_state="$(jq -r '
+    if ((has("acceptance") | not) or (.acceptance | type != "object") or ((.acceptance | has("reviews")) | not)) then
+      "none"
+    elif (.acceptance.reviews | type) != "array" then
+      "invalid"
+    elif ((.acceptance.reviews | length) == 0) then
+      "empty"
+    else
+      "present"
+    end
+  ' "$contract" 2>/dev/null || printf 'invalid')"
+  case "$gate_state" in
+    none|empty)
+      printf 'satisfied||||\n'
+      return 0
+      ;;
+    invalid)
+      printf 'blocked|config_invalid|||\n'
+      return 0
+      ;;
+  esac
+
+  valid="$(jq -e --arg role_re '^[A-Za-z0-9][A-Za-z0-9._-]*$' --arg verdict_re '^[A-Za-z0-9_-]+$' '
+    all(.acceptance.reviews[]?;
+      (.role | type == "string" and test($role_re)) and
+      (.veto_on | type == "array" and length > 0 and all(.[]; type == "string" and test($verdict_re)))
+    )
+  ' "$contract" >/dev/null 2>&1 && printf 'yes' || printf 'no')"
+  if [[ "$valid" != "yes" ]]; then
+    printf 'blocked|config_invalid|||\n'
+    return 0
+  fi
+
+  count="$(jq -r '(.acceptance.reviews // []) | length' "$contract" 2>/dev/null || printf '0')"
+  if ! ad_loop_is_nonnegative_int "$count" || [[ "$count" == "0" ]]; then
+    printf 'satisfied||||\n'
+    return 0
+  fi
+
+  while IFS=$'\t' read -r role veto_csv; do
+    [[ -n "$role" ]] || continue
+    record="$(ad_loop_review_record_path "$root" "$agent" "$role" "$round")"
+    if [[ ! -f "$record" ]]; then
+      missing+=("$role")
+      continue
+    fi
+    verdict="$(jq -er '.verdict | select(type == "string")' "$record" 2>/dev/null || true)"
+    if ! ad_loop_is_verdict_token "$verdict"; then
+      missing+=("$role")
+      continue
+    fi
+    if ad_loop_csv_contains "$veto_csv" "$verdict"; then
+      vetoed+=("${role}(${verdict})")
+    else
+      ok+=("$role")
+    fi
+  done < <(jq -r '.acceptance.reviews[] | [.role, (.veto_on | join(","))] | @tsv' "$contract")
+
+  if (( ${#missing[@]} == 0 && ${#vetoed[@]} == 0 )); then
+    printf 'satisfied||||%s\n' "$(ad_loop_csv_join ${ok[@]+"${ok[@]}"})"
+  else
+    printf 'blocked||%s|%s|%s\n' \
+      "$(ad_loop_csv_join ${missing[@]+"${missing[@]}"})" \
+      "$(ad_loop_csv_join ${vetoed[@]+"${vetoed[@]}"})" \
+      "$(ad_loop_csv_join ${ok[@]+"${ok[@]}"})"
+  fi
+}
+
+ad_loop_acceptance_emit_review_required() { # <root> <agent> <round> <ref> <state_tsv>
+  local root="$1" agent="$2" round="$3" ref="$4" state_tsv="$5"
+  local state error missing vetoed ok event_id summary
+  IFS='|' read -r state error missing vetoed ok <<EOF
+$state_tsv
+EOF
+  [[ "$state" == "blocked" ]] || return 0
+  if [[ "$error" == "config_invalid" ]]; then
+    event_id="reviewreq-${agent}-${round}-configinvalid"
+    summary="acceptance config invalid"
+    if ! ad_loop_event_id_seen "$root" "$event_id"; then
+      ad_loop_append_event_with_id "$root" "$event_id" "$agent" review_required "$round" "$summary" "$ref" || true
+    fi
+    return 0
+  fi
+  if [[ -n "$missing" ]]; then
+    event_id="reviewreq-${agent}-${round}-pending"
+    summary="review pending: $(ad_loop_csv_human "$missing")"
+    if ! ad_loop_event_id_seen "$root" "$event_id"; then
+      ad_loop_append_event_with_id "$root" "$event_id" "$agent" review_required "$round" "$summary" "$ref" || true
+    fi
+  fi
+  if [[ -n "$vetoed" ]]; then
+    event_id="reviewreq-${agent}-${round}-vetoed"
+    summary="review vetoed: $(ad_loop_csv_human "$vetoed")"
+    if ! ad_loop_event_id_seen "$root" "$event_id"; then
+      ad_loop_append_event_with_id "$root" "$event_id" "$agent" review_required "$round" "$summary" "$ref" || true
+    fi
+  fi
+}
+
+ad_loop_acceptance_dashboard() { # <state_tsv>
+  local state error missing vetoed ok out sep role item verdict
+  IFS='|' read -r state error missing vetoed ok <<EOF
+$1
+EOF
+  if [[ "$error" == "config_invalid" ]]; then
+    printf 'config_invalid'
+    return 0
+  fi
+  out=""
+  sep=""
+  IFS=',' read -r -a ok_parts <<< "$ok"
+  for role in ${ok_parts[@]+"${ok_parts[@]}"}; do
+    [[ -n "$role" ]] || continue
+    out="${out}${sep}${role}:ok"
+    sep=","
+  done
+  IFS=',' read -r -a missing_parts <<< "$missing"
+  for role in ${missing_parts[@]+"${missing_parts[@]}"}; do
+    [[ -n "$role" ]] || continue
+    out="${out}${sep}${role}:pending"
+    sep=","
+  done
+  IFS=',' read -r -a vetoed_parts <<< "$vetoed"
+  for item in ${vetoed_parts[@]+"${vetoed_parts[@]}"}; do
+    [[ -n "$item" ]] || continue
+    role="${item%%(*}"
+    verdict="${item#*(}"
+    verdict="${verdict%)}"
+    if [[ -n "$role" && "$role" != "$item" && -n "$verdict" ]]; then
+      out="${out}${sep}${role}:vetoed(${verdict})"
+    else
+      out="${out}${sep}${item}:vetoed"
+    fi
+    sep=","
+  done
+  printf '%s' "$out"
 }
 
 ad_loop_one_line() {
@@ -925,7 +1103,7 @@ ad_loop_eval_direction() { # <root> <agent> <contract_path> <current_round> <rou
 
 ad_loop_eval_contracts() { # <root> <session>
   local root="$1" session="${2:-}" agent contract parsed status max_rounds frozen_round on_terminal
-  local report current_round report_status rounds_used reason validation_count validation_status
+  local report current_round report_status rounds_used reason validation_count validation_status acceptance_tsv acceptance_state report_ref
   : "${session:-}"
   ad_loop_contract_agents "$root" | while IFS= read -r agent; do
     [[ -n "$agent" ]] || continue
@@ -978,7 +1156,14 @@ EOF
     reason=""
     if [[ "$on_terminal" == "true" && "$report_status" == "done" ]]; then
       if (( validation_count == 0 )) || [[ "$validation_status" == "pass" ]]; then
-        reason="done"
+        acceptance_tsv="$(ad_loop_acceptance_state "$root" "$agent" "$current_round" "$contract")"
+        acceptance_state="${acceptance_tsv%%|*}"
+        if [[ "$acceptance_state" == "satisfied" ]]; then
+          reason="done"
+        else
+          report_ref="$(ad_loop_report_ref "$root" "$agent" "$current_round")"
+          ad_loop_acceptance_emit_review_required "$root" "$agent" "$current_round" "$report_ref" "$acceptance_tsv"
+        fi
       fi
     elif [[ "$on_terminal" == "true" && "$report_status" == "failed" ]]; then
       reason="failed"
@@ -1077,7 +1262,7 @@ ad_loop_idle_arrival() { # <root> <session>
 }
 
 ad_loop_dashboard_loop_info() { # <root> <agent>
-  local root="$1" agent="$2" contract parsed max_rounds frozen_round status reason current_round rounds_used validation_file validation_status
+  local root="$1" agent="$2" contract parsed max_rounds frozen_round status reason current_round rounds_used validation_file validation_status acceptance_gate acceptance_tsv acceptance_summary
   contract="$(ad_loop_contract_path "$root" "$agent")"
   [[ -f "$contract" ]] || return 0
   if ! parsed="$(jq -c '.' "$contract" 2>/dev/null)"; then
@@ -1109,6 +1294,14 @@ EOF
   if [[ -f "$validation_file" ]]; then
     validation_status="$(jq -r '.status // "unknown"' "$validation_file" 2>/dev/null || printf 'unknown')"
   fi
+  acceptance_gate="$(jq -r '
+    if ((.acceptance | type == "object") and (.acceptance | has("reviews"))) then "yes" else "no" end
+  ' "$contract" 2>/dev/null || printf 'no')"
+  acceptance_summary=""
+  if [[ "$acceptance_gate" == "yes" ]]; then
+    acceptance_tsv="$(ad_loop_acceptance_state "$root" "$agent" "$current_round" "$contract")"
+    acceptance_summary="$(ad_loop_acceptance_dashboard "$acceptance_tsv")"
+  fi
   if [[ "$status" == "stopped" && -n "$reason" ]]; then
     printf 'loop=%s/%s stopped:%s' "$rounds_used" "$max_rounds" "$reason"
   else
@@ -1116,6 +1309,9 @@ EOF
   fi
   if [[ -n "$validation_status" ]]; then
     printf ' validation=%s' "$validation_status"
+  fi
+  if [[ -n "$acceptance_summary" ]]; then
+    printf ' accept=%s' "$acceptance_summary"
   fi
 }
 

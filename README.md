@@ -124,12 +124,13 @@ A freshly created worker's Approval Broker starts **unverified** (the hook isn't
 | `peer add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | Create a visible teammate tab; `--worktree` starts it in an isolated git worktree with shared control state |
 | `peer rm [--force] <id>` | Remove a teammate tab; isolated worktrees are deleted only when clean, or with `--force` |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | Create and inspect a durable `task.json` step ledger for idempotent resume |
-| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional validations gate `done` asynchronously, and empty-delta streaks raise direction events |
+| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--review role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional validations and reviewer verdicts gate `done`, and empty-delta streaks raise direction events |
 | `peer loop reset <id> [--max-rounds N]` | Re-freeze a loop at the latest report round, clear its stop state, and give it a fresh round budget |
 | `peer ask <id> "message"` | Send a loop-gated message, wait for the worker's next structured report, and print that report summary/ref |
 | `peer checkpoint <id> [--json]` | Read-only summary of loop, recent reports, task steps, and validation for direction decisions |
 | `peer reframe <id> "message" [--force]` | Send a loop/broker-gated direction correction as a `reframe` verb and append `checkpoints.jsonl` audit |
 | `peer report --type request --status blocked --needs decision ...` | Worker writes a structured report and opens a Human Decision Gate when it needs a human choice |
+| `peer report --type result --verdict approve --target-ref worker@N [--finding severity:note]` | Reviewer/evaluator records a verdict on a target worker round; veto verdicts keep the worker loop active |
 | `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...` | List, create, and resolve Human Decision Gates; resolutions are written to `decisions.jsonl` and sent back as `decision` verbs |
 | `peer approvals` / `peer approve` / `peer deny` | Review and resolve Approval Broker requests for tool permissions |
 | `peer esc` | Send Escape to interrupt the other agent's current generation |

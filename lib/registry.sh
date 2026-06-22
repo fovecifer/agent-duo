@@ -11,6 +11,12 @@ reg_validate_provider() {
   esac
 }
 
+# reg_is_role_token <token> → 路径段安全的 role/id token。
+# 允许普通 role/id 里的点号,但首字符必须字母/数字,从而拒绝 "." / ".." / ".foo"。
+reg_is_role_token() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
 # reg_provider_launch_cmd <provider> <instr_path>
 # 打印在新 pane 里启动该 provider 的命令字符串。
 # claude 走 --append-system-prompt "$(cat <instr>)"(故意不展开 $(...),由目标 shell 启动时替换)。

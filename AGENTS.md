@@ -22,8 +22,8 @@
   — supervisor 新建可见队友 tab;`--worktree` 让 worker 在隔离 git worktree 中编辑,控制状态仍写主仓 `.agent-duo`
 - `peer rm [--force] <id>`
   — supervisor 移除队友 tab;隔离 worktree 干净才自动删除,脏时保留并提示,`--force` 可丢弃未提交改动
-- `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"] [--detail-trap-rounds N]` / `peer loop <id>`
-  — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并在配置 validation 时用异步客观验收结果门控 `done`
+- `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"] [--review role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop <id>`
+  — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并用异步 validation 与 reviewer/evaluator verdict 双门控 `done`
 - `peer loop reset <id> [--max-rounds N]`
   — supervisor 在当前最新 report 轮次重新冻结 loop,清空停止状态并给新预算;若最新 report 已是 `done`/`failed`,先用 `peer reframe --force` 推出新非终态 report 再续跑
 - `peer ask <id> "消息"` — supervisor 原子下发一条 loop-gated 消息,等待 worker 下一轮结构化 report,再只读取这轮新结果
@@ -31,6 +31,8 @@
 - `peer reframe <id> "消息" [--force]` — supervisor 向 worker 下发方向纠偏(`verb=reframe`),并写入 `checkpoints.jsonl` 审计
 - `peer report --type request --status blocked --needs decision --needs-detail "..." --needs-option "..."`
   — worker 需要人类做业务/部署/成本/网络等判断时,写结构化阻塞报告并打开 Human Decision Gate
+- `peer report --type result --verdict approve --target-ref worker@N [--finding severity:"..."]`
+  — reviewer/evaluator 对目标 worker 某一轮写验收 verdict;命中目标 loop 的 veto_on 时 runtime 会保持 worker active 并发 `review_required`
 - `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...`
   — supervisor 查看、创建、解决 Human Decision Gate;人类只需对 supervisor 说自然语言,由 supervisor 执行这些命令
 
