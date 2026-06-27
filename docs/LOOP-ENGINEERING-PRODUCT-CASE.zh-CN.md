@@ -1,12 +1,14 @@
 # Loop Engineering 实际用例：一条 Prompt 做出一个产品
 
-这个文档展示 `agent-duo` 应该提供的用户体验：像 Claude Code 的 agent teams 一样，用户不需要手动敲一串 `peer task init` / `peer loop init` / `peer ask` 命令。用户只在一个 agent CLI 窗口，也就是 `supervisor` 窗口里，输入一条产品目标 prompt。之后由 supervisor 负责创建 worker、冻结 loop、派发任务、收集 verify/judge 结果，并把最终可验收产品交还给用户。
+这个文档展示 `agent-duo` 应该提供的用户体验：把 **loop engineering** 的核心——plan → build → judge、verify/judge 闸门、**跑到合门条件为真才算完成**——藏进一条自然语言 prompt。用户不需要手动敲一串 `peer task init` / `peer loop init` / `peer ask` 命令，只在 `supervisor` 窗口里输入一条产品目标 prompt；之后由 supervisor 创建 worker、冻结 loop、派发任务、跑 plan-build-judge 循环、收集 verify/judge 结果，并把**带验证证据**的可验收产品交还给用户。
 
 命令仍然存在，但它们是 supervisor 的内部工具，不应该成为普通用户的主要界面。
 
-## 1. 参考 Claude Code 的交互模型
+## 1. 脊柱是 loop engineering（入口仅借鉴 Agent Teams）
 
-Claude Code 的 Agent Teams 文档把入口设计成自然语言：用户告诉 lead session 想要什么 teammates 和任务，lead 负责 spawn、协调、维护任务列表和汇总结果。它还明确区分 lead 与 teammates：lead 是主会话，teammates 是独立上下文中的工作会话；质量门可以通过 hooks 阻止不合格的任务完成。相关资料：
+这套体验的核心**不是「多 agent 并行」，而是 loop engineering**：制造者（builder）与检查者（reviewer/evaluator）分离、verify 机械闸门、跑到合门条件为真才停、状态外置、有界预算。Agent Teams 是「空间轴」的并行底座，**本身没有内建 loop**（跑完即关、无「验证通过才停」）——agent-duo 的脊柱是 loop、不是 team。
+
+我们**只借鉴它把入口设计成自然语言**这一点（lead 用 NL 描述任务、自动 spawn 与协调、hooks 当质量门），并全在 agent-duo 自有、工具无关的底座上原生实现、不依赖它。下列资料仅作**入口设计参考**：
 
 - [Claude Code: Agent teams](https://code.claude.com/docs/en/agent-teams)
 - [Claude Code: Subagents](https://code.claude.com/docs/en/sub-agents)
