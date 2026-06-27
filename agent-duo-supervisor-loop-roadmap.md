@@ -1155,6 +1155,20 @@ Phase 10: Team Mode
   - organization-level defaults
 ```
 
+## 对标缺口 backlog（vs Claude Code loop 演示）
+
+来源：`docs/COMPARISON-vs-claude-code-loop.zh-CN.md`。核心 loop 纪律已对齐，以下四项是机制层缺口，
+补时**不得削弱差异化（可见 + 人类 gate + 跨工具）与 loop/verifier 脊柱**。
+
+- [ ] **B1 · evaluator 真·浏览器测试**：给 evaluator 角色一条内建的真浏览器/真工具验证路径
+  （Playwright / Claude-for-Chrome MCP 之类），把「像用户试用」从纯 prose 升级成可执行 verdict 证据。
+- [ ] **B2 · rubric 评分化 + 校准**：把 `acceptance.md` 的主观 rubric 从 prose 升级为带维度评分
+  （如 设计/原创/工艺/功能 加权）+ few-shot 参考校准，让 judge verdict 更稳。
+- [ ] **B3 · 契约准则强度**：参考「~27 条才够 actionable、含糊准则被无视」的经验，给 planner 的
+  `acceptance.md` 加最小准则数/可执行性检查，避免 vague 契约。
+- [ ] **B4 · 预算护栏 + 心跳/connectors**：token 预算 broker（= Phase 9 / MVP9，未建）、
+  cron/schedule 自动触发（心跳）、原生 connectors（开 PR / 关 ticket / 频道通知）。
+
 ## 产品定位
 
 一句话定位：
