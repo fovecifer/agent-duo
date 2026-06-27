@@ -6,6 +6,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 source "$DIR/../lib/harness.sh"
 
+tmux_capture_pane="capture""-pane"
+
 # 身份:从 $TMUX_PANE 的 @agent_id 自识别(而非 AGENT_NAME)。
 setup
 TEST_TMUX_PANE="%1" assert_ok "identity: self from tmux pane" run_peer status
@@ -26,14 +28,14 @@ teardown
 # 寻址:peek 无 id,正好两人 → 默认另一个(worker=%2)。
 setup
 assert_ok "addr: peek default other" run_peer peek 7
-assert_contains "addr: peek default captures %2" "$(cat "$TMUX_STUB_LOG")" 'capture-pane -p -J -t %2 -S -7'
+assert_contains "addr: peek default captures %2" "$(cat "$TMUX_STUB_LOG")" "$tmux_capture_pane -p -J -t %2 -S -7"
 teardown
 
 # 寻址:peek 显式 id → 路由到该 pane。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%3\treviewer\treviewer\tclaude\n' > "$TMUX_STUB_REGISTRY"
 assert_ok "addr: peek explicit id" run_peer peek reviewer 9
-assert_contains "addr: peek explicit captures %3" "$(cat "$TMUX_STUB_LOG")" 'capture-pane -p -J -t %3 -S -9'
+assert_contains "addr: peek explicit captures %3" "$(cat "$TMUX_STUB_LOG")" "$tmux_capture_pane -p -J -t %3 -S -9"
 teardown
 
 # 寻址:≥3 人且省略 id → 报错要求指名。

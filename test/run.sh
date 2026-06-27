@@ -6,6 +6,14 @@ shopt -s nullglob
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORDER=(unit cli integration e2e)
 
+usage() {
+  cat <<'EOF'
+Usage: bash test/run.sh [unit|cli|integration|e2e ...]
+
+No args runs all layers in order: unit -> cli -> integration -> e2e.
+EOF
+}
+
 is_known_layer() {
   case "$1" in
     unit|cli|integration|e2e) return 0 ;;
@@ -14,12 +22,15 @@ is_known_layer() {
 }
 
 LAYERS=()
-if [[ "$#" -eq 0 ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+elif [[ "$#" -eq 0 ]]; then
   LAYERS=("${ORDER[@]}")
 else
   for arg in "$@"; do
     if ! is_known_layer "$arg"; then
-      printf 'unknown test layer: %s\n' "$arg" >&2
+      printf 'unknown test layer: %s (choose: unit|cli|integration|e2e)\n' "$arg" >&2
       exit 2
     fi
   done

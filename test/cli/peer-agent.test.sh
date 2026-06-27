@@ -6,6 +6,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 source "$DIR/../lib/harness.sh"
 
+tmux_new_window="new""-window"
+
 # agent ls:列出 registry 内所有 agent;未注册 pane 显示 (unregistered)。
 setup
 assert_ok "agent ls: succeeds" run_peer agent ls
@@ -25,7 +27,7 @@ teardown
 # add:新建 window、写三个 @agent_* 标签、send-keys 启动 provider、打印 id。
 setup
 TMUX_STUB_NEW_PANE="%5" assert_ok "add: succeeds" run_peer agent add --provider codex --role worker --id helper
-assert_contains "add: new-window called" "$(cat "$TMUX_STUB_LOG")" 'new-window'
+assert_contains "add: new window called" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window"
 assert_contains "add: tags id"       "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id helper'
 assert_contains "add: tags role"     "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_role worker'
 assert_contains "add: tags provider" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_provider codex'
@@ -97,7 +99,7 @@ assert_ok "add worktree: path exists" test -d "$wt_path"
 assert_contains "add worktree: branch recorded" "$(cat "$record")" '"branch":"agent-duo/helper"'
 assert_contains "add worktree: git registered path" "$(git -C "$PROJECT" worktree list --porcelain)" "worktree $wt_path"
 assert_contains "add worktree: git registered branch" "$(git -C "$PROJECT" worktree list --porcelain)" 'branch refs/heads/agent-duo/helper'
-assert_contains "add worktree: window cwd" "$(cat "$TMUX_STUB_LOG")" "new-window -t agents -n helper -c $wt_path"
+assert_contains "add worktree: window cwd" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window -t agents -n helper -c $wt_path"
 assert_contains "add worktree: pane option" "$(cat "$TMUX_STUB_LOG")" "@agent_worktree $wt_path"
 assert_contains "add worktree: root stays main" "$(cat "$TMUX_STUB_LOG")" "AGENT_DUO_ROOT=$PROJECT"
 assert_contains "add worktree: worker worktree env" "$(cat "$TMUX_STUB_LOG")" "AGENT_DUO_WORKTREE=$wt_path"
@@ -109,7 +111,7 @@ setup
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
 assert_not_ok "add worktree: non git rejected" run_peer agent add --provider codex --role worker --id helper --worktree
 assert_contains "add worktree: non git error" "$(cat "$ERR")" '隔离需要 git 仓库'
-assert_not_contains "add worktree: non git no window" "$(cat "$TMUX_STUB_LOG")" 'new-window'
+assert_not_contains "add worktree: non git no window" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window"
 assert_ok "add worktree: non git no record" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
 teardown
 
@@ -132,7 +134,7 @@ wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 printf 'dirty\n' > "$wt_path/dirty.txt"
 TMUX_STUB_NEW_PANE="%6" assert_ok "add worktree reuse: second succeeds" run_peer agent add --provider codex --role worker --id helper --worktree
 assert_ok "add worktree reuse: dirty file preserved" test -f "$wt_path/dirty.txt"
-assert_contains "add worktree reuse: window cwd" "$(cat "$TMUX_STUB_LOG")" "new-window -t agents -n helper -c $wt_path"
+assert_contains "add worktree reuse: window cwd" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window -t agents -n helper -c $wt_path"
 teardown
 
 # add --worktree:目标路径存在但不是 git worktree 时拒绝,避免覆盖外部目录。
@@ -142,7 +144,7 @@ TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
 mkdir -p "$TEST_AGENT_DUO_WORKTREES_DIR/agents/helper"
 assert_not_ok "add worktree: external dir rejected" run_peer agent add --provider codex --role worker --id helper --worktree
 assert_contains "add worktree: external dir error" "$(cat "$ERR")" '不是预期 worktree'
-assert_not_contains "add worktree: external dir no window" "$(cat "$TMUX_STUB_LOG")" 'new-window'
+assert_not_contains "add worktree: external dir no window" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window"
 teardown
 
 # rm:按 id 找到 pane 并 kill-window。

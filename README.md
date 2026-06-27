@@ -113,6 +113,10 @@ The supervisor will run `peer tell` → `peer wait` → `peer peek` and report b
 
 A freshly created worker's Approval Broker starts **unverified** (the hook isn't trusted until the provider actually invokes it), and `peer tell` to a worker is fail-closed against that gate. So the first delegation to a new worker is `peer approval check <id>` → wait for `ready`, *then* `peer tell`. `agent-duo-start --with` and `peer agent add` both print this reminder.
 
+## Testing
+
+Tests are split by layer under `test/{unit,cli,integration,e2e}/`. Run all layers with `bash test/run.sh`, or select layers such as `bash test/run.sh unit` and `bash test/run.sh cli integration`.
+
 ## The `peer` command
 
 ### Transport

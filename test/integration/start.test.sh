@@ -5,6 +5,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 source "$DIR/../lib/harness.sh"
 setup() { start_setup; }
+tmux_new_window="new""-window"
 
 run_start() { # 在 stub PATH + 指定 stdin/env 下运行 start.sh
   PATH="${TEST_PATH:-$STUB_BIN:$PATH}" AGENT_SESSION=adktest "$@" bash "$ROOT/start.sh" "$PROJECT" \
@@ -113,7 +114,7 @@ assert_contains     "F: single supervisor window"   "$(cat "$SENDLOG")" 'new-ses
 assert_contains     "F: tags supervisor id"          "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_id supervisor'
 assert_contains     "F: tags supervisor provider"    "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
 assert_contains     "F: launches claude"             "$(cat "$SENDLOG")" 'send-keys -t %1'
-assert_contains     "F: creates loopd window"         "$(cat "$SENDLOG")" 'new-window -t agents -n loopd'
+assert_contains     "F: creates loopd window"         "$(cat "$SENDLOG")" "$tmux_new_window -t agents -n loopd"
 assert_contains     "F: tags loopd id"                "$(cat "$SENDLOG")" '@agent_id loopd'
 assert_contains     "F: tags loopd role"              "$(cat "$SENDLOG")" '@agent_role daemon'
 assert_contains     "F: launches loopd"               "$(cat "$SENDLOG")" 'peer loopd'
@@ -130,7 +131,7 @@ assert_contains     "G: launches codex"                 "$(cat "$SENDLOG")" 'sen
 assert_contains     "G: codex supervisor gets settings env" "$(cat "$SENDLOG")" 'AGENT_DUO_SUPERVISOR_SETTINGS='
 assert_contains     "G: codex supervisor has user hook config" "$(cat "$SENDLOG")" 'hooks.UserPromptSubmit'
 assert_contains     "G: codex supervisor has stop hook config" "$(cat "$SENDLOG")" 'hooks.Stop'
-assert_contains     "G: creates loopd window"            "$(cat "$SENDLOG")" 'new-window -t agents -n loopd'
+assert_contains     "G: creates loopd window"            "$(cat "$SENDLOG")" "$tmux_new_window -t agents -n loopd"
 assert_contains     "G: launches loopd"                  "$(cat "$SENDLOG")" 'peer loopd'
 teardown
 
@@ -140,9 +141,9 @@ PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
   bash "$ROOT/start.sh" "$PROJECT" --with codex:worker \
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_contains  "H: supervisor still claude" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
-assert_contains  "H: creates loopd window"    "$(cat "$SENDLOG")" 'new-window -t adktest -n loopd'
+assert_contains  "H: creates loopd window"    "$(cat "$SENDLOG")" "$tmux_new_window -t adktest -n loopd"
 assert_contains  "H: launches loopd"          "$(cat "$SENDLOG")" 'peer loopd'
-assert_contains  "H: creates worker window"   "$(cat "$SENDLOG")" 'new-window -t adktest -n worker'
+assert_contains  "H: creates worker window"   "$(cat "$SENDLOG")" "$tmux_new_window -t adktest -n worker"
 assert_contains  "H: tags worker id"          "$(cat "$SENDLOG")" '@agent_id worker'
 assert_contains  "H: tags worker provider"    "$(cat "$SENDLOG")" '@agent_provider codex'
 assert_contains  "H: launches worker"         "$(cat "$SENDLOG")" 'send-keys -t %2'
@@ -165,7 +166,7 @@ assert_ok        "H-iso: worktree record created" test -f "$record"
 wt_path="$(jq -r '.path' "$record")"
 assert_ok        "H-iso: worktree exists" test -d "$wt_path"
 assert_contains  "H-iso: branch recorded" "$(cat "$record")" '"branch":"agent-duo/worker"'
-assert_contains  "H-iso: worker window cwd" "$(cat "$SENDLOG")" "new-window -t adktest -n worker -c $wt_path"
+assert_contains  "H-iso: worker window cwd" "$(cat "$SENDLOG")" "$tmux_new_window -t adktest -n worker -c $wt_path"
 assert_contains  "H-iso: pane worktree option" "$(cat "$SENDLOG")" "@agent_worktree $wt_path"
 assert_contains  "H-iso: root stays main" "$(cat "$SENDLOG")" "AGENT_DUO_ROOT=$PROJECT"
 assert_contains  "H-iso: worker worktree env" "$(cat "$SENDLOG")" "AGENT_DUO_WORKTREE=$wt_path"
