@@ -12,7 +12,7 @@
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/assert.sh"
+source "$DIR/lib/assert.sh"
 
 skip() { printf 'skip %s: %s\n' "codex-hook-e2e" "$1"; exit 0; }
 

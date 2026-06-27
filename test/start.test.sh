@@ -3,56 +3,8 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/assert.sh"
-
-make_tmp() {
-  local tmp
-  tmp="$(mktemp -d)" || { echo "FAIL mktemp -d failed" >&2; exit 1; }
-  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
-    echo "FAIL mktemp -d returned an invalid path" >&2
-    exit 1
-  fi
-  printf '%s\n' "$tmp"
-}
-
-# 为每个场景搭建:stub bin + 干净项目目录 + send-keys 日志
-setup() {
-  SCENARIO_TMP="$(make_tmp)"
-  STUB_BIN="$SCENARIO_TMP/bin"; mkdir -p "$STUB_BIN"
-  PROJECT="$SCENARIO_TMP/project"; mkdir -p "$PROJECT"
-  SENDLOG="$SCENARIO_TMP/sendkeys.log"; : > "$SENDLOG"
-
-  # tmux stub:记录所有调用;has-session 返回 1(无会话),new-* 返回 pane ID。
-  cat > "$STUB_BIN/tmux" <<STUB
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$SENDLOG"
-case "\$1" in
-  has-session) exit 1 ;;
-  new-session) printf '%%1\n'; exit 0 ;;
-  new-window)  printf '%%2\n'; exit 0 ;;
-  *)           exit 0 ;;
-esac
-STUB
-  chmod +x "$STUB_BIN/tmux"
-  # claude/codex stub:存在即可,绝不应被真正执行(start.sh 只 send-keys 字符串)
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/claude"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/codex"
-  chmod +x "$STUB_BIN/claude" "$STUB_BIN/codex"
-}
-
-init_git_project() {
-  git -C "$PROJECT" init -q
-  printf 'hello\n' > "$PROJECT/README.md"
-  git -C "$PROJECT" add README.md
-  git -C "$PROJECT" -c user.name='Agent Duo Test' -c user.email='agent-duo@example.invalid' commit -m init -q
-}
-
-teardown() {
-  if [[ -n "${SCENARIO_TMP:-}" && -d "$SCENARIO_TMP" && "$SCENARIO_TMP" != "/" ]]; then
-    rm -rf "$SCENARIO_TMP"
-  fi
-  unset TEST_PATH
-}
+source "$DIR/lib/harness.sh"
+setup() { start_setup; }
 
 run_start() { # 在 stub PATH + 指定 stdin/env 下运行 start.sh
   PATH="${TEST_PATH:-$STUB_BIN:$PATH}" AGENT_SESSION=adktest "$@" bash "$ROOT/start.sh" "$PROJECT" \

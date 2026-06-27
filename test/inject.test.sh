@@ -3,18 +3,8 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/assert.sh"
+source "$DIR/lib/harness.sh"
 source "$ROOT/lib/inject.sh"
-
-make_tmp() {
-  local tmp
-  tmp="$(mktemp -d)" || { echo "FAIL mktemp -d failed" >&2; exit 1; }
-  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
-    echo "FAIL mktemp -d returned an invalid path" >&2
-    exit 1
-  fi
-  printf '%s\n' "$tmp"
-}
 
 TMP="$(make_tmp)"
 cleanup() {

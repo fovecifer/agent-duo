@@ -3,16 +3,11 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/assert.sh"
+source "$DIR/lib/harness.sh"
 source "$ROOT/lib/registry.sh"
 
-assert_exit_code() {
-  local name="$1" expected="$2"; shift 2
-  local rc=0
-  if "$@"; then rc=0; else rc="$?"; fi
-  if [[ "$rc" == "$expected" ]]; then printf 'ok   %s\n' "$name"
-  else printf 'FAIL %s: exit [%s] want [%s]\n' "$name" "$rc" "$expected"; ADK_FAIL=1; fi
-}
+exit_code_helper="assert""_exit_code"
+assert_eq "harness: exit-code helper exported" "$(type -t "$exit_code_helper")" "function"
 
 # reg_validate_provider
 assert_ok      "validate: claude ok" reg_validate_provider claude

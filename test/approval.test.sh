@@ -4,17 +4,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/assert.sh"
-
-make_tmp() {
-  local tmp
-  tmp="$(mktemp -d)" || { echo "FAIL mktemp -d failed" >&2; exit 1; }
-  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
-    echo "FAIL mktemp -d returned an invalid path" >&2
-    exit 1
-  fi
-  printf '%s\n' "$tmp"
-}
+source "$DIR/lib/harness.sh"
 
 TMP="$(make_tmp)"
 cleanup() {
@@ -402,33 +392,19 @@ assert_contains "broker: fail-open survives freshness" "$FO" '"status":"fail-ope
 STUB_BIN="$TMP/stub-bin"
 mkdir -p "$STUB_BIN"
 TMUX_LOG="$TMP/tmux.log"
-REGISTRY="$TMP/registry.tsv"
-printf '%%1\tsupervisor\tsupervisor\tclaude\n' > "$REGISTRY"
-cat > "$STUB_BIN/tmux" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-cmd="${1:-}"
-shift || true
-printf '%s %s\n' "$cmd" "$*" >> "$TMUX_LOG"
-case "$cmd" in
-  has-session) exit 0 ;;
-  display-message)
-    if [[ "$*" == *'@agent_id'* ]]; then printf 'supervisor\n'
-    elif [[ "$*" == *'@agent_role'* ]]; then printf 'supervisor\n'
-    else printf 'agents\n'
-    fi
-    ;;
-  list-panes) cat "$TMUX_STUB_REGISTRY" ;;
-  new-window) printf '%%2\n' ;;
-  set-option|send-keys) : ;;
-  *) exit 1 ;;
-esac
-STUB
-chmod +x "$STUB_BIN/tmux"
+TMUX_STUB_LOG="$TMUX_LOG"; : > "$TMUX_STUB_LOG"
+TMUX_STUB_BUFFER_DIR="$TMP/buffers"; mkdir -p "$TMUX_STUB_BUFFER_DIR"
+TMUX_STUB_CAPTURE_COUNT="$TMP/capture-count"; : > "$TMUX_STUB_CAPTURE_COUNT"
+TMUX_STUB_REGISTRY="$TMP/registry.tsv"
+TMUX_STUB_NEW_PANE="%2"
+printf '%%1\tsupervisor\tsupervisor\tclaude\n' > "$TMUX_STUB_REGISTRY"
+harness_install_tmux_stub
 
 assert_ok "peer agent add: installs approval hook settings" \
   env PATH="$STUB_BIN:$PATH" AGENT_NAME=supervisor TMUX_PANE=%1 AGENT_SESSION=agents \
-    TMUX_LOG="$TMUX_LOG" TMUX_STUB_REGISTRY="$REGISTRY" AGENT_DUO_ROOT="$PROJECT" \
+    TMUX_STUB_LOG="$TMUX_STUB_LOG" TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
+    TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
+    TMUX_STUB_NEW_PANE="$TMUX_STUB_NEW_PANE" AGENT_DUO_ROOT="$PROJECT" \
     "$ROOT/bin/peer" agent add --provider codex --role worker --id worker >"$TMP/add.txt"
 SETTINGS="$PROJECT/.agent-duo/state/worker/session-settings.json"
 assert_ok "peer agent add: settings file exists" test -f "$SETTINGS"
@@ -443,7 +419,9 @@ assert_contains "peer agent add: codex send has permission hook config" "$(cat "
 : > "$TMUX_LOG"
 assert_ok "peer agent add claude: loads approval settings" \
   env PATH="$STUB_BIN:$PATH" AGENT_NAME=supervisor TMUX_PANE=%1 AGENT_SESSION=agents \
-    TMUX_LOG="$TMUX_LOG" TMUX_STUB_REGISTRY="$REGISTRY" AGENT_DUO_ROOT="$PROJECT" \
+    TMUX_STUB_LOG="$TMUX_STUB_LOG" TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
+    TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
+    TMUX_STUB_NEW_PANE="$TMUX_STUB_NEW_PANE" AGENT_DUO_ROOT="$PROJECT" \
     "$ROOT/bin/peer" agent add --provider claude --role reviewer --id reviewer >"$TMP/add-claude.txt"
 assert_contains "peer agent add claude: send has --settings" "$(cat "$TMUX_LOG")" '--settings'
 assert_contains "peer agent add claude: send has reviewer settings path" "$(cat "$TMUX_LOG")" '.agent-duo/state/reviewer/session-settings.json'

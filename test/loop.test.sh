@@ -4,85 +4,8 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/assert.sh"
-
-make_tmp() {
-  local tmp
-  tmp="$(mktemp -d)" || { echo "FAIL mktemp -d failed" >&2; exit 1; }
-  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
-    echo "FAIL mktemp -d returned an invalid path" >&2
-    exit 1
-  fi
-  printf '%s\n' "$tmp"
-}
-
-setup() {
-  SCENARIO_TMP="$(make_tmp)"
-  PROJECT="$SCENARIO_TMP/project"; mkdir -p "$PROJECT/.agent-duo/events" "$PROJECT/.agent-duo/state"
-  STUB_BIN="$SCENARIO_TMP/bin"; mkdir -p "$STUB_BIN"
-  TMUX_STUB_LOG="$SCENARIO_TMP/tmux.log"; : > "$TMUX_STUB_LOG"
-  PEER_STUB_LOG="$SCENARIO_TMP/peer.log"; : > "$PEER_STUB_LOG"
-  OUT="$SCENARIO_TMP/out.txt"
-  ERR="$SCENARIO_TMP/err.txt"
-  TMUX_STUB_REGISTRY="$SCENARIO_TMP/registry.tsv"
-  printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tloopd\tdaemon\tbash\n%%3\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-
-  cat > "$STUB_BIN/tmux" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-cmd="${1:-}"
-shift || true
-printf '%s %s\n' "$cmd" "$*" >> "$TMUX_STUB_LOG"
-case "$cmd" in
-  has-session)
-    exit 0
-    ;;
-  list-panes)
-    cat "$TMUX_STUB_REGISTRY"
-    ;;
-  capture-pane)
-    count_file="${TMUX_STUB_CAPTURE_COUNT:-}"
-    if [[ -n "$count_file" ]]; then
-      count=0
-      [[ -s "$count_file" ]] && count="$(cat "$count_file")"
-      count=$(( count + 1 ))
-      printf '%s\n' "$count" > "$count_file"
-    fi
-    case "${TMUX_STUB_CAPTURE_MODE:-stable}" in
-      changing)
-        printf 'changing-%s\n' "$(cat "$count_file")"
-        ;;
-      *)
-        printf 'stable-screen\n'
-        ;;
-    esac
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-STUB
-  chmod +x "$STUB_BIN/tmux"
-
-  cat > "$STUB_BIN/peer" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$PEER_STUB_LOG"
-exit 0
-STUB
-  chmod +x "$STUB_BIN/peer"
-
-  cat > "$STUB_BIN/sleep" <<'STUB'
-#!/usr/bin/env bash
-exit 0
-STUB
-  chmod +x "$STUB_BIN/sleep"
-}
-
-teardown() {
-  if [[ -n "${SCENARIO_TMP:-}" && -d "$SCENARIO_TMP" && "$SCENARIO_TMP" != "/" ]]; then
-    rm -rf "$SCENARIO_TMP"
-  fi
-}
+source "$DIR/lib/harness.sh"
+setup() { loop_setup; }
 
 write_event() { # <id> <agent> <type> <round> <summary> <ref>
   jq -cn \
@@ -187,31 +110,6 @@ wait_for_validation_runner_log() {
     /bin/sleep 0.1
   done
   return 1
-}
-
-run_hook() {
-  : > "$OUT"; : > "$ERR"
-  PATH="$STUB_BIN:$PATH" AGENT_DUO_ROOT="$PROJECT" "$@" >"$OUT" 2>"$ERR"
-}
-
-run_loopd_once() {
-  : > "$OUT"; : > "$ERR"; : > "$PEER_STUB_LOG"; : > "$TMUX_STUB_LOG"
-  TMUX_STUB_CAPTURE_COUNT="$SCENARIO_TMP/capture-count"; : > "$TMUX_STUB_CAPTURE_COUNT"
-  PATH="$STUB_BIN:$PATH" \
-    AGENT_DUO_ROOT="$PROJECT" \
-    AGENT_SESSION=agents \
-    LOOPD_ONCE=1 \
-    LOOPD_QUIET_SAMPLE="${LOOPD_QUIET_SAMPLE:-0}" \
-    LOOPD_SILENT_T="${LOOPD_SILENT_T:-999999}" \
-    LOOPD_TICK_T="${LOOPD_TICK_T:-999999}" \
-    AGENT_DUO_LOOPD_BIN="${AGENT_DUO_LOOPD_BIN:-}" \
-    VERIFY_RUNNER_LOG="${VERIFY_RUNNER_LOG:-}" \
-    TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
-    TMUX_STUB_LOG="$TMUX_STUB_LOG" \
-    TMUX_STUB_CAPTURE_MODE="${TMUX_STUB_CAPTURE_MODE:-stable}" \
-    TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
-    PEER_STUB_LOG="$PEER_STUB_LOG" \
-    bash "$ROOT/scripts/loopd" --once >"$OUT" 2>"$ERR"
 }
 
 # UserPromptSubmit marks the supervisor turn busy.

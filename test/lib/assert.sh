@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test/assert.sh — 极简断言助手(被各测试文件 source)。失败置 ADK_FAIL=1,不退出。
+# test/lib/assert.sh — 极简断言助手(被各测试文件 source)。失败置 ADK_FAIL=1,不退出。
 ADK_FAIL=0
 
 assert_eq() { # <name> <actual> <expected>
