@@ -1,6 +1,7 @@
 #!/bin/bash
 # Mark supervisor busy at the start of a user/submitted turn.
 set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
 
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done

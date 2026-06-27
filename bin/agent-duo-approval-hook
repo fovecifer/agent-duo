@@ -1,6 +1,7 @@
 #!/bin/bash
 # Single PreToolUse hook entrypoint for agent-duo Approval Broker MVP1.
 set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
 
 SRC="${BASH_SOURCE[0]}"
 while [ -L "$SRC" ]; do SRC="$(readlink "$SRC")"; done

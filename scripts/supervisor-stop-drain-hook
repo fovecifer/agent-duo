@@ -1,6 +1,7 @@
 #!/bin/bash
 # Mark supervisor idle, then drain one pending runtime event via Stop block.
 set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
 
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done

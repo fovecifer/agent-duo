@@ -28,6 +28,7 @@ first_hook_line="$(sed -n '1p' "$ROOT/bin/agent-duo-approval-hook")"
 assert_eq "broker: hook entrypoint uses absolute bash" "$first_hook_line" "#!/bin/bash"
 assert_not_contains "broker: hook does not rely on PATH bash" "$(cat "$ROOT/bin/agent-duo-approval-hook")" '/usr/bin/env bash'
 assert_contains "broker: hook invokes backend with absolute bash" "$(cat "$ROOT/bin/agent-duo-approval-hook")" '/bin/bash "$ROOT/lib/approval_broker.sh" hook'
+assert_contains "broker: hook seeds fallback PATH" "$(cat "$ROOT/bin/agent-duo-approval-hook")" '/usr/bin:/bin'
 assert_ok "broker: jq is available for safe JSON parsing" sh -c 'command -v jq >/dev/null'
 
 run_hook() {
@@ -44,11 +45,33 @@ run_hook() {
   )
 }
 
+run_hook_broken_path() {
+  local payload="$1"
+  : > "$OUT"
+  : > "$ERR"
+  (
+    cd "$WORKTREE"
+    printf '%s' "$payload" | \
+      env -i \
+        AGENT_DUO_ROOT="$PROJECT" \
+        AGENT_DUO_AGENT_ID="worker" \
+        AGENT_DUO_WORKTREE="$WORKTREE" \
+        PATH=/nonexistent \
+        /bin/bash "$ROOT/bin/agent-duo-approval-hook" >"$OUT" 2>"$ERR"
+  )
+}
+
 latest_approval_id() {
   local f
   f="$(ls "$PROJECT/.agent-duo/approvals"/*.json | sort | tail -n 1)"
   basename "$f" .json
 }
+
+# Provider hook environments may pass a broken PATH; the hook entrypoint must
+# repair it before resolving its own location or invoking the broker backend.
+assert_ok "hook: approval entrypoint works with broken PATH" run_hook_broken_path \
+  '{"tool_name":"Bash","tool_input":{"command":"pwd"},"round":3}'
+assert_contains "hook: broken PATH allow decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
 
 # Bash allowlist: all command segments must be allowlisted, then audit only.
 assert_ok "hook: bash allowlisted segments pass" run_hook \

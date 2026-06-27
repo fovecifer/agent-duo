@@ -140,6 +140,22 @@ assert_eq "hook stop: absolute bash shebang" \
   "$(sed -n '1p' "$ROOT/scripts/supervisor-stop-drain-hook")" "#!/bin/bash"
 assert_not_contains "hook supervisor entrypoints: no env bash" \
   "$(cat "$ROOT/scripts/supervisor-user-prompt-submit-hook" "$ROOT/scripts/supervisor-stop-drain-hook")" '/usr/bin/env bash'
+assert_contains "hook supervisor entrypoints: seed fallback PATH" \
+  "$(cat "$ROOT/scripts/supervisor-user-prompt-submit-hook" "$ROOT/scripts/supervisor-stop-drain-hook")" '/usr/bin:/bin'
+
+# Hook providers can pass a broken or empty PATH. The entrypoints must repair it
+# before resolving their own location or calling lib helpers.
+setup
+assert_ok "hook user submit: works with broken PATH" \
+  env -i AGENT_DUO_ROOT="$PROJECT" PATH=/nonexistent /bin/bash "$ROOT/scripts/supervisor-user-prompt-submit-hook"
+assert_eq "hook user submit: broken PATH marks busy" "$(cat "$PROJECT/.agent-duo/state/supervisor.turn")" "busy"
+teardown
+
+setup
+assert_ok "hook stop: works with broken PATH" \
+  env -i AGENT_DUO_ROOT="$PROJECT" PATH=/nonexistent /bin/bash "$ROOT/scripts/supervisor-stop-drain-hook"
+assert_eq "hook stop: broken PATH marks idle" "$(cat "$PROJECT/.agent-duo/state/supervisor.turn")" "idle"
+teardown
 
 # UserPromptSubmit marks the supervisor turn busy.
 setup
