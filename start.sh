@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # start.sh — 创建一个 tmux 会话,起一个 supervisor 窗口(默认 claude),
-#            并注入 peer 工具,使 supervisor 可按需 `peer add` 长出更多 agent。
+#            并注入 peer 工具,使 supervisor 可按需 `peer agent add` 长出更多 agent。
 #
 # 用法:
 #   ./start.sh [工作目录] [--supervisor claude|codex] [--with <provider>:<role>[:isolated]]
 #   ./start.sh                       # 默认为当前目录,supervisor=claude,无额外 worker
 #   ./start.sh --supervisor codex    # supervisor 用 codex
-#   ./start.sh --with codex:worker   # 额外起一个 codex worker(等价稍后 peer add)
+#   ./start.sh --with codex:worker   # 额外起一个 codex worker(等价稍后 peer agent add)
 #   ./start.sh --with codex:worker:isolated  # worker 在隔离 git worktree 中启动
 #
 # 启动后在 iTerm2 里执行:
@@ -266,7 +266,7 @@ date +%s > "$WORKDIR/.agent-duo/state/daemon.expected"
 tmux send-keys -t "$LOOPD_PANE" \
   "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q PATH=$BIN_DIR_Q:\$PATH; peer loopd" Enter
 
-# --with <provider>:<role> → 立即再起一个 worker(等价 peer add)。
+# --with <provider>:<role> → 立即再起一个 worker(等价 peer agent add)。
 if [[ -n "$WITH_SPEC" ]]; then
   W_PROVIDER="$WITH_PROVIDER"
   W_ROLE="$WITH_ROLE"
@@ -302,7 +302,7 @@ if [[ -n "$WITH_SPEC" ]]; then
   W_SETTINGS_Q="$(shell_quote "$W_SETTINGS")"
   tmux send-keys -t "$W_PANE" \
     "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
-  # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效(等价 peer add)。
+  # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效(等价 peer agent add)。
   # 必须覆盖同一 workdir 旧 session 可能残留的 fresh ready marker,否则硬门会误放行未信任的新 worker。
   bash "$APPROVAL_BROKER" mark --agent-id "$W_ROLE" --status unverified --root "$WORKDIR" >/dev/null 2>&1 || true
 fi
@@ -326,7 +326,7 @@ EOF
 if [[ -n "$WITH_SPEC" ]]; then
   echo
   echo "新 worker '$W_ROLE' 的 Approval Broker 起始为 unverified(hook 未被 provider 实际调用前不可信)。"
-  echo "派任务前先在 supervisor pane 运行 'peer broker-check $W_ROLE' 验证 broker 生效——"
+  echo "派任务前先在 supervisor pane 运行 'peer approval check $W_ROLE' 验证 broker 生效——"
   echo "否则首次 'peer tell $W_ROLE ...' 会被硬门 fail-closed 拒发。"
 fi
 

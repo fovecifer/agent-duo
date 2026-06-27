@@ -1,8 +1,8 @@
 # agent-duo
 
-**把可见的 Claude Code / Codex CLI 会话组织成一个 supervisor 工作台 —— 就在普通 iTerm2 tab 里。**
+**把可见的 Claude Code / Codex CLI 会话组织成一个 loop engineering 框架 —— 就在普通 iTerm2 tab 里。**
 
-你说一句话，supervisor 可以按需创建 worker、等待结果、再向你汇报 —— 整个过程都在你眼前的普通 tab 里发生：
+你用 plan → build → judge 的节奏驱动可见 agent：supervisor 管 loop 契约、verify gates、judge verdicts、human gates 与 approval checks，整个过程都在你眼前的普通 tab 里发生：
 
 ```
 ┌─ iTerm2 ───────────────────────────────────────────┐
@@ -25,7 +25,7 @@
 
 ## 工作原理
 
-一个 tmux 会话会先启动 supervisor tab 和可见的 `loopd` 看板。worker 可以用 `peer add` 按需创建，也可以用 `agent-duo-start --with codex:worker` 启动时直接带一个；需要代码隔离时用 `--worktree` / `:isolated` 让 worker 在自己的 git worktree 中编辑。iTerm2 的 tmux 原生集成（`tmux -CC`）把 tmux window 渲染成普通 tab，`peer` 命令则给每个 agent 一双"看对方屏幕"的眼睛和一只"往对方输入框打字"的手：
+一个 tmux 会话会先启动 supervisor tab 和可见的 `loopd` 看板。worker 可以用 `peer agent add` 按需创建，也可以用 `agent-duo-start --with codex:worker` 启动时直接带一个；需要代码隔离时用 `--worktree` / `:isolated` 让 worker 在自己的 git worktree 中编辑。iTerm2 的 tmux 原生集成（`tmux -CC`）把 tmux window 渲染成普通 tab，`peer` 命令则给每个 agent 一双"看对方屏幕"的眼睛和一只"往对方输入框打字"的手：
 
 ```mermaid
 flowchart TB
@@ -126,7 +126,7 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 这一步由 iTerm2 决定;`agent-duo` 只负责创建 tmux window。
 
 不带 `--with` 时只创建 supervisor 和 loopd;之后可在 supervisor 里运行
-`peer add --provider codex --role worker` 按需创建 worker。加 `--worktree` 会给 worker 单独的 checkout,但 `.agent-duo` 控制状态仍共享在主仓。
+`peer agent add --provider codex --role worker` 按需创建 worker。加 `--worktree` 会给 worker 单独的 checkout,但 `.agent-duo` 控制状态仍共享在主仓。
 
 之后正常在各个 tab 里分别和 Claude Code、Codex 对话。需要它们交互时,
 直接用自然语言指挥,例如:
@@ -138,32 +138,50 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 
 新建 worker 的 Approval Broker 起始为 **unverified**(hook 未被 provider 实际调用前不可信),
 而 `peer tell` 发给 worker 是对这道门 fail-closed 的。所以对一个新 worker 的第一次派发是
-`peer broker-check <id>` → 等到 `ready`,**再** `peer tell`。`agent-duo-start --with` 和
-`peer add` 都会打印这条提醒。
+`peer approval check <id>` → 等到 `ready`,**再** `peer tell`。`agent-duo-start --with` 和
+`peer agent add` 都会打印这条提醒。
 
 结束:`tmux kill-session -t agents`
 
 ## peer 命令参考
 
+### Transport
+
 | 命令 | 作用 |
 |---|---|
-| `peer peek [行数]` | 查看对方终端最近输出(默认 80 行) |
-| `peer tell "消息"` | 发送单行消息并回车 |
+| `peer peek [<id>] [行数]` | 查看指定或默认对方终端最近输出(默认 80 行) |
+| `peer tell [<id>] "消息"` | 发送单行消息并回车 |
 | `... \| peer tell` | 从 stdin 投递多行消息(buffer + bracketed paste,引号/换行安全) |
-| `peer wait [秒] [采样间隔] [连续稳定次数]` | 等待对方输出连续多次采样一致(默认最长 300s、间隔 5s、连续 2 次) |
-| `peer add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | 新建可见队友 tab;`--worktree` 让它在隔离 git worktree 中编辑,控制状态仍共享 |
-| `peer rm [--force] <id>` | 移除队友 tab;隔离 worktree 干净才删除,脏时保留,`--force` 可丢弃 |
-| `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | 创建并查看持久化 `task.json` 步骤账本,供解阻后幂等续跑 |
-| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--detail-trap-rounds N]` / `peer loop <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;可选 validation 异步门控 `done`,连续空 `delta` 会触发方向事件 |
-| `peer loop reset <id> [--max-rounds N]` | 在最新 report 轮次重新冻结 loop,清空停止状态,给 worker 一份新轮次预算 |
-| `peer ask <id> "消息"` | 发送一条受 loop 边界保护的消息,等待 worker 下一轮结构化 report,并打印摘要/ref |
-| `peer checkpoint <id> [--json]` | 只读汇总 loop、最近 report、task 步骤与 validation,辅助判断是否继续/纠偏/停止 |
-| `peer reframe <id> "消息" [--force]` | 发送受 loop/broker 保护的方向纠偏指令,以 `reframe` 动词下发并写入 `checkpoints.jsonl` 审计 |
-| `peer report --type request --status blocked --needs decision ...` | worker 写结构化报告；需要人类选择时自动打开 Human Decision Gate |
-| `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...` | 查看、创建、解决 Human Decision Gate；选择会写入 `decisions.jsonl` 并以 `decision` 动词发回 worker |
-| `peer approvals` / `peer approve` / `peer deny` | 查看并处理 Approval Broker 的工具权限请求 |
-| `peer esc` | 向对方发 Escape,打断其生成 |
+| `peer wait [<id>] [秒] [采样间隔] [连续稳定次数]` | 等待对方输出连续多次采样一致(默认最长 300s、间隔 5s、连续 2 次) |
+| `peer esc [<id>] [--force]` | 向对方发 Escape,打断其生成 |
 | `peer status` | 查看双方身份与窗口状态 |
+
+### Loop Building Blocks
+
+| 命令 | 作用 |
+|---|---|
+| `peer agent ls` | 列出本 tmux 会话里的可见 agent |
+| `peer agent add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | 新建可见队友 tab;`--worktree` 让它在隔离 git worktree 中编辑,控制状态仍共享 |
+| `peer agent rm [--force] <id>` | 移除队友 tab;隔离 worktree 干净才删除,脏时保留,`--force` 可丢弃 |
+| `peer task init <id> --task ... --step s1:...` / `peer task next <id>` / `peer task show <id>` | 创建并查看持久化 `task.json` 步骤账本,供解阻后幂等续跑 |
+| `peer loop init <id> --mission ... --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;可选 verify 与 judge 双门控 `done`,连续空 `delta` 会触发方向事件 |
+| `peer loop reset <id> [--max-rounds N]` | 在最新 report 轮次重新冻结 loop,清空停止状态,给 worker 一份新轮次预算 |
+| `peer verify ls <id>` / `peer verify show <id>` | 只读查看 loop 契约里的 verify gates 及当前/指定轮次结果 |
+| `peer report --type request --status blocked --needs decision ...` | worker 写结构化报告；需要人类选择时自动打开 Human Decision Gate |
+| `peer judge worker@N --verdict approve [--finding severity:note]` | reviewer/evaluator 对目标 worker 轮次写 verdict;命中 veto 会让目标 loop 保持 active |
+| `peer gate ls` / `peer gate open ...` / `peer gate resolve --choice ...` | 查看、创建、解决 Human Decision Gate；选择会写入 `decisions.jsonl` 并以 `decision` 动词发回 worker |
+| `peer approval ls` / `peer approval approve` / `peer approval deny` | 查看并处理 Approval Broker 的工具权限请求 |
+| `peer budget status` | 预算护栏预留槽,当前只读说明 |
+
+### Steering
+
+| 命令 | 作用 |
+|---|---|
+| `peer ask <id> "消息"` | 发送一条受 loop 边界保护的消息,等待 worker 下一轮结构化 report,并打印摘要/ref |
+| `peer checkpoint <id> [--json]` | 只读汇总 loop、最近 report、task 步骤与 verify,辅助判断是否继续/纠偏/停止 |
+| `peer reframe <id> "消息" [--force]` | 发送受 loop/broker 保护的方向纠偏指令,以 `reframe` 动词下发并写入 `checkpoints.jsonl` 审计 |
+
+这些 building-block 名词对应 loop engineering 概念:`verify` 是机械闸门,`judge` 是独立评判,`gate` 是人类决策点,`approval` 是工具权限 broker,`budget` 是护栏槽位。
 
 身份由 tmux pane 上的 `@agent_id` 标记决定;正好两个 agent 时 `peer` 可自动把
 "对方"解析为另一个窗口,三人及以上必须显式指定 id。

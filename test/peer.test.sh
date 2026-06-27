@@ -256,9 +256,52 @@ setup
 assert_contains "status: prints target pane" "$(run_peer status; cat "$OUT")" '%2'
 teardown
 
-# ls:列出 registry 内所有 agent;未注册 pane 显示 (unregistered)。
+# 新名词 help 可直接发现。
 setup
-assert_ok "ls: succeeds" run_peer ls
+assert_ok "help: loop noun" run_peer loop --help
+assert_ok "help: agent noun" run_peer agent --help
+assert_ok "help: approval noun" run_peer approval --help
+assert_ok "help: verify noun" run_peer verify --help
+assert_ok "help: judge noun" run_peer judge --help
+assert_ok "help: gate noun" run_peer gate --help
+assert_ok "help: budget noun" run_peer budget --help
+assert_ok "help: task noun" run_peer task --help
+assert_ok "help: report noun" run_peer report --help
+teardown
+
+# 旧命令面 fail-closed,并提示新命令。
+setup
+assert_not_ok "old command: peer ls removed" run_peer ls
+assert_contains "old command: ls hints agent" "$(cat "$ERR")" 'peer agent ls'
+assert_not_ok "old command: peer --force ls removed" run_peer --force ls
+assert_contains "old command: --force ls hints agent" "$(cat "$ERR")" 'peer agent ls'
+assert_not_ok "old command: peer loop <id> removed" run_peer loop worker
+assert_contains "old command: loop hints show" "$(cat "$ERR")" 'peer loop show'
+assert_not_ok "old command: peer task <id> removed" run_peer task worker
+assert_contains "old command: task hints show" "$(cat "$ERR")" 'peer task show'
+assert_not_ok "old command: peer approvals removed" run_peer approvals
+assert_contains "old command: approvals hints approval" "$(cat "$ERR")" 'peer approval ls'
+assert_not_ok "old command: peer approve removed" run_peer approve abc
+assert_contains "old command: approve hints approval" "$(cat "$ERR")" 'peer approval approve'
+assert_not_ok "old command: peer deny removed" run_peer deny abc
+assert_contains "old command: deny hints approval" "$(cat "$ERR")" 'peer approval deny'
+assert_not_ok "old command: peer broker-check removed" run_peer broker-check worker
+assert_contains "old command: broker-check hints approval" "$(cat "$ERR")" 'peer approval check'
+assert_not_ok "old command: peer broker-status removed" run_peer broker-status worker
+assert_contains "old command: broker-status hints approval" "$(cat "$ERR")" 'peer approval status'
+TEST_TMUX_PANE="%2" assert_not_ok "old command: report verdict removed" \
+  run_peer report --type result --status done --round 1 --verdict approve --target-ref worker@3
+assert_contains "old command: report verdict hints judge" "$(cat "$ERR")" 'peer judge'
+assert_ok "old command: report verdict writes no file" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+TEST_TMUX_PANE="%2" assert_not_ok "old command: --force report verdict removed" \
+  run_peer --force report --type result --status done --round 1 --verdict approve --target-ref worker@3
+assert_contains "old command: --force report verdict hints judge" "$(cat "$ERR")" 'peer judge'
+assert_ok "old command: --force report verdict writes no file" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+teardown
+
+# agent ls:列出 registry 内所有 agent;未注册 pane 显示 (unregistered)。
+setup
+assert_ok "agent ls: succeeds" run_peer agent ls
 assert_contains "ls: shows supervisor" "$(cat "$OUT")" 'supervisor'
 assert_contains "ls: shows worker"     "$(cat "$OUT")" 'worker'
 assert_contains "ls: shows provider"   "$(cat "$OUT")" 'codex'
@@ -268,7 +311,7 @@ teardown
 # ls:未注册 pane(无 @agent_id)显示占位。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%7\t\t\t\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "ls: unregistered succeeds" run_peer ls
+assert_ok "ls: unregistered succeeds" run_peer agent ls
 assert_contains "ls: unregistered marked" "$(cat "$OUT")" '(unregistered)'
 teardown
 
@@ -480,7 +523,7 @@ assert_contains "task init: task title" "$task_json" '"task":"add tenant_id"'
 assert_contains "task init: frozen round" "$task_json" '"frozen_at_round":1'
 assert_contains "task init: step s1" "$task_json" '"id":"s1"'
 assert_contains "task init: pending status" "$task_json" '"status":"pending"'
-assert_ok "task list: succeeds" run_peer task worker
+assert_ok "task list: succeeds" run_peer task show worker
 assert_contains "task list: shows task" "$(cat "$OUT")" 'add tenant_id'
 assert_ok "task next: succeeds" run_peer task next worker
 assert_contains "task next: first pending" "$(cat "$OUT")" $'s1\tpending'
@@ -551,7 +594,7 @@ assert_contains "loop init: non goal" "$loop_json" '"non_goals":["no auth refact
 assert_contains "loop init: success" "$loop_json" '"success_signals":["tests pass"]'
 assert_contains "loop init: default validation empty" "$loop_json" '"validation":[]'
 assert_contains "loop init: default detail trap" "$loop_json" '"detail_trap_rounds":3'
-assert_ok "loop print: succeeds" run_peer loop worker
+assert_ok "loop print: succeeds" run_peer loop show worker
 assert_contains "loop print: rounds used" "$(cat "$OUT")" $'ROUNDS_USED\t1'
 assert_contains "loop print: remaining" "$(cat "$OUT")" $'REMAINING\t7'
 assert_contains "loop print: detail trap rounds" "$(cat "$OUT")" $'DETAIL_TRAP_ROUNDS\t3'
@@ -572,21 +615,21 @@ teardown
 # loop:init validation 命令写入 contract,并把 validation id 映射到 success_signals。
 setup
 assert_ok "loop init validation: succeeds" run_peer loop init worker --mission "ship with tests" --max-rounds 4 \
-  --success "tests pass" --validation go-test:"printf ok" \
-  --validation-satisfies go-test:"tests pass" --validation-timeout go-test:5
+  --success "tests pass" --verify go-test:"printf ok" \
+  --verify-satisfies go-test:"tests pass" --verify-timeout go-test:5
 loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
 assert_contains "loop init validation: id" "$loop_json" '"id":"go-test"'
 assert_contains "loop init validation: cmd" "$loop_json" '"cmd":"printf ok"'
 assert_contains "loop init validation: timeout" "$loop_json" '"timeout_seconds":5'
 assert_contains "loop init validation: satisfies" "$loop_json" '"satisfies":["tests pass"]'
-assert_ok "loop init validation: print succeeds" run_peer loop worker
-assert_contains "loop init validation: print" "$(cat "$OUT")" $'VALIDATION\tgo-test:printf ok'
+assert_ok "loop init validation: print succeeds" run_peer loop show worker
+assert_contains "loop init validation: print" "$(cat "$OUT")" $'VERIFY\tgo-test:printf ok'
 teardown
 
 # loop:init validation 省略 satisfies/timeout 时,bash 3.2 空数组分支不崩溃,并使用默认值。
 setup
 assert_ok "loop init validation default: succeeds" run_peer loop init worker --mission "ship with default validation" --max-rounds 4 \
-  --validation go-test:"echo hi"
+  --verify go-test:"echo hi"
 loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
 assert_contains "loop init validation default: timeout" "$loop_json" '"timeout_seconds":120'
 assert_contains "loop init validation default: satisfies id" "$loop_json" '"satisfies":["go-test"]'
@@ -595,22 +638,22 @@ teardown
 # loop:init review 写入 acceptance.reviews,role 允许点号,坏格式 fail-closed。
 setup
 assert_ok "loop init review: succeeds" run_peer loop init worker --mission "ship with review" --max-rounds 4 \
-  --review reviewer.v2:request_changes,reject --review evaluator:fail
+  --judge reviewer.v2:request_changes,reject --judge evaluator:fail
 loop_json="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
 assert_contains "loop init review: role with dot" "$loop_json" '"role":"reviewer.v2"'
 assert_contains "loop init review: veto list" "$loop_json" '"veto_on":["request_changes","reject"]'
-assert_ok "loop init review: print succeeds" run_peer loop worker
-assert_contains "loop init review: print" "$(cat "$OUT")" $'ACCEPTANCE\treviewer.v2:request_changes,reject; evaluator:fail'
+assert_ok "loop init review: print succeeds" run_peer loop show worker
+assert_contains "loop init review: print" "$(cat "$OUT")" $'JUDGE\treviewer.v2:request_changes,reject; evaluator:fail'
 teardown
 
 setup
-assert_not_ok "loop init review: bad role rejected" run_peer loop init worker --mission "ship" --max-rounds 4 --review '../reviewer:reject'
-assert_contains "loop init review: bad role error" "$(cat "$ERR")" '--review'
+assert_not_ok "loop init review: bad role rejected" run_peer loop init worker --mission "ship" --max-rounds 4 --judge '../reviewer:reject'
+assert_contains "loop init review: bad role error" "$(cat "$ERR")" '--judge'
 assert_ok "loop init review: bad role no file" test ! -e "$PROJECT/.agent-duo/state/worker/loop.json"
 teardown
 
 setup
-assert_not_ok "loop init review: empty veto rejected" run_peer loop init worker --mission "ship" --max-rounds 4 --review reviewer:reject,
+assert_not_ok "loop init review: empty veto rejected" run_peer loop init worker --mission "ship" --max-rounds 4 --judge reviewer:reject,
 assert_contains "loop init review: empty veto error" "$(cat "$ERR")" '空 verdict'
 assert_ok "loop init review: empty veto no file" test ! -e "$PROJECT/.agent-duo/state/worker/loop.json"
 teardown
@@ -628,10 +671,10 @@ assert_not_ok "loop init: missing mission rejected" run_peer loop init worker --
 assert_contains "loop init: missing mission error" "$(cat "$ERR")" '--mission'
 assert_not_ok "loop init: bad max rejected" run_peer loop init worker --mission "do work" --max-rounds nope
 assert_contains "loop init: bad max error" "$(cat "$ERR")" '--max-rounds'
-assert_not_ok "loop init: bad validation rejected" run_peer loop init worker --mission "do work" --max-rounds 3 --validation bad
+assert_not_ok "loop init: bad validation rejected" run_peer loop init worker --mission "do work" --max-rounds 3 --verify bad
 assert_contains "loop init: bad validation error" "$(cat "$ERR")" 'id:value'
-assert_not_ok "loop init: unknown validation signal rejected" run_peer loop init worker --mission "do work" --max-rounds 3 --validation go-test:"true" --validation-satisfies lint:"tests pass"
-assert_contains "loop init: unknown validation signal error" "$(cat "$ERR")" '不存在的 validation id'
+assert_not_ok "loop init: unknown validation signal rejected" run_peer loop init worker --mission "do work" --max-rounds 3 --verify go-test:"true" --verify-satisfies lint:"tests pass"
+assert_contains "loop init: unknown validation signal error" "$(cat "$ERR")" '不存在的 verify id'
 teardown
 
 # loop:reset 在当前 report 轮次重新冻结预算,只重写 loop.json 的边界/stop 状态。
@@ -863,7 +906,7 @@ assert_contains "checkpoint: header" "$checkpoint_out" $'CHECKPOINT\tworker @ r7
 assert_contains "checkpoint: mission" "$checkpoint_out" $'MISSION\tfix login copy'
 assert_contains "checkpoint: recent drift" "$checkpoint_out" 'drift="碰 non_goal: 不改 auth 流程"'
 assert_contains "checkpoint: steps" "$checkpoint_out" $'STEPS\t1 done, 1 in_progress, 0 blocked, 1 pending, 0 failed (current: s2)'
-assert_contains "checkpoint: validation" "$checkpoint_out" $'VALIDATION\tr7 fail'
+assert_contains "checkpoint: validation" "$checkpoint_out" $'VERIFY\tr7 fail'
 assert_ok "checkpoint: does not write checkpoint log" test ! -e "$PROJECT/.agent-duo/logs/checkpoints.jsonl"
 assert_ok "checkpoint: json succeeds" run_peer checkpoint worker --json
 assert_eq "checkpoint: json loop detail trap" "$(jq -r '.loop.detail_trap_rounds' "$OUT")" "3"
@@ -881,7 +924,7 @@ assert_ok "checkpoint: report only succeeds" run_peer checkpoint worker
 assert_contains "checkpoint: report only header" "$(cat "$OUT")" $'CHECKPOINT\tworker @ r2 (loop none)'
 assert_contains "checkpoint: report only recent" "$(cat "$OUT")" $'RECENT\tr2 in_progress'
 assert_not_contains "checkpoint: report only no steps" "$(cat "$OUT")" $'STEPS\t'
-assert_not_contains "checkpoint: report only no validation" "$(cat "$OUT")" $'VALIDATION\t'
+assert_not_contains "checkpoint: report only no validation" "$(cat "$OUT")" $'VERIFY\t'
 teardown
 
 setup
@@ -949,71 +992,72 @@ assert_contains "report: done without evidence downgraded" "$(cat "$PROJECT/.age
 assert_contains "report: downgraded sentinel status" "$(cat "$OUT")" 'status=unknown'
 teardown
 
-# report:reviewer verdict 写入自身 report,并路由到目标 worker reviews/。
+# judge:reviewer verdict 写入自身 report,并路由到目标 worker reviews/。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\treviewer\treviewer\tcodex\n%%3\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "report verdict: succeeds" \
-  run_peer report --type result --status done --round 1 \
-    --verdict approve --target-ref worker@5 --finding blocking:"401/403 反了"
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "judge verdict: succeeds" \
+  run_peer judge worker@5 --round 1 --verdict approve --finding blocking:"401/403 反了"
 reviewer_report="$(cat "$PROJECT/.agent-duo/state/reviewer/r1.json")"
 verdict_record="$(cat "$PROJECT/.agent-duo/state/worker/reviews/reviewer-r5.json")"
-assert_contains "report verdict: report verdict field" "$reviewer_report" '"verdict":"approve"'
-assert_contains "report verdict: report target ref" "$reviewer_report" '"target_ref":"worker@5"'
-assert_contains "report verdict: finding severity" "$reviewer_report" '"severity":"blocking"'
-assert_contains "report verdict: routed verdict" "$verdict_record" '"verdict":"approve"'
-assert_contains "report verdict: routed by" "$verdict_record" '"by":"reviewer"'
-assert_contains "report verdict: routed role" "$verdict_record" '"role":"reviewer"'
-assert_contains "report verdict: routed target round" "$verdict_record" '"target_round":5'
+assert_contains "judge verdict: report verdict field" "$reviewer_report" '"verdict":"approve"'
+assert_contains "judge verdict: report target ref" "$reviewer_report" '"target_ref":"worker@5"'
+assert_contains "judge verdict: finding severity" "$reviewer_report" '"severity":"blocking"'
+assert_contains "judge verdict: routed verdict" "$verdict_record" '"verdict":"approve"'
+assert_contains "judge verdict: routed by" "$verdict_record" '"by":"reviewer"'
+assert_contains "judge verdict: routed role" "$verdict_record" '"role":"reviewer"'
+assert_contains "judge verdict: routed target round" "$verdict_record" '"target_round":5'
+assert_ok "judge ls: succeeds" run_peer judge ls worker
+assert_contains "judge ls: shows verdict" "$(cat "$OUT")" $'r5\treviewer\tapprove'
 teardown
 
-# report:verdict 相关耦合错误 fail-closed。
+# report:verdict flags were removed from report and fail-closed toward judge.
 setup
-TEST_TMUX_PANE="%2" assert_not_ok "report verdict: missing target ref rejected" \
-  run_peer report --type result --status done --round 1 --verdict approve
-assert_contains "report verdict: missing target ref error" "$(cat "$ERR")" '--verdict'
-assert_ok "report verdict: missing target writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
-teardown
-
-setup
-TEST_TMUX_PANE="%2" assert_not_ok "report verdict: target without verdict rejected" \
-  run_peer report --type result --status done --round 1 --target-ref worker@5
-assert_contains "report verdict: target without verdict error" "$(cat "$ERR")" '--target-ref'
-assert_ok "report verdict: target without verdict writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+TEST_TMUX_PANE="%2" assert_not_ok "report verdict: old report verdict rejected" \
+  run_peer report --type result --status done --round 1 --verdict approve --target-ref worker@5
+assert_contains "report verdict: old report hints judge" "$(cat "$ERR")" 'peer judge'
+assert_ok "report verdict: old report writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
 teardown
 
 setup
-TEST_TMUX_PANE="%2" assert_not_ok "report verdict: finding without verdict rejected" \
-  run_peer report --type result --status done --round 1 --finding note:"needs work"
-assert_contains "report verdict: finding without verdict error" "$(cat "$ERR")" '--verdict'
-assert_ok "report verdict: finding without verdict writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+TEST_TMUX_PANE="%2" assert_not_ok "judge verdict: missing verdict rejected" \
+  run_peer judge worker@5 --round 1
+assert_contains "judge verdict: missing verdict error" "$(cat "$ERR")" '--verdict'
+assert_ok "judge verdict: missing verdict writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
 teardown
 
 setup
-TEST_TMUX_PANE="%2" assert_not_ok "report verdict: non-result rejected" \
-  run_peer report --type checkpoint --status done --round 1 --verdict approve --target-ref worker@5
-assert_contains "report verdict: non-result error" "$(cat "$ERR")" '--type result'
-assert_ok "report verdict: non-result writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
+TEST_TMUX_PANE="%2" assert_not_ok "judge verdict: bad target ref rejected" \
+  run_peer judge '..@5' --round 1 --verdict approve
+assert_contains "judge verdict: bad target ref error" "$(cat "$ERR")" 'worker'
+assert_ok "judge verdict: bad target ref writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
 teardown
 
-setup
-TEST_TMUX_PANE="%2" assert_not_ok "report verdict: bad target ref rejected" \
-  run_peer report --type result --status done --round 1 --verdict approve --target-ref '..@5'
-assert_contains "report verdict: bad target ref error" "$(cat "$ERR")" 'worker'
-assert_ok "report verdict: bad target ref writes no report" test ! -e "$PROJECT/.agent-duo/state/worker/r1.json"
-teardown
-
-# report:判决路由失败时 report/event/latest 保留,但命令非零且不打印 sentinel。
+# judge:判决路由失败时 report/event/latest 保留,但命令非零且不打印 sentinel。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\treviewer\treviewer\tcodex\n%%3\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
 mkdir -p "$PROJECT/.agent-duo/state/worker"
 printf 'not a directory\n' > "$PROJECT/.agent-duo/state/worker/reviews"
-TEST_TMUX_PANE="%2" assert_not_ok "report verdict: route failure fails visibly" \
-  run_peer report --type result --status done --round 1 --verdict approve --target-ref worker@5
-assert_contains "report verdict: route failure error" "$(cat "$ERR")" '路由到 worker/reviews/reviewer-r5.json 失败'
-assert_eq "report verdict: route failure no sentinel" "$(cat "$OUT")" ""
-assert_ok "report verdict: route failure keeps report" test -f "$PROJECT/.agent-duo/state/reviewer/r1.json"
-assert_ok "report verdict: route failure keeps latest" test -L "$PROJECT/.agent-duo/state/reviewer/report.json"
-assert_contains "report verdict: route failure keeps event" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"agent":"reviewer"'
+TEST_TMUX_PANE="%2" assert_not_ok "judge verdict: route failure fails visibly" \
+  run_peer judge worker@5 --round 1 --verdict approve
+assert_contains "judge verdict: route failure error" "$(cat "$ERR")" '路由到 worker/reviews/reviewer-r5.json 失败'
+assert_eq "judge verdict: route failure no sentinel" "$(cat "$OUT")" ""
+assert_ok "judge verdict: route failure keeps report" test -f "$PROJECT/.agent-duo/state/reviewer/r1.json"
+assert_ok "judge verdict: route failure keeps latest" test -L "$PROJECT/.agent-duo/state/reviewer/report.json"
+assert_contains "judge verdict: route failure keeps event" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"agent":"reviewer"'
+teardown
+
+# report:report 文件本身写入失败时不得写 event 或打印 sentinel。
+setup
+mkdir -p "$PROJECT/.agent-duo/state/worker" "$PROJECT/.agent-duo/events"
+chmod -w "$PROJECT/.agent-duo/state/worker"
+TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_not_ok "report: file write failure fails" \
+  run_peer report --type checkpoint --status in_progress --round 4 --delta "cannot write report"
+chmod +w "$PROJECT/.agent-duo/state/worker"
+assert_eq "report: file write failure no sentinel" "$(cat "$OUT")" ""
+assert_contains "report: file write failure error" "$(cat "$ERR")" '写 report 临时文件失败'
+assert_ok "report: file write failure no rN" test ! -e "$PROJECT/.agent-duo/state/worker/r4.json"
+assert_ok "report: file write failure no latest" test ! -L "$PROJECT/.agent-duo/state/worker/report.json"
+assert_ok "report: file write failure no event" test ! -e "$PROJECT/.agent-duo/events/queue.jsonl"
 teardown
 
 # report:runtime event 追加失败时不得先打印 sentinel，避免屏幕/队列分裂。
@@ -1087,7 +1131,7 @@ teardown
 setup
 TEST_TMUX_PANE="%2" TMUX_STUB_CODEC_TAG="7f3a" assert_ok "gate list setup report" \
   run_peer report --type request --status blocked --round 1 --needs decision --needs-detail "部署到哪里?" --needs-option staging
-assert_ok "gate list: succeeds" run_peer gate
+assert_ok "gate list: succeeds" run_peer gate ls
 assert_contains "gate list: has header" "$(cat "$OUT")" 'ID'
 assert_contains "gate list: shows pending" "$(cat "$OUT")" 'pending'
 assert_contains "gate list: shows title" "$(cat "$OUT")" '部署到哪里?'
@@ -1198,7 +1242,7 @@ teardown
 
 # add:新建 window、写三个 @agent_* 标签、send-keys 启动 provider、打印 id。
 setup
-TMUX_STUB_NEW_PANE="%5" assert_ok "add: succeeds" run_peer add --provider codex --role worker --id helper
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: succeeds" run_peer agent add --provider codex --role worker --id helper
 assert_contains "add: new-window called" "$(cat "$TMUX_STUB_LOG")" 'new-window'
 assert_contains "add: tags id"       "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id helper'
 assert_contains "add: tags role"     "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_role worker'
@@ -1209,53 +1253,53 @@ teardown
 
 # add:省略 --id → 由 role 派生;已存在 worker → worker-2。
 setup
-TMUX_STUB_NEW_PANE="%5" assert_ok "add: derive id" run_peer add --provider codex --role worker
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: derive id" run_peer agent add --provider codex --role worker
 assert_contains "add: derived worker-2" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id worker-2'
 teardown
 
-# add:工作型角色(任何 provider)都要提示先 broker-check——硬门对 Claude reviewer 同样 fail-closed。
+# add:工作型角色(任何 provider)都要提示先 approval check——硬门对 Claude reviewer 同样 fail-closed。
 setup
-TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude reviewer succeeds" run_peer add --provider claude --role reviewer
-assert_contains "add: claude reviewer broker-check hint" "$(cat "$OUT")" 'peer broker-check reviewer'
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude reviewer succeeds" run_peer agent add --provider claude --role reviewer
+assert_contains "add: claude reviewer approval check hint" "$(cat "$OUT")" 'peer approval check reviewer'
 teardown
 
-# add:豁免名单角色(supervisor/daemon/loopd)不受硬门保护,不应误导用户去 broker-check。
+# add:豁免名单角色(supervisor/daemon/loopd)不受硬门保护,不应误导用户去 approval check。
 setup
-TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude supervisor succeeds" run_peer add --provider claude --role supervisor --id sup2
-assert_not_contains "add: exempt role no broker-check hint" "$(cat "$OUT")" 'broker-check'
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude supervisor succeeds" run_peer agent add --provider claude --role supervisor --id sup2
+assert_not_contains "add: exempt role no approval check hint" "$(cat "$OUT")" 'approval check'
 teardown
 
-# add:Codex 工作型角色既给 broker-check 提示,也给 /hooks 信任提示。
+# add:Codex 工作型角色既给 approval check 提示,也给 /hooks 信任提示。
 setup
-TMUX_STUB_NEW_PANE="%5" assert_ok "add: codex worker succeeds" run_peer add --provider codex --role worker --id helper2
+TMUX_STUB_NEW_PANE="%5" assert_ok "add: codex worker succeeds" run_peer agent add --provider codex --role worker --id helper2
 add_out="$(cat "$OUT")"
-assert_contains "add: codex worker broker-check hint" "$add_out" 'peer broker-check helper2'
+assert_contains "add: codex worker approval check hint" "$add_out" 'peer approval check helper2'
 assert_contains "add: codex worker hooks hint" "$add_out" '/hooks'
 teardown
 
 # add:非法 provider 报错。
 setup
-assert_not_ok "add: bad provider" run_peer add --provider gpt --role worker
+assert_not_ok "add: bad provider" run_peer agent add --provider gpt --role worker
 assert_contains "add: bad provider error" "$(cat "$ERR")" 'provider 必须是 claude 或 codex'
 teardown
 
 setup
-assert_not_ok "add: bad role token rejected" run_peer add --provider codex --role 'bad/role'
+assert_not_ok "add: bad role token rejected" run_peer agent add --provider codex --role 'bad/role'
 assert_contains "add: bad role token error" "$(cat "$ERR")" '--role'
 teardown
 
 setup
-assert_not_ok "add: dot role rejected" run_peer add --provider codex --role '..'
+assert_not_ok "add: dot role rejected" run_peer agent add --provider codex --role '..'
 assert_contains "add: dot role error" "$(cat "$ERR")" '--role'
 teardown
 
 setup
-assert_not_ok "add: bad id token rejected" run_peer add --provider codex --role worker --id 'bad/id'
+assert_not_ok "add: bad id token rejected" run_peer agent add --provider codex --role worker --id 'bad/id'
 assert_contains "add: bad id token error" "$(cat "$ERR")" '--id'
 teardown
 
 setup
-assert_not_ok "add: dot id rejected" run_peer add --provider codex --role worker --id '..'
+assert_not_ok "add: dot id rejected" run_peer agent add --provider codex --role worker --id '..'
 assert_contains "add: dot id error" "$(cat "$ERR")" '--id'
 teardown
 
@@ -1263,7 +1307,7 @@ teardown
 setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree: succeeds" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree: succeeds" run_peer agent add --provider codex --role worker --id helper --worktree
 record="$PROJECT/.agent-duo/state/helper/worktree.json"
 assert_ok "add worktree: record exists" test -f "$record"
 wt_path="$(jq -r '.path' "$record")"
@@ -1281,7 +1325,7 @@ teardown
 # add --worktree:非 git root fail-closed,不建窗口/记录。
 setup
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-assert_not_ok "add worktree: non git rejected" run_peer add --provider codex --role worker --id helper --worktree
+assert_not_ok "add worktree: non git rejected" run_peer agent add --provider codex --role worker --id helper --worktree
 assert_contains "add worktree: non git error" "$(cat "$ERR")" '隔离需要 git 仓库'
 assert_not_contains "add worktree: non git no window" "$(cat "$TMUX_STUB_LOG")" 'new-window'
 assert_ok "add worktree: non git no record" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
@@ -1292,7 +1336,7 @@ setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
 git -C "$PROJECT" branch agent-duo/helper
-TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree: reuses existing branch" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree: reuses existing branch" run_peer agent add --provider codex --role worker --id helper --worktree
 wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 assert_eq "add worktree: branch checkout" "$(git -C "$wt_path" branch --show-current)" "agent-duo/helper"
 teardown
@@ -1301,10 +1345,10 @@ teardown
 setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree reuse: first succeeds" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "add worktree reuse: first succeeds" run_peer agent add --provider codex --role worker --id helper --worktree
 wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 printf 'dirty\n' > "$wt_path/dirty.txt"
-TMUX_STUB_NEW_PANE="%6" assert_ok "add worktree reuse: second succeeds" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%6" assert_ok "add worktree reuse: second succeeds" run_peer agent add --provider codex --role worker --id helper --worktree
 assert_ok "add worktree reuse: dirty file preserved" test -f "$wt_path/dirty.txt"
 assert_contains "add worktree reuse: window cwd" "$(cat "$TMUX_STUB_LOG")" "new-window -t agents -n helper -c $wt_path"
 teardown
@@ -1314,7 +1358,7 @@ setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
 mkdir -p "$TEST_AGENT_DUO_WORKTREES_DIR/agents/helper"
-assert_not_ok "add worktree: external dir rejected" run_peer add --provider codex --role worker --id helper --worktree
+assert_not_ok "add worktree: external dir rejected" run_peer agent add --provider codex --role worker --id helper --worktree
 assert_contains "add worktree: external dir error" "$(cat "$ERR")" '不是预期 worktree'
 assert_not_contains "add worktree: external dir no window" "$(cat "$TMUX_STUB_LOG")" 'new-window'
 teardown
@@ -1322,7 +1366,7 @@ teardown
 # rm:按 id 找到 pane 并 kill-window。
 setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm: succeeds" run_peer rm worker
+assert_ok "rm: succeeds" run_peer agent rm worker
 assert_contains "rm: kills window" "$(cat "$TMUX_STUB_LOG")" 'kill-window -t %2'
 teardown
 
@@ -1330,10 +1374,10 @@ teardown
 setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree clean setup" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree clean setup" run_peer agent add --provider codex --role worker --id helper --worktree
 wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm worktree clean: succeeds" run_peer rm helper
+assert_ok "rm worktree clean: succeeds" run_peer agent rm helper
 assert_contains "rm worktree clean: kills window" "$(cat "$TMUX_STUB_LOG")" 'kill-window -t %5'
 assert_ok "rm worktree clean: dir removed" test ! -e "$wt_path"
 assert_ok "rm worktree clean: record removed" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
@@ -1344,11 +1388,11 @@ teardown
 setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree dirty setup" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree dirty setup" run_peer agent add --provider codex --role worker --id helper --worktree
 wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 printf 'dirty\n' > "$wt_path/dirty.txt"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm worktree dirty: succeeds" run_peer rm helper
+assert_ok "rm worktree dirty: succeeds" run_peer agent rm helper
 assert_contains "rm worktree dirty: warning" "$(cat "$ERR")" '有未提交改动'
 assert_ok "rm worktree dirty: dir kept" test -d "$wt_path"
 assert_ok "rm worktree dirty: record kept" test -f "$PROJECT/.agent-duo/state/helper/worktree.json"
@@ -1358,11 +1402,11 @@ teardown
 setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree force before setup" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree force before setup" run_peer agent add --provider codex --role worker --id helper --worktree
 wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 printf 'dirty\n' > "$wt_path/dirty.txt"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm worktree force before: succeeds" run_peer rm --force helper
+assert_ok "rm worktree force before: succeeds" run_peer agent rm --force helper
 assert_ok "rm worktree force before: dir removed" test ! -e "$wt_path"
 teardown
 
@@ -1370,11 +1414,11 @@ teardown
 setup
 init_git_project
 TEST_AGENT_DUO_WORKTREES_DIR="$SCENARIO_TMP/worktrees"
-TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree force after setup" run_peer add --provider codex --role worker --id helper --worktree
+TMUX_STUB_NEW_PANE="%5" assert_ok "rm worktree force after setup" run_peer agent add --provider codex --role worker --id helper --worktree
 wt_path="$(jq -r '.path' "$PROJECT/.agent-duo/state/helper/worktree.json")"
 printf 'dirty\n' > "$wt_path/dirty.txt"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm worktree force after: succeeds" run_peer rm helper --force
+assert_ok "rm worktree force after: succeeds" run_peer agent rm helper --force
 assert_ok "rm worktree force after: dir removed" test ! -e "$wt_path"
 teardown
 
@@ -1386,7 +1430,7 @@ mkdir -p "$PROJECT/.agent-duo/state/helper"
 jq -cn --arg path "$SCENARIO_TMP/other-wt" --arg branch "agent-duo/helper" '{path:$path,branch:$branch}' \
   > "$PROJECT/.agent-duo/state/helper/worktree.json"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm worktree invalid: succeeds" run_peer rm --force helper
+assert_ok "rm worktree invalid: succeeds" run_peer agent rm --force helper
 assert_contains "rm worktree invalid: warning" "$(cat "$ERR")" '记录与 git 不符'
 assert_ok "rm worktree invalid: other kept" test -d "$SCENARIO_TMP/other-wt"
 assert_ok "rm worktree invalid: record kept" test -f "$PROJECT/.agent-duo/state/helper/worktree.json"
@@ -1399,19 +1443,19 @@ mkdir -p "$PROJECT/.agent-duo/state/helper"
 jq -cn --arg path "$SCENARIO_TMP/missing-wt" --arg branch "agent-duo/helper" '{path:$path,branch:$branch}' \
   > "$PROJECT/.agent-duo/state/helper/worktree.json"
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%5\thelper\tworker\tcodex\n' > "$TMUX_STUB_REGISTRY"
-assert_ok "rm worktree missing: succeeds" run_peer rm helper
+assert_ok "rm worktree missing: succeeds" run_peer agent rm helper
 assert_ok "rm worktree missing: record removed" test ! -e "$PROJECT/.agent-duo/state/helper/worktree.json"
 teardown
 
 # rm:未知 id 报错。
 setup
-assert_not_ok "rm: unknown id" run_peer rm ghost
+assert_not_ok "rm: unknown id" run_peer agent rm ghost
 assert_contains "rm: unknown error" "$(cat "$ERR")" "找不到 agent 'ghost'"
 teardown
 
 # rm:拒绝移除自己。
 setup
-assert_not_ok "rm: refuse self" run_peer rm supervisor
+assert_not_ok "rm: refuse self" run_peer agent rm supervisor
 assert_contains "rm: refuse self error" "$(cat "$ERR")" '不能移除自己'
 teardown
 
@@ -1428,7 +1472,7 @@ teardown
 
 # broker-status:无 marker 时报 unverified。
 setup
-assert_ok "broker-status: succeeds" run_peer broker-status worker
+assert_ok "broker-status: succeeds" run_peer approval status worker
 assert_contains "broker-status: unverified default" "$(cat "$OUT")" '"status":"unverified"'
 teardown
 
@@ -1436,52 +1480,52 @@ teardown
 setup
 mkdir -p "$PROJECT/.agent-duo/state/worker"
 printf '{"agent":"worker","status":"ready","updated_epoch":%s,"nonce":"n1"}\n' "$(date +%s)" > "$PROJECT/.agent-duo/state/worker/broker.json"
-assert_ok "broker-status: reads marker" run_peer broker-status worker
+assert_ok "broker-status: reads marker" run_peer approval status worker
 assert_contains "broker-status: ready reported" "$(cat "$OUT")" '"status":"ready"'
-assert_not_contains "broker-status: no hint when ready" "$(cat "$ERR")" 'broker-check'
+assert_not_contains "broker-status: no hint when ready" "$(cat "$ERR")" 'approval check'
 teardown
 
-# broker-status:ready 但过期(老 epoch)→ 报 stale,并给出 broker-check 提示。
+# broker-status:ready 但过期(老 epoch)→ 报 stale,并给出 approval check 提示。
 setup
 mkdir -p "$PROJECT/.agent-duo/state/worker"
 printf '{"agent":"worker","status":"ready","updated_epoch":1000000000,"nonce":"n1"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
-assert_ok "broker-status: stale surfaced" run_peer broker-status worker
+assert_ok "broker-status: stale surfaced" run_peer approval status worker
 assert_contains "broker-status: stale status" "$(cat "$OUT")" '"status":"stale"'
-assert_contains "broker-status: stale hint to broker-check" "$(cat "$ERR")" 'broker-check'
+assert_contains "broker-status: stale hint to approval check" "$(cat "$ERR")" 'approval check'
 teardown
 
-# broker-check:投递自检探针(带 sentinel+nonce),未匹配时标记 fail-open 并非零退出。
+# approval check:投递自检探针(带 sentinel+nonce),未匹配时标记 fail-open 并非零退出。
 setup
-AGENT_DUO_BROKER_CHECK_TIMEOUT=2 assert_exit_code "broker-check: fail-open when hook never fires" 1 \
-  run_peer broker-check worker --nonce fixednonce
-assert_contains "broker-check: probe carries sentinel+nonce" \
+AGENT_DUO_BROKER_CHECK_TIMEOUT=2 assert_exit_code "approval check: fail-open when hook never fires" 1 \
+  run_peer approval check worker --nonce fixednonce
+assert_contains "approval check: probe carries sentinel+nonce" \
   "$(cat "$TMUX_STUB_BUFFER_DIR/peer-brokercheck-worker")" 'AGENT_DUO_BROKER_SELFCHECK_fixednonce'
-assert_contains "broker-check: warns fail-open" "$(cat "$ERR")" 'FAIL-OPEN'
-assert_contains "broker-check: marker set fail-open" \
+assert_contains "approval check: warns fail-open" "$(cat "$ERR")" 'FAIL-OPEN'
+assert_contains "approval check: marker set fail-open" \
   "$(cat "$PROJECT/.agent-duo/state/worker/broker.json")" '"status":"fail-open"'
 teardown
 
-# broker-check:marker 已是 ready+匹配 nonce → 报 READY 并零退出。
+# approval check:marker 已是 ready+匹配 nonce → 报 READY 并零退出。
 setup
 mkdir -p "$PROJECT/.agent-duo/state/worker"
 printf '{"agent":"worker","status":"ready","nonce":"fixednonce"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
-AGENT_DUO_BROKER_CHECK_TIMEOUT=3 assert_ok "broker-check: ready when marker matches nonce" \
-  run_peer broker-check worker --nonce fixednonce
-assert_contains "broker-check: reports READY" "$(cat "$OUT")" 'READY'
+AGENT_DUO_BROKER_CHECK_TIMEOUT=3 assert_ok "approval check: ready when marker matches nonce" \
+  run_peer approval check worker --nonce fixednonce
+assert_contains "approval check: reports READY" "$(cat "$OUT")" 'READY'
 teardown
 
-# broker-check:旧 marker 的 nonce 不匹配本次探针 → 不算通过(fail-open)。
+# approval check:旧 marker 的 nonce 不匹配本次探针 → 不算通过(fail-open)。
 setup
 mkdir -p "$PROJECT/.agent-duo/state/worker"
 printf '{"agent":"worker","status":"ready","nonce":"stale"}\n' > "$PROJECT/.agent-duo/state/worker/broker.json"
-AGENT_DUO_BROKER_CHECK_TIMEOUT=2 assert_exit_code "broker-check: stale nonce is not a pass" 1 \
-  run_peer broker-check worker --nonce freshnonce
+AGENT_DUO_BROKER_CHECK_TIMEOUT=2 assert_exit_code "approval check: stale nonce is not a pass" 1 \
+  run_peer approval check worker --nonce freshnonce
 teardown
 
-# broker-check:未知 id 报错。
+# approval check:未知 id 报错。
 setup
-assert_not_ok "broker-check: unknown id" run_peer broker-check ghost
-assert_contains "broker-check: unknown error" "$(cat "$ERR")" "找不到 agent 'ghost'"
+assert_not_ok "approval check: unknown id" run_peer approval check ghost
+assert_contains "approval check: unknown error" "$(cat "$ERR")" "找不到 agent 'ghost'"
 teardown
 
 # ② Broker dispatch hard gate: tell to a worker refuses unless broker is fresh ready.
@@ -1490,7 +1534,7 @@ teardown
 setup
 assert_exit_code "gate: unverified worker refused" 1 run_peer tell worker "do work"
 assert_contains "gate: unverified error mentions fresh ready" "$(cat "$ERR")" 'fresh ready'
-assert_contains "gate: unverified error suggests broker-check" "$(cat "$ERR")" 'broker-check'
+assert_contains "gate: unverified error suggests approval check" "$(cat "$ERR")" 'approval check'
 assert_ok "gate: unverified no buffer written" test ! -e "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker"
 teardown
 

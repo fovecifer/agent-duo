@@ -26,7 +26,7 @@ setup() {
   TMUX_STUB_LOG="$SCENARIO_TMP/tmux.log"; : > "$TMUX_STUB_LOG"
   TMUX_STUB_REGISTRY="$SCENARIO_TMP/registry.tsv"
   TMUX_STUB_BUFFER_DIR="$SCENARIO_TMP/buffers"; mkdir -p "$TMUX_STUB_BUFFER_DIR"
-  VALIDATION_STUB_LOG="$SCENARIO_TMP/validation.log"; : > "$VALIDATION_STUB_LOG"
+  VERIFY_STUB_LOG="$SCENARIO_TMP/validation.log"; : > "$VERIFY_STUB_LOG"
   QUEUE="$PROJECT/.agent-duo/events/queue.jsonl"
   printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tloopd\tdaemon\tbash\n%%3\tworker\tworker\tcodex\n%%4\thelper\tworker\tcodex\n%%5\treviewer\treviewer\tclaude\n' > "$TMUX_STUB_REGISTRY"
 
@@ -98,8 +98,8 @@ esac
 STUB
   chmod +x "$STUB_BIN/tmux"
 
-  VALIDATION_STUB="$SCENARIO_TMP/loopd-validation-stub"
-  cat > "$VALIDATION_STUB" <<'STUB'
+  VERIFY_STUB="$SCENARIO_TMP/loopd-validation-stub"
+  cat > "$VERIFY_STUB" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" != "--run-validation" || -z "${2:-}" || -z "${3:-}" ]]; then
@@ -110,9 +110,9 @@ round="$3"
 root="${AGENT_DUO_ROOT:?}"
 out="$root/.agent-duo/state/$agent/validation-r${round}.json"
 mkdir -p "$(dirname "$out")" "$root/.agent-duo/logs/$agent"
-printf '%s\t%s\n' "$agent" "$round" >> "$VALIDATION_STUB_LOG"
+printf '%s\t%s\n' "$agent" "$round" >> "$VERIFY_STUB_LOG"
 
-case ",${VALIDATION_FAIL_AGENTS:-}," in
+case ",${VERIFY_FAIL_AGENTS:-}," in
   *,"$agent",*)
     jq -cn --arg agent "$agent" --argjson round "$round" '
       {
@@ -163,7 +163,7 @@ case ",${VALIDATION_FAIL_AGENTS:-}," in
     ;;
 esac
 STUB
-  chmod +x "$VALIDATION_STUB"
+  chmod +x "$VERIFY_STUB"
 }
 
 teardown() {
@@ -193,9 +193,9 @@ run_loopd_once() {
   PATH="$STUB_BIN:$PATH" \
     AGENT_DUO_ROOT="$PROJECT" \
     AGENT_SESSION=agents \
-    AGENT_DUO_LOOPD_BIN="$VALIDATION_STUB" \
-    VALIDATION_STUB_LOG="$VALIDATION_STUB_LOG" \
-    VALIDATION_FAIL_AGENTS="${VALIDATION_FAIL_AGENTS:-helper}" \
+    AGENT_DUO_LOOPD_BIN="$VERIFY_STUB" \
+    VERIFY_STUB_LOG="$VERIFY_STUB_LOG" \
+    VERIFY_FAIL_AGENTS="${VERIFY_FAIL_AGENTS:-helper}" \
     LOOPD_ONCE=1 \
     LOOPD_SILENT_T=999999 \
     LOOPD_TICK_T=999999 \
@@ -271,10 +271,10 @@ assert_ok "integration: worker loop init with all gates" run_peer_as "%1" loop i
   --max-rounds 5 \
   --round 1 \
   --success "tests pass" \
-  --validation validate:"stub validation" \
-  --validation-satisfies validate:"tests pass" \
-  --validation-timeout validate:5 \
-  --review reviewer:request_changes,reject \
+  --verify validate:"stub validation" \
+  --verify-satisfies validate:"tests pass" \
+  --verify-timeout validate:5 \
+  --judge reviewer:request_changes,reject \
   --detail-trap-rounds 2
 worker_contract="$(cat "$PROJECT/.agent-duo/state/worker/loop.json")"
 assert_eq "integration: worker max_rounds active" "$(jq -r '.max_rounds' "$PROJECT/.agent-duo/state/worker/loop.json")" "5"
@@ -288,10 +288,10 @@ assert_ok "integration: helper loop init isolated" run_peer_as "%1" loop init he
   --max-rounds 4 \
   --round 1 \
   --success "tests pass" \
-  --validation validate:"stub validation" \
-  --validation-satisfies validate:"tests pass" \
-  --validation-timeout validate:5 \
-  --review evaluator:fail,request_changes \
+  --verify validate:"stub validation" \
+  --verify-satisfies validate:"tests pass" \
+  --verify-timeout validate:5 \
+  --judge evaluator:fail,request_changes \
   --detail-trap-rounds 2
 
 assert_ok "integration: worker r1 empty progress" run_peer_as "%3" report \
@@ -315,8 +315,8 @@ assert_eq "integration: worker r2 validation pass" "$(jq -r '.status' "$PROJECT/
 assert_eq "integration: drift deterministic once" "$(event_count_by_id drift-worker-2)" "1"
 assert_eq "integration: detail trap deterministic once" "$(event_count_by_id detailtrap-worker-2)" "1"
 
-assert_ok "integration: reviewer request_changes routed" run_peer_as "%5" report \
-  --type result --status done --round 1 --verdict request_changes --target-ref worker@3 --finding blocking:"needs revision"
+assert_ok "integration: reviewer request_changes routed" run_peer_as "%5" judge \
+  worker@3 --round 1 --verdict request_changes --finding blocking:"needs revision"
 assert_ok "integration: worker r3 done with evidence" run_peer_as "%3" report \
   --type result --status done --round 3 --delta "done" --evidence-result "validated locally"
 assert_ok "integration: done first pass starts validation only" run_loopd_once
@@ -326,18 +326,18 @@ assert_ok "integration: validation pass exposes veto" run_loopd_once
 assert_eq "integration: worker r3 validation pass" "$(jq -r '.status' "$PROJECT/.agent-duo/state/worker/validation-r3.json")" "pass"
 assert_eq "integration: veto event deterministic once" "$(event_count_by_id reviewreq-worker-3-vetoed)" "1"
 assert_not_contains "integration: no stop while reviewer vetoes" "$(cat "$QUEUE")" '"id":"loopstop-worker-3"'
-assert_contains "integration: dashboard combines active pass veto" "$(cat "$OUT")" 'worker pane=%3 round=3 status=done   loop=3/5 active validation=pass accept=reviewer:vetoed(request_changes)'
+assert_contains "integration: dashboard combines active pass veto" "$(cat "$OUT")" 'worker pane=%3 round=3 status=done   loop=3/5 active verify=pass judge=reviewer:vetoed(request_changes)'
 
-assert_ok "integration: reviewer approve routed" run_peer_as "%5" report \
-  --type result --status done --round 2 --verdict approve --target-ref worker@3
+assert_ok "integration: reviewer approve routed" run_peer_as "%5" judge \
+  worker@3 --round 2 --verdict approve
 assert_ok "integration: approve lets done stop" run_loopd_once
 assert_eq "integration: worker stopped done" "$(jq -r '.stop.reason' "$PROJECT/.agent-duo/state/worker/loop.json")" "done"
 assert_eq "integration: loop stop deterministic once" "$(event_count_by_id loopstop-worker-3)" "1"
-assert_contains "integration: dashboard combines stopped pass ok" "$(cat "$OUT")" 'worker pane=%3 round=3 status=done   loop=3/5 stopped:done validation=pass accept=reviewer:ok'
+assert_contains "integration: dashboard combines stopped pass ok" "$(cat "$OUT")" 'worker pane=%3 round=3 status=done   loop=3/5 stopped:done verify=pass judge=reviewer:ok'
 
 assert_eq "integration: helper has no loop stop" "$(event_count_by_type_agent loop_stop helper)" "0"
 assert_eq "integration: helper has no review_required" "$(event_count_by_type_agent review_required helper)" "0"
-assert_contains "integration: helper dashboard isolated" "$(cat "$OUT")" 'helper pane=%4 round=1 status=blocked   loop=1/4 active validation=fail accept=evaluator:pending'
+assert_contains "integration: helper dashboard isolated" "$(cat "$OUT")" 'helper pane=%4 round=1 status=blocked   loop=1/4 active verify=fail judge=evaluator:pending'
 assert_eq "integration: worker review approval isolated" "$(jq -r '.verdict' "$PROJECT/.agent-duo/state/worker/reviews/reviewer-r3.json")" "approve"
 assert_ok "integration: helper has no reviewer state" test ! -e "$PROJECT/.agent-duo/state/helper/reviews/reviewer-r3.json"
 
@@ -353,8 +353,8 @@ assert_line_before "integration: direction before validation in eval order" deta
 assert_line_before "integration: validation before veto gate" validation-worker-3 reviewreq-worker-3-vetoed
 assert_line_before "integration: veto before final stop" reviewreq-worker-3-vetoed loopstop-worker-3
 assert_eq "integration: no worker validation fail collision" "$(event_count_by_id validation-worker-3)" "1"
-assert_contains "integration: validation runner was async child" "$(cat "$VALIDATION_STUB_LOG")" $'worker\t3'
-assert_contains "integration: validation runner kept helper separate" "$(cat "$VALIDATION_STUB_LOG")" $'helper\t1'
+assert_contains "integration: validation runner was async child" "$(cat "$VERIFY_STUB_LOG")" $'worker\t3'
+assert_contains "integration: validation runner kept helper separate" "$(cat "$VERIFY_STUB_LOG")" $'helper\t1'
 
 teardown
 

@@ -168,22 +168,22 @@ write_running_marker() { # <agent> <round> <pid>
 }
 
 write_validation_runner_stub() {
-  VALIDATION_RUNNER_LOG="$SCENARIO_TMP/validation-runner.log"
-  : > "$VALIDATION_RUNNER_LOG"
-  VALIDATION_RUNNER="$SCENARIO_TMP/validation-runner"
-  cat > "$VALIDATION_RUNNER" <<'STUB'
+  VERIFY_RUNNER_LOG="$SCENARIO_TMP/validation-runner.log"
+  : > "$VERIFY_RUNNER_LOG"
+  VERIFY_RUNNER="$SCENARIO_TMP/validation-runner"
+  cat > "$VERIFY_RUNNER" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'root=%s session=%s args=%s\n' "${AGENT_DUO_ROOT:-}" "${AGENT_SESSION:-}" "$*" >> "$VALIDATION_RUNNER_LOG"
+printf 'root=%s session=%s args=%s\n' "${AGENT_DUO_ROOT:-}" "${AGENT_SESSION:-}" "$*" >> "$VERIFY_RUNNER_LOG"
 exit 0
 STUB
-  chmod +x "$VALIDATION_RUNNER"
+  chmod +x "$VERIFY_RUNNER"
 }
 
 wait_for_validation_runner_log() {
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    [[ -s "$VALIDATION_RUNNER_LOG" ]] && return 0
+    [[ -s "$VERIFY_RUNNER_LOG" ]] && return 0
     /bin/sleep 0.1
   done
   return 1
@@ -205,7 +205,7 @@ run_loopd_once() {
     LOOPD_SILENT_T="${LOOPD_SILENT_T:-999999}" \
     LOOPD_TICK_T="${LOOPD_TICK_T:-999999}" \
     AGENT_DUO_LOOPD_BIN="${AGENT_DUO_LOOPD_BIN:-}" \
-    VALIDATION_RUNNER_LOG="${VALIDATION_RUNNER_LOG:-}" \
+    VERIFY_RUNNER_LOG="${VERIFY_RUNNER_LOG:-}" \
     TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
     TMUX_STUB_LOG="$TMUX_STUB_LOG" \
     TMUX_STUB_CAPTURE_MODE="${TMUX_STUB_CAPTURE_MODE:-stable}" \
@@ -512,7 +512,7 @@ write_loop_contract_with_acceptance worker 3 1 '[{"role":"reviewer","veto_on":["
 write_review_record worker reviewer 1 approve
 assert_ok "loop eval acceptance: approve stops done" run_loopd_once
 assert_contains "loop eval acceptance: done after approve" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"done"'
-assert_contains "loop eval acceptance: dashboard ok" "$(cat "$OUT")" 'accept=reviewer:ok'
+assert_contains "loop eval acceptance: dashboard ok" "$(cat "$OUT")" 'judge=reviewer:ok'
 teardown
 
 setup
@@ -523,8 +523,8 @@ assert_ok "loop eval acceptance: missing keeps active" run_loopd_once
 queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
 assert_contains "loop eval acceptance: missing active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
 assert_contains "loop eval acceptance: pending event" "$queue_json" '"id":"reviewreq-worker-1-pending"'
-assert_contains "loop eval acceptance: pending summary" "$queue_json" '"summary":"review pending: reviewer"'
-assert_contains "loop eval acceptance: dashboard pending" "$(cat "$OUT")" 'accept=reviewer:pending'
+assert_contains "loop eval acceptance: pending summary" "$queue_json" '"summary":"judge pending: reviewer"'
+assert_contains "loop eval acceptance: dashboard pending" "$(cat "$OUT")" 'judge=reviewer:pending'
 teardown
 
 setup
@@ -536,8 +536,8 @@ assert_ok "loop eval acceptance: veto keeps active" run_loopd_once
 queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
 assert_contains "loop eval acceptance: veto active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
 assert_contains "loop eval acceptance: veto event" "$queue_json" '"id":"reviewreq-worker-1-vetoed"'
-assert_contains "loop eval acceptance: veto summary" "$queue_json" '"summary":"review vetoed: reviewer(request_changes)"'
-assert_contains "loop eval acceptance: dashboard veto" "$(cat "$OUT")" 'accept=reviewer:vetoed(request_changes)'
+assert_contains "loop eval acceptance: veto summary" "$queue_json" '"summary":"judge vetoed: reviewer(request_changes)"'
+assert_contains "loop eval acceptance: dashboard veto" "$(cat "$OUT")" 'judge=reviewer:vetoed(request_changes)'
 teardown
 
 setup
@@ -566,7 +566,7 @@ assert_ok "loop eval acceptance: bad veto config keeps active" run_loopd_once
 queue_json="$(cat "$PROJECT/.agent-duo/events/queue.jsonl")"
 assert_eq "loop eval acceptance: config invalid active" "$(jq -r '.status' "$PROJECT/.agent-duo/state/worker/loop.json")" "active"
 assert_contains "loop eval acceptance: config invalid event" "$queue_json" '"id":"reviewreq-worker-1-configinvalid"'
-assert_contains "loop eval acceptance: config invalid dashboard" "$(cat "$OUT")" 'accept=config_invalid'
+assert_contains "loop eval acceptance: config invalid dashboard" "$(cat "$OUT")" 'judge=config_invalid'
 teardown
 
 setup
@@ -583,13 +583,13 @@ printf 'busy\n' > "$PROJECT/.agent-duo/state/supervisor.turn"
 write_validation_runner_stub
 write_report worker 1 done
 write_loop_contract_with_validation worker 3 1 "printf ok" '["tests pass"]' '["tests pass"]'
-AGENT_DUO_LOOPD_BIN="$VALIDATION_RUNNER" assert_ok "loop eval validation async: spawn succeeds" run_loopd_once
+AGENT_DUO_LOOPD_BIN="$VERIFY_RUNNER" assert_ok "loop eval validation async: spawn succeeds" run_loopd_once
 assert_ok "loop eval validation async: runner log appears" wait_for_validation_runner_log
 assert_ok "loop eval validation async: running dir exists" test -d "$PROJECT/.agent-duo/state/worker/validation-r1.running"
 assert_ok "loop eval validation async: pid file exists" test -s "$PROJECT/.agent-duo/state/worker/validation-r1.running/pid"
-assert_contains "loop eval validation async: runner got root" "$(cat "$VALIDATION_RUNNER_LOG")" "root=$PROJECT"
-assert_contains "loop eval validation async: runner got session" "$(cat "$VALIDATION_RUNNER_LOG")" 'session=agents'
-assert_contains "loop eval validation async: runner args" "$(cat "$VALIDATION_RUNNER_LOG")" '--run-validation worker 1'
+assert_contains "loop eval validation async: runner got root" "$(cat "$VERIFY_RUNNER_LOG")" "root=$PROJECT"
+assert_contains "loop eval validation async: runner got session" "$(cat "$VERIFY_RUNNER_LOG")" 'session=agents'
+assert_contains "loop eval validation async: runner args" "$(cat "$VERIFY_RUNNER_LOG")" '--run-validation worker 1'
 assert_contains "loop eval validation async: loop stays active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
 assert_not_contains "loop eval validation async: no loop stop while running" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"loop_stop"'
 teardown
@@ -600,8 +600,8 @@ write_validation_runner_stub
 write_report worker 1 done
 write_loop_contract_with_validation worker 3 1 "printf ok" '["tests pass"]' '["tests pass"]'
 write_running_marker worker 1 "$$"
-AGENT_DUO_LOOPD_BIN="$VALIDATION_RUNNER" assert_ok "loop eval validation async: existing running stays running" run_loopd_once
-assert_eq "loop eval validation async: no respawn for running" "$(cat "$VALIDATION_RUNNER_LOG")" ""
+AGENT_DUO_LOOPD_BIN="$VERIFY_RUNNER" assert_ok "loop eval validation async: existing running stays running" run_loopd_once
+assert_eq "loop eval validation async: no respawn for running" "$(cat "$VERIFY_RUNNER_LOG")" ""
 assert_contains "loop eval validation async: running keeps loop active" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
 teardown
 
@@ -612,8 +612,8 @@ write_report worker 1 in_progress
 write_report worker 2 done
 write_loop_contract_with_validation worker 5 1 "printf ok" '["tests pass"]' '["tests pass"]'
 write_running_marker worker 1 "$$"
-AGENT_DUO_LOOPD_BIN="$VALIDATION_RUNNER" assert_ok "loop eval validation async: one runner per agent" run_loopd_once
-assert_eq "loop eval validation async: no second runner" "$(cat "$VALIDATION_RUNNER_LOG")" ""
+AGENT_DUO_LOOPD_BIN="$VERIFY_RUNNER" assert_ok "loop eval validation async: one runner per agent" run_loopd_once
+assert_eq "loop eval validation async: no second runner" "$(cat "$VERIFY_RUNNER_LOG")" ""
 assert_ok "loop eval validation async: no r2 running dir" test ! -d "$PROJECT/.agent-duo/state/worker/validation-r2.running"
 assert_contains "loop eval validation async: r2 done waits" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"status":"active"'
 teardown
@@ -626,7 +626,7 @@ write_validation_result worker 1 pass '["tests pass"]' '[]' '[]'
 assert_ok "loop eval validation: pass stops done" run_loopd_once
 assert_contains "loop eval validation: event pass" "$(cat "$PROJECT/.agent-duo/events/queue.jsonl")" '"type":"validation_pass"'
 assert_contains "loop eval validation: done after pass" "$(cat "$PROJECT/.agent-duo/state/worker/loop.json")" '"reason":"done"'
-assert_contains "loop eval validation: dashboard shows pass" "$(cat "$OUT")" 'validation=pass'
+assert_contains "loop eval validation: dashboard shows pass" "$(cat "$OUT")" 'verify=pass'
 teardown
 
 setup

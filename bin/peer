@@ -1,63 +1,11 @@
 #!/usr/bin/env bash
 # peer — 让同一 tmux 会话里的多个编码 agent(claude / codex)互相观察和发送指令
 #
-# 用法:
-#   peer ls                 列出本会话所有 agent(id / role / provider / pane)
-#   peer add --provider claude|codex --role <role> [--id <id>] [--worktree]
-#                           新建并注册一个可见队友(新窗口),返回其 id
-#   peer rm [--force] <id>  移除一个队友(关闭其窗口),并安全清理隔离 worktree
-#   peer peek [<id>] [行数]  查看某个 agent 终端最近 N 行输出(默认 80)
-#   peer tell [--force] [<id>] "消息"
-#                           发送单行消息到目标输入框并回车
-#   ... | peer tell [<id>]  从 stdin 投递多行消息(经 tmux buffer + bracketed paste,引号换行安全)
-#   peer wait [<id>] [超时秒] [采样间隔秒] [连续稳定次数]
-#                           等待目标屏幕输出稳定(认为它已完成当前任务),默认最长 300s
-#   peer wait <id> --round N [--timeout 秒] [--interval 秒]
-#                           等待目标屏幕出现指定 round 的 agent-duo sentinel
-#   peer report --type <plan|checkpoint|request|result>
-#               --status <in_progress|blocked|partial|done|failed|unknown>
-#               [--step sN] [--round N] [--delta ...] [--next ...]
-#               [--verdict v --target-ref worker@round [--finding severity:note]]
-#               [--needs <approval|decision|info|scope|discovery>
-#                  [--needs-detail ...] [--needs-option ...]]
-#                           写结构化 report、追加 runtime event、打印 sentinel
-#                           --needs 把阻塞诉求写入 needs[],决定 supervisor stall 路由
-#   peer task [<id>]        查看某 agent 的 task.json 步骤账本(默认自己)
-#   peer task next [<id>]   打印 blocked / in_progress / pending 的下一个 resume step
-#   peer task init [<id>] --task "..." [--round N] --step s1:"..." [--step s2:"..."]
-#                           初始化/冻结某 agent 的 task.json 步骤账本
-#   peer loop [<id>]        查看某 agent 的 loop.json 契约与当前预算
-#   peer loop init [<id>] --mission "..." --max-rounds N [--non-goal "..."] [--success "..."] [--round N]
-#                  [--validation id:"cmd"] [--validation-satisfies id:"signal"] [--validation-timeout id:N]
-#                  [--review role:veto1,veto2] [--detail-trap-rounds N]
-#                           初始化/冻结某 agent 的 supervisor loop 契约
-#   peer loop reset [<id>] [--max-rounds N]
-#                           在当前 report 轮次重新冻结 loop,给全新预算
-#   peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
-#                           原子 tell + 等待 target 写出新 report,并打印该 report 摘要
-#   peer reframe [<id>] "消息" [--force]
-#                           发送方向纠偏指令,并写 checkpoints.jsonl 审计
-#   peer checkpoint [<id>] [--json]
-#                           只读聚合 loop/report/task/validation 方向摘要
-#   peer approvals          列出待审批的 Approval Broker 请求
-#   peer approve <id>       批准一次待审批请求(worker 重跑同一工具调用时放行一次)
-#   peer deny <id> [--reason "..."]
-#                           拒绝一次待审批请求
-#   peer broker-status [<id>]
-#                           查看某 worker 的 Approval Broker 就绪状态(ready/unverified/fail-open)
-#   peer broker-check [<id>] 向 worker 投递自检探针,验证 broker hook 真的被 provider 调用;
-#                           未验证(fail-open)时不要派给它需要 broker 保护的任务
-#   peer gate [--all]       列出待处理 Human Decision Gate
-#   peer gate open [<id>] --title "..." [--detail "..."] [--option "..."]
-#                           创建一个 Decision Packet,供 supervisor 向人类升级
-#   peer gate resolve [<id>] --choice <choice> [--note "..."]
-#                           向 worker 答复 human gate 决策
-#   peer loopd              在当前 pane 运行 loop daemon 看板/轮询
-#   peer status             显示自己/默认目标的身份与会话内全员
-#   peer esc [<id>] [--force] 向目标发送 Escape(打断它当前的生成)
-#   peer --force tell/esc   跳过权限弹窗检测并强制发送
-#
-# 寻址:正好两个 agent 时可省略 <id>(默认发给"另一个");三个及以上必须显式指定 id。
+# 命令面按 loop engineering 三层组织:
+#   transport: peek / tell / wait / esc / status
+#   building blocks: agent / loop / verify / judge / task / report / gate / approval / budget
+#   steering: ask / checkpoint / reframe
+# 运行 `peer --help` 查看完整用法。
 #
 # 依赖环境变量:
 #   AGENT_SESSION  tmux 会话名,默认 agents
@@ -82,6 +30,212 @@ AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
 AGENT_DUO_DIR="$AGENT_DUO_ROOT/.agent-duo"
 
 SELF_PANE="${TMUX_PANE:-}"
+
+print_top_help() {
+  cat <<'EOF'
+用法: peer <command> [args...]
+
+Transport:
+  peer peek [<id>] [行数]
+  peer tell [--force] [<id>] "消息"   或   ... | peer tell [<id>]
+  peer wait [<id>] [超时秒] [采样间隔秒] [连续稳定次数]
+  peer wait <id> --round N [--timeout 秒] [--interval 秒]
+  peer esc [<id>] [--force]
+  peer status
+
+Loop building-blocks:
+  peer agent <ls|add|rm> ...
+  peer loop <show|init|reset> ...
+  peer verify <ls|show> ...
+  peer judge <target-ref> --verdict V ...
+  peer judge ls <id> [--json]
+  peer gate <ls|open|resolve> ...
+  peer approval <ls|approve|deny|status|check> ...
+  peer budget status
+  peer task <show|init|next> ...
+  peer report --type <plan|checkpoint|request|result> --status <...>
+
+Steering:
+  peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
+  peer checkpoint [<id>] [--json]
+  peer reframe [<id>] "消息" [--force]
+
+Internal:
+  peer loopd
+EOF
+}
+
+usage_agent() {
+  cat <<'EOF'
+用法:
+  peer agent ls
+  peer agent add --provider claude|codex --role <role> [--id <id>] [--worktree]
+  peer agent rm [--force] <id>
+EOF
+}
+
+usage_approval() {
+  cat <<'EOF'
+用法:
+  peer approval ls [--all]
+  peer approval approve <id>
+  peer approval deny <id> [--reason "..."]
+  peer approval status [<id>]
+  peer approval check [<id>] [--nonce <n>]
+EOF
+}
+
+usage_loop() {
+  cat <<'EOF'
+用法:
+  peer loop show <id>
+  peer loop init [<id>] --mission "..." --max-rounds N [--non-goal "..."] [--success "..."] [--round N] [--verify id:"cmd"] [--verify-satisfies id:"signal"] [--verify-timeout id:N] [--judge role:veto1,veto2] [--detail-trap-rounds N]
+  peer loop reset [<id>] [--max-rounds N]
+EOF
+}
+
+usage_task() {
+  cat <<'EOF'
+用法:
+  peer task show [<id>]
+  peer task next [<id>]
+  peer task init [<id>] --task "..." [--round N] --step s1:"..." [--step s2:"..."]
+EOF
+}
+
+usage_verify() {
+  cat <<'EOF'
+用法:
+  peer verify ls <id> [--round N] [--json]
+  peer verify show <id> [--round N] [--json]
+EOF
+}
+
+usage_judge() {
+  cat <<'EOF'
+用法:
+  peer judge <target-ref> --verdict V [--round R] [--status done] [--finding sev:note] [--delta ...] [--evidence-cmd ...] [--evidence-result ...] [--evidence-ref ...] [--step sN] [--goal ...] [--drift ...] [--next ...]
+  peer judge ls <id> [--json]
+EOF
+}
+
+usage_gate() {
+  cat <<'EOF'
+用法:
+  peer gate ls [--all]
+  peer gate open [<target>] --title "..." [--detail "..."] [--option "..."] [--round N]
+  peer gate resolve [<gate-id>|<target-id>] --choice <choice> [--note "..."]
+EOF
+}
+
+usage_budget() {
+  cat <<'EOF'
+用法:
+  peer budget status
+EOF
+}
+
+usage_report() {
+  cat <<'EOF'
+用法:
+  peer report --type <plan|checkpoint|request|result>
+              --status <in_progress|blocked|partial|done|failed|unknown>
+              [--step sN] [--round N] [--delta ...] [--next ...]
+              [--needs <approval|decision|info|scope|discovery>
+                 [--needs-detail ...] [--needs-option ...]]
+
+说明: verdict 已移到 peer judge <target-ref> --verdict V。
+EOF
+}
+
+static_preflight_dispatch() {
+  if [[ "${1:-}" == "--force" ]]; then shift; fi
+
+  local first="${1:-help}" second="${2:-}" arg
+  case "$first" in
+    help|--help|-h)
+      print_top_help
+      exit 0
+      ;;
+    agent)
+      case "$second" in --help|-h|"") usage_agent; exit 0 ;; esac
+      ;;
+    approval)
+      case "$second" in --help|-h|"") usage_approval; exit 0 ;; esac
+      ;;
+    loop)
+      case "$second" in --help|-h|"") usage_loop; exit 0 ;; init|show|reset) ;; *)
+        echo "已移除: 'peer loop <id>' → 改用 'peer loop show <id>'" >&2
+        exit 1
+        ;;
+      esac
+      ;;
+    task)
+      case "$second" in --help|-h|"") usage_task; exit 0 ;; init|show|next) ;; *)
+        echo "已移除: 'peer task <id>' → 改用 'peer task show <id>'" >&2
+        exit 1
+        ;;
+      esac
+      ;;
+    verify)
+      case "$second" in --help|-h|"") usage_verify; exit 0 ;; esac
+      ;;
+    judge)
+      case "$second" in --help|-h|"") usage_judge; exit 0 ;; esac
+      ;;
+    gate)
+      case "$second" in --help|-h|"") usage_gate; exit 0 ;; esac
+      ;;
+    budget)
+      case "$second" in --help|-h|"") usage_budget; exit 0 ;; esac
+      ;;
+    report)
+      case "$second" in --help|-h) usage_report; exit 0 ;; esac
+      for arg in "$@"; do
+        case "$arg" in
+          --verdict|--target-ref|--finding)
+            echo "已移除: 'peer report --verdict/--target-ref/--finding' → 改用 'peer judge <target-ref> --verdict V'" >&2
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+    ls)
+      echo "已移除: 'peer ls' → 改用 'peer agent ls'" >&2
+      exit 1
+      ;;
+    add)
+      echo "已移除: 'peer add' → 改用 'peer agent add ...'" >&2
+      exit 1
+      ;;
+    rm)
+      echo "已移除: 'peer rm' → 改用 'peer agent rm ...'" >&2
+      exit 1
+      ;;
+    approvals)
+      echo "已移除: 'peer approvals' → 改用 'peer approval ls'" >&2
+      exit 1
+      ;;
+    approve)
+      echo "已移除: 'peer approve' → 改用 'peer approval approve <id>'" >&2
+      exit 1
+      ;;
+    deny)
+      echo "已移除: 'peer deny' → 改用 'peer approval deny <id>'" >&2
+      exit 1
+      ;;
+    broker-status)
+      echo "已移除: 'peer broker-status' → 改用 'peer approval status [<id>]'" >&2
+      exit 1
+      ;;
+    broker-check)
+      echo "已移除: 'peer broker-check' → 改用 'peer approval check [<id>] [--nonce <n>]'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+static_preflight_dispatch "$@"
 
 # 自识别:优先读自己 pane 的 @agent_id;缺失则回退 AGENT_NAME(迁移兼容)。
 self_id() {
@@ -137,7 +291,7 @@ resolve_target_pane() {
   local pane other ids rc
   if [[ -n "$maybe_id" ]]; then
     if ! pane="$(pane_for_id "$maybe_id")"; then
-      echo "错误: 找不到 agent '$maybe_id'。用 'peer ls' 查看在线 agent。" >&2
+      echo "错误: 找不到 agent '$maybe_id'。用 'peer agent ls' 查看在线 agent。" >&2
       exit 1
     fi
     printf '%s' "$pane"
@@ -472,31 +626,31 @@ route_verdict_record() { # <target> <round> <reviewer_role> <verdict> <findings_
 parse_review_spec() { # <role:veto1,veto2>; sets REVIEW_ROLE REVIEW_VETO_CSV
   local spec="${1:-}" veto_csv verdict
   if [[ "$spec" != *:* ]]; then
-    echo "错误: --review 必须形如 <role>:<veto1,veto2>。" >&2
+    echo "错误: --judge 必须形如 <role>:<veto1,veto2>。" >&2
     return 1
   fi
   REVIEW_ROLE="${spec%%:*}"
   veto_csv="${spec#*:}"
   if ! is_role_token "$REVIEW_ROLE"; then
-    echo "错误: --review 的 role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2
+    echo "错误: --judge 的 role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2
     return 1
   fi
   if [[ -z "$veto_csv" ]]; then
-    echo "错误: --review 的 veto-list 不能为空。" >&2
+    echo "错误: --judge 的 veto-list 不能为空。" >&2
     return 1
   fi
   if [[ "$veto_csv" == ,* || "$veto_csv" == *, || "$veto_csv" == *,,* ]]; then
-    echo "错误: --review 的 veto-list 不能包含空 verdict。" >&2
+    echo "错误: --judge 的 veto-list 不能包含空 verdict。" >&2
     return 1
   fi
   IFS=',' read -r -a REVIEW_VETO_PARTS <<< "$veto_csv"
   if (( ${#REVIEW_VETO_PARTS[@]} == 0 )); then
-    echo "错误: --review 的 veto-list 不能为空。" >&2
+    echo "错误: --judge 的 veto-list 不能为空。" >&2
     return 1
   fi
   for verdict in "${REVIEW_VETO_PARTS[@]}"; do
     if ! is_verdict_token "$verdict"; then
-      echo "错误: --review 的 verdict 只能包含字母、数字、下划线和连字符。" >&2
+      echo "错误: --judge 的 verdict 只能包含字母、数字、下划线和连字符。" >&2
       return 1
     fi
   done
@@ -560,6 +714,218 @@ write_report_json() {
     printf '"next":'; json_str "$next_text"
     printf '}\n'
   } > "$path"
+}
+
+_emit_report() {
+  if [[ $# -lt 16 ]]; then
+    echo "内部错误: _emit_report 参数不足。" >&2
+    return 1
+  fi
+
+  local report_type="$1" report_status="$2" step_ref="$3" round="$4" delta="$5" next_text="$6" goal_ref="$7" drift="$8"
+  local evidence_cmd="$9" evidence_result="${10}" evidence_ref="${11}" needs_kind="${12}" needs_detail="${13}"
+  local verdict="${14}" target_ref="${15}" findings_json="${16}"
+  shift 16
+  local needs_options=("$@")
+  local role verdict_target_worker="" verdict_target_round=""
+  local state_dir events_dir effective_status task_file tmp_task step_status evidence_json task_candidate
+  local report_file latest_file needs_json tmp_report sha ts tag ref event_ref gate_created_file queue
+  local event_type summary gate_id gate_title event_id tmp_latest
+
+  if ! is_report_type "$report_type"; then
+    echo "错误: --type 必须是 plan、checkpoint、request 或 result。" >&2
+    return 1
+  fi
+  if ! is_report_status "$report_status"; then
+    echo "错误: --status 必须是 in_progress、blocked、partial、done、failed 或 unknown。" >&2
+    return 1
+  fi
+  if [[ -n "$round" ]] && ! is_positive_int "$round"; then
+    echo "错误: --round 必须是正整数。" >&2
+    return 1
+  fi
+  if [[ -n "$needs_kind" ]] && ! is_needs_kind "$needs_kind"; then
+    echo "错误: --needs 必须是 approval、decision、info、scope 或 discovery。" >&2
+    return 1
+  fi
+  # detail/option 离开 kind 无处安放:fail-closed,别把阻塞诉求悄悄丢成空 needs[]。
+  if [[ -z "$needs_kind" && ( -n "$needs_detail" || ${#needs_options[@]} -gt 0 ) ]]; then
+    echo "错误: --needs-detail / --needs-option 需要同时指定 --needs <approval|decision|info|scope|discovery>。" >&2
+    return 1
+  fi
+
+  role="$(self_role)"
+  if [[ -n "$verdict" || -n "$target_ref" ]]; then
+    if [[ -z "$verdict" || -z "$target_ref" ]]; then
+      echo "错误: verdict 与 target-ref 必须同时指定。" >&2
+      return 1
+    fi
+    if [[ "$report_type" != "result" ]]; then
+      echo "错误: verdict 只能用于 result 报告。" >&2
+      return 1
+    fi
+    if ! is_verdict_token "$verdict"; then
+      echo "错误: --verdict 只能包含字母、数字、下划线和连字符。" >&2
+      return 1
+    fi
+    if ! is_role_token "$role"; then
+      echo "错误: 当前 agent role '$role' 不能用于 verdict 路由;role 必须以字母或数字开头,且只能包含字母、数字、点、下划线和连字符。" >&2
+      return 1
+    fi
+    if ! parse_target_ref "$target_ref"; then
+      return 1
+    fi
+    verdict_target_worker="$TARGET_WORKER"
+    verdict_target_round="$TARGET_ROUND"
+    target_ref="${verdict_target_worker}@${verdict_target_round}"
+  fi
+
+  state_dir="$AGENT_DUO_DIR/state/$ME"
+  events_dir="$AGENT_DUO_DIR/events"
+  if ! mkdir -p "$state_dir" "$events_dir"; then
+    echo "错误: 创建 report 状态目录失败: .agent-duo/state/$ME" >&2
+    return 1
+  fi
+
+  if [[ -z "$round" ]]; then
+    round="$(next_report_round "$state_dir")"
+  fi
+
+  effective_status="$report_status"
+  if [[ "$report_status" == "done" || "$report_status" == "partial" ]]; then
+    if [[ -z "$evidence_cmd" && -z "$evidence_result" && -z "$evidence_ref" ]]; then
+      effective_status="unknown"
+    fi
+  fi
+
+  task_file="$state_dir/task.json"
+  tmp_task=""
+  if [[ -f "$task_file" ]]; then
+    if [[ -n "$step_ref" ]]; then
+      if ! task_step_exists "$task_file" "$step_ref"; then
+        echo "错误: task.json 中不存在 step '$step_ref'。" >&2
+        return 1
+      fi
+      step_status=""
+      step_status="$(task_step_status_for_report "$report_type" "$report_status" "$effective_status" 2>/dev/null || true)"
+      if [[ -n "$step_status" ]]; then
+        evidence_json="$(task_evidence_json "$evidence_cmd" "$evidence_result" "$evidence_ref")"
+        tmp_task="${state_dir}/.task.json.$$"
+        if ! task_prepare_update "$task_file" "$tmp_task" "$step_ref" "$step_status" "$round" "$evidence_json"; then
+          rm -f "$tmp_task"
+          return 1
+        fi
+      fi
+    fi
+    task_candidate="$task_file"
+    if [[ -n "$tmp_task" ]]; then task_candidate="$tmp_task"; fi
+    if [[ "$report_type" == "result" && "$effective_status" == "done" ]]; then
+      if ! task_all_steps_done "$task_candidate"; then
+        effective_status="partial"
+      fi
+    fi
+  fi
+
+  report_file="$state_dir/r${round}.json"
+  latest_file="$state_dir/report.json"
+  if [[ -e "$report_file" ]]; then
+    echo "错误: report round 已存在: .agent-duo/state/$ME/r${round}.json" >&2
+    return 1
+  fi
+
+  # 写临时文件 + rename：保证读者只看到完整文件(原子可见性)。
+  # 注意:不再 fsync —— 去掉 Python 运行时依赖后放弃了跨崩溃耐久性。单机断电/内核崩溃
+  # 极端情形下，已返回成功的 report/event 可能丢失;原子性与正常读写不受影响。
+  needs_json="$(build_needs_json "$needs_kind" "$needs_detail" ${needs_options[@]+"${needs_options[@]}"})"
+  tmp_report="$state_dir/.r${round}.json.$$"
+  if ! write_report_json "$tmp_report" "$round" "$ME" "$role" "$report_type" "$effective_status" \
+    "$goal_ref" "$step_ref" "$delta" "$drift" "$next_text" \
+    "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_json" \
+    "$verdict" "$target_ref" "$findings_json"; then
+    rm -f "$tmp_report"
+    echo "错误: 写 report 临时文件失败: .agent-duo/state/$ME/.r${round}.json.$$" >&2
+    return 1
+  fi
+  if ! mv "$tmp_report" "$report_file"; then
+    rm -f "$tmp_report" "$report_file"
+    echo "错误: 写 report 文件失败: .agent-duo/state/$ME/r${round}.json" >&2
+    return 1
+  fi
+
+  if ! sha="$(sha256_file "$report_file")"; then
+    rm -f "$report_file"
+    echo "错误: 计算 report sha 失败: .agent-duo/state/$ME/r${round}.json" >&2
+    return 1
+  fi
+  ts="$(iso_ts)"
+  tag="$(codec_tag)"
+  ref=".agent-duo/state/$ME/r${round}.json"
+  event_ref="$ref"
+  gate_created_file=""
+
+  queue="$events_dir/queue.jsonl"
+  event_type="$(event_type_for_report "$report_type" "$effective_status")"
+  summary="$(one_line "$delta")"
+  if [[ -z "$summary" ]]; then summary="$(one_line "$next_text")"; fi
+  # 阻塞诉求要带进 event summary,否则 Stop/loop 注入只能给 supervisor 一个泛化 request/blocked。
+  if [[ -z "$summary" && -n "$needs_detail" ]]; then summary="$(one_line "$needs_detail")"; fi
+  if [[ -z "$summary" && -n "$needs_kind" ]]; then summary="needs:${needs_kind}"; fi
+  if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
+  if [[ "$needs_kind" == "decision" && "$event_type" == "blocked" ]]; then
+    gate_id="$(new_gate_id "$round")"
+    gate_title="$needs_detail"
+    if [[ -z "$gate_title" ]]; then gate_title="Human decision required"; fi
+    if ! create_gate_record "$gate_id" "$ts" "$ME" "$role" "$round" "$gate_title" "$needs_detail" "$ref" ${needs_options[@]+"${needs_options[@]}"}; then
+      rm -f "$report_file"
+      if [[ -n "$tmp_task" ]]; then rm -f "$tmp_task"; fi
+      return 1
+    fi
+    gate_created_file="$(gate_path "$gate_id")"
+    event_ref=".agent-duo/gates/${gate_id}.json"
+  fi
+  event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
+  if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$event_ref"; then
+    rm -f "$report_file"
+    if [[ -n "$gate_created_file" ]]; then rm -f "$gate_created_file"; fi
+    if [[ -n "$tmp_task" ]]; then rm -f "$tmp_task"; fi
+    return 1
+  fi
+  if [[ -n "$tmp_task" ]]; then
+    if ! mv "$tmp_task" "$task_file"; then
+      rm -f "$tmp_task"
+      echo "错误: 更新 task.json 失败: .agent-duo/state/$ME/task.json" >&2
+      return 1
+    fi
+  fi
+  if [[ -n "$gate_created_file" ]]; then
+    if ! append_decision_log "$gate_id" "opened" "$ME" "$summary" "" ""; then
+      echo "错误: 写 Human Decision Gate 审计日志失败: $gate_id" >&2
+      return 1
+    fi
+  fi
+
+  tmp_latest="$state_dir/.report.json.$$"
+  rm -f "$tmp_latest"
+  if ! ln -s "r${round}.json" "$tmp_latest"; then
+    rm -f "$tmp_latest"
+    echo "错误: 创建 latest report 临时链接失败: .agent-duo/state/$ME/.report.json.$$" >&2
+    return 1
+  fi
+  if ! mv -f "$tmp_latest" "$latest_file"; then
+    rm -f "$tmp_latest"
+    echo "错误: 更新 latest report 链接失败: .agent-duo/state/$ME/report.json" >&2
+    return 1
+  fi
+
+  if [[ -n "$verdict" ]]; then
+    if ! route_verdict_record "$verdict_target_worker" "$verdict_target_round" "$role" "$verdict" "$findings_json" "$ts"; then
+      echo "错误: 判决已记入本 agent report,但路由到 ${verdict_target_worker}/reviews/${role}-r${verdict_target_round}.json 失败;请保留同一 target-ref 重报;若原命令显式带了 --round,重试时换新 round 或省略 --round。" >&2
+      return 1
+    fi
+  fi
+
+  printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
+    "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"
 }
 
 task_file_for_id() { # <agent_id>
@@ -719,31 +1085,31 @@ build_validation_json() {
     return 0
   fi
   for spec in "${loop_validations[@]}"; do
-    parse_validation_pair "--validation" "$spec" || return 1
+    parse_validation_pair "--verify" "$spec" || return 1
     id="$VALIDATION_ID"
     cmd="$VALIDATION_VALUE"
     if validation_id_in_list "$id" "${ids[@]+"${ids[@]}"}"; then
-      echo "错误: --validation id 重复: $id" >&2
+      echo "错误: --verify id 重复: $id" >&2
       return 1
     fi
     ids+=("$id")
     cmds+=("$cmd")
   done
   for spec in ${loop_validation_satisfies[@]+"${loop_validation_satisfies[@]}"}; do
-    parse_validation_pair "--validation-satisfies" "$spec" || return 1
+    parse_validation_pair "--verify-satisfies" "$spec" || return 1
     if ! validation_id_in_list "$VALIDATION_ID" "${ids[@]+"${ids[@]}"}"; then
-      echo "错误: --validation-satisfies 引用了不存在的 validation id: $VALIDATION_ID" >&2
+      echo "错误: --verify-satisfies 引用了不存在的 verify id: $VALIDATION_ID" >&2
       return 1
     fi
   done
   for spec in ${loop_validation_timeouts[@]+"${loop_validation_timeouts[@]}"}; do
-    parse_validation_pair "--validation-timeout" "$spec" || return 1
+    parse_validation_pair "--verify-timeout" "$spec" || return 1
     if ! validation_id_in_list "$VALIDATION_ID" "${ids[@]+"${ids[@]}"}"; then
-      echo "错误: --validation-timeout 引用了不存在的 validation id: $VALIDATION_ID" >&2
+      echo "错误: --verify-timeout 引用了不存在的 verify id: $VALIDATION_ID" >&2
       return 1
     fi
     if ! is_positive_int "$VALIDATION_VALUE"; then
-      echo "错误: --validation-timeout 的秒数必须是正整数。" >&2
+      echo "错误: --verify-timeout 的秒数必须是正整数。" >&2
       return 1
     fi
   done
@@ -758,7 +1124,7 @@ build_validation_json() {
       timeout="120"
     fi
     for spec in ${loop_validation_timeouts[@]+"${loop_validation_timeouts[@]}"}; do
-      parse_validation_pair "--validation-timeout" "$spec" >/dev/null || return 1
+      parse_validation_pair "--verify-timeout" "$spec" >/dev/null || return 1
       if [[ "$VALIDATION_ID" == "$id" ]]; then
         timeout="$VALIDATION_VALUE"
       fi
@@ -771,7 +1137,7 @@ build_validation_json() {
     first_signal=1
     seen_signal=0
     for spec in ${loop_validation_satisfies[@]+"${loop_validation_satisfies[@]}"}; do
-      parse_validation_pair "--validation-satisfies" "$spec" >/dev/null || return 1
+      parse_validation_pair "--verify-satisfies" "$spec" >/dev/null || return 1
       if [[ "$VALIDATION_ID" == "$id" ]]; then
         signal="$VALIDATION_VALUE"
         if [[ $first_signal -eq 1 ]]; then first_signal=0; else printf ','; fi
@@ -938,8 +1304,8 @@ loop_print() { # <agent_id>
       "STOP_REASON\t\(.stop.reason // "")",
       "NON_GOALS\t\((.non_goals // []) | join("; "))",
       "SUCCESS_SIGNALS\t\((.success_signals // []) | join("; "))",
-      "VALIDATION\t\((.validation // []) | map(((.id // "") | tostring) + ":" + ((.cmd // "") | tostring)) | join("; "))",
-      "ACCEPTANCE\t\((.acceptance.reviews // []) | map(((.role // "") | tostring) + ":" + ((.veto_on // []) | join(","))) | join("; "))"
+      "VERIFY\t\((.validation // []) | map(((.id // "") | tostring) + ":" + ((.cmd // "") | tostring)) | join("; "))",
+      "JUDGE\t\((.acceptance.reviews // []) | map(((.role // "") | tostring) + ":" + ((.veto_on // []) | join(","))) | join("; "))"
   ' "$loop_file"
 }
 
@@ -1040,7 +1406,7 @@ check_target_dispatch_allowed() { # <target_id> <target_pane> [command_name]
   local target_id="$1" target="$2" command_name="${3:-tell}" gate_role bg_out bg_status
   # Broker 硬门:发给工作型角色(非 supervisor/daemon/loopd)时,broker 必须 fresh ready,否则拒发
   # (fail-closed)。worker/reviewer/自定义工作角色都受保护,与 lib/loop.sh 的 active-worker 模型一致。
-  # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。broker-check 探针不经 tell,天然豁免。
+  # 豁免:--force(FORCE_SEND)或 AGENT_DUO_NO_BROKER_GATE=1。approval check 探针不经 tell,天然豁免。
   gate_role="$(role_for_id "$target_id")"
   if role_is_gated "$gate_role" \
      && [[ "${FORCE_SEND:-0}" != "1" && "${AGENT_DUO_NO_BROKER_GATE:-0}" != "1" ]]; then
@@ -1050,7 +1416,7 @@ check_target_dispatch_allowed() { # <target_id> <target_pane> [command_name]
       *)
         bg_status="$(printf '%s' "$bg_out" | grep -o '"status":"[^"]*"' | head -1)"
         echo "错误: '$target_id' 的 Approval Broker 非 fresh ready（${bg_status:-未知}），已拒绝派发。" >&2
-        echo "      先运行 'peer broker-check $target_id' 验证 broker 生效，或用 'peer $command_name --force $target_id ...' 强制发送。" >&2
+        echo "      先运行 'peer approval check $target_id' 验证 broker 生效，或用 'peer $command_name --force $target_id ...' 强制发送。" >&2
         return 1
         ;;
     esac
@@ -1163,6 +1529,146 @@ logs_dir() {
 
 validation_file_for_round() { # <agent_id> <round>
   printf '%s/state/%s/validation-r%s.json' "$AGENT_DUO_DIR" "$1" "$2"
+}
+
+validation_running_file_for_round() { # <agent_id> <round>
+  printf '%s/state/%s/validation-r%s.running' "$AGENT_DUO_DIR" "$1" "$2"
+}
+
+verify_state_json() { # <agent_id> <round>
+  local agent_id="$1" round_s="$2" loop_file validation_file running_file report_file
+  local loop_json validation_json has_report is_running
+  loop_file="$(loop_file_for_id "$agent_id")"
+  if [[ ! -f "$loop_file" ]]; then
+    echo "错误: 没有 loop.json: .agent-duo/state/$agent_id/loop.json，请先 peer loop init。" >&2
+    return 1
+  fi
+  if ! loop_json="$(jq -c '.' "$loop_file" 2>/dev/null)"; then
+    echo "错误: 无法读取 .agent-duo/state/$agent_id/loop.json。" >&2
+    return 1
+  fi
+  if ! is_nonnegative_int "$round_s"; then
+    echo "错误: --round 必须是非负整数。" >&2
+    return 1
+  fi
+  validation_file="$(validation_file_for_round "$agent_id" "$round_s")"
+  running_file="$(validation_running_file_for_round "$agent_id" "$round_s")"
+  report_file="$AGENT_DUO_DIR/state/$agent_id/report.json"
+  validation_json="null"
+  if [[ -f "$validation_file" ]]; then
+    validation_json="$(jq -c '.' "$validation_file" 2>/dev/null || printf 'null')"
+  fi
+  has_report=0
+  [[ -e "$report_file" ]] && has_report=1
+  is_running=0
+  [[ -e "$running_file" && ! -f "$validation_file" ]] && is_running=1
+  jq -cn \
+    --arg agent "$agent_id" \
+    --argjson round "$round_s" \
+    --argjson loop "$loop_json" \
+    --argjson validation "$validation_json" \
+    --argjson has_report "$has_report" \
+    --argjson is_running "$is_running" '
+      ($loop.validation // []) as $defs
+      | (if (($defs | length) == 0) then "no_gates"
+         elif $validation != null then ($validation.status // "unknown")
+         elif $is_running == 1 then "running"
+         elif $has_report == 0 then "pending"
+         else "not_run" end) as $round_status
+      | {
+          agent:$agent,
+          round:$round,
+          round_status:$round_status,
+          gates: [
+            $defs[]? as $gate
+            | (($validation.results // []) | map(select((.id // "") == ($gate.id // ""))) | .[0] // null) as $result
+            | {
+                id:($gate.id // ""),
+                cmd:($gate.cmd // ""),
+                satisfies:(($gate.satisfies // []) | map(tostring)),
+                status:(
+                  if $result != null then ($result.status // "unknown")
+                  elif $validation != null then "not_run"
+                  elif $is_running == 1 then "running"
+                  elif $has_report == 0 then "pending"
+                  else "not_run" end
+                ),
+                result:$result
+              }
+          ]
+        }
+    '
+}
+
+verify_print_ls() { # <json>
+  jq -r '
+    if ((.gates // []) | length) == 0 then
+      "没有 verify gate。"
+    else
+      (.gates[] | "\(.id)\t\(.status)")
+    end
+  ' <<< "$1"
+}
+
+verify_print_show() { # <json>
+  jq -r '
+    "VERIFY\t\(.agent) @ r\(.round) \(.round_status)",
+    (if ((.gates // []) | length) == 0 then
+      "没有 verify gate。"
+    else
+      (.gates[] |
+        "GATE\t\(.id)\t\(.status)",
+        "CMD\t\(.cmd)",
+        "SATISFIES\t\((.satisfies // []) | join("; "))",
+        "RESULT\t\(if .result == null then "-" else (.result | tostring) end)"
+      )
+    end)
+  ' <<< "$1"
+}
+
+judge_records_json() { # <agent_id>
+  local agent_id="$1" state_dir reviews_dir file base any
+  state_dir="$AGENT_DUO_DIR/state/$agent_id"
+  reviews_dir="$state_dir/reviews"
+  if [[ ! -d "$state_dir" ]]; then
+    echo "错误: 没有该 agent 的 state: .agent-duo/state/$agent_id" >&2
+    return 1
+  fi
+  any=0
+  for file in "$reviews_dir"/*.json; do
+    [[ -f "$file" ]] || continue
+    any=1
+    base="${file##*/}"
+    jq -c --arg ref ".agent-duo/state/$agent_id/reviews/$base" '
+      {
+        verdict:(.verdict // ""),
+        by:(.by // ""),
+        role:(.role // ""),
+        target_round:(.target_round // 0),
+        ts:(.ts // ""),
+        ref:$ref
+      }
+    ' "$file" 2>/dev/null || true
+  done | jq -s '
+    sort_by([
+      -((.target_round // 0) | tonumber),
+      ((.ts // "") | explode | map(-.)),
+      (.role // "")
+    ])
+  '
+  if [[ "$any" == "0" ]]; then
+    return 0
+  fi
+}
+
+judge_print_records() { # <json>
+  jq -r '
+    if length == 0 then
+      "没有 judge verdict。"
+    else
+      (.[] | "r\(.target_round)\t\(.role)\t\(.verdict)\tby=\(.by)\t\(.ref)")
+    end
+  ' <<< "$1"
 }
 
 checkpoints_log_file() {
@@ -1328,7 +1834,7 @@ checkpoint_print() { # <agent_id>
         "STEPS\t\(.steps.counts.done) done, \(.steps.counts.in_progress) in_progress, \(.steps.counts.blocked) blocked, \(.steps.counts.pending) pending, \(.steps.counts.failed) failed (current: \(.steps.current_step // "-"))"
        else empty end),
       (if .validation? then
-        "VALIDATION\tr\(.validation.round) \(.validation.status)" +
+        "VERIFY\tr\(.validation.round) \(.validation.status)" +
         (if ((.validation.missing_signals // []) | length) > 0 then " - missing: \((.validation.missing_signals // []) | join("; "))" else "" end) +
         (if ((.validation.failed_validations // []) | length) > 0 then " - failed: \((.validation.failed_validations // []) | join("; "))" else "" end)
        else empty end)
@@ -1423,7 +1929,7 @@ gate_pick_unique_pending() {
     0) return 1 ;;
     1) printf '%s' "$ids"; return 0 ;;
     *)
-      echo "错误: 存在多个 pending gate,请指定 gate id。可用 'peer gate' 查看。" >&2
+      echo "错误: 存在多个 pending gate,请指定 gate id。可用 'peer gate ls' 查看。" >&2
       return 2
       ;;
   esac
@@ -1452,7 +1958,7 @@ gate_pick_unique_pending_for_agent() { # <agent_id>
     0) return 1 ;;
     1) printf '%s' "$ids"; return 0 ;;
     *)
-      echo "错误: agent '$agent' 存在多个 pending gate,请指定 gate id。可用 'peer gate' 查看。" >&2
+      echo "错误: agent '$agent' 存在多个 pending gate,请指定 gate id。可用 'peer gate ls' 查看。" >&2
       return 2
       ;;
   esac
@@ -1646,153 +2152,258 @@ cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
-  ls)
-    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-      echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
-      exit 1
-    fi
-    printf '%-3s %-16s %-12s %-10s %s\n' '' 'ID' 'ROLE' 'PROVIDER' 'PANE'
-    while IFS=$'\t' read -r pane id role provider; do
-      [[ -z "$pane" ]] && continue
-      mark=' '
-      [[ "$pane" == "$SELF_PANE" ]] && mark='*'
-      if [[ -z "$id" ]]; then
-        printf '%-3s %-16s %-12s %-10s %s\n' "$mark" '(unregistered)' '-' '-' "$pane"
-      else
-        printf '%-3s %-16s %-12s %-10s %s\n' "$mark" "$id" "$role" "$provider" "$pane"
-      fi
-    done < <(list_agents)
-    ;;
-
-  add)
-    ensure_session
-    provider=""; role=""; want_id=""; use_worktree=0
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --provider) provider="${2:-}"; shift 2 ;;
-        --role)     role="${2:-}"; shift 2 ;;
-        --id)       want_id="${2:-}"; shift 2 ;;
-        --worktree) use_worktree=1; shift ;;
-        *) echo "错误: 未知参数 '$1'。用法: peer add --provider claude|codex --role <role> [--id <id>] [--worktree]" >&2; exit 1 ;;
-      esac
-    done
-    if ! reg_validate_provider "$provider"; then
-      echo "错误: provider 必须是 claude 或 codex,当前为 '$provider'。" >&2; exit 1
-    fi
-    if [[ -z "$role" ]]; then
-      echo "错误: 必须用 --role 指定角色。" >&2; exit 1
-    fi
-    if ! is_role_token "$role"; then
-      echo "错误: --role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
-    fi
-    new_id="$want_id"
-    if [[ -z "$new_id" ]]; then
-      new_id="$(reg_derive_id "$role" "$(agent_ids)")"
-    elif ! is_role_token "$new_id"; then
-      echo "错误: --id 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
-    elif agent_ids | grep -qx "$new_id"; then
-      echo "错误: id '$new_id' 已被占用。" >&2; exit 1
-    fi
-    agent_worktree="$PWD"
-    if [[ "$use_worktree" == "1" ]]; then
-      agent_worktree="$(reg_create_worktree "$new_id" "$AGENT_DUO_ROOT" "$SESSION")"
-      reg_write_worktree_record "$AGENT_DUO_ROOT" "$new_id" "$agent_worktree" "$(reg_worktree_branch "$new_id")"
-    fi
-    # 新建 window(裸 shell),捕获 pane;按 start.sh 模式 send-keys 导出环境并启动 provider。
-    new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$agent_worktree" -P -F '#{pane_id}')"
-    tmux set-option -p -t "$new_pane" @agent_id "$new_id"
-    tmux set-option -p -t "$new_pane" @agent_role "$role"
-    tmux set-option -p -t "$new_pane" @agent_provider "$provider"
-    if [[ "$use_worktree" == "1" ]]; then
-      tmux set-option -p -t "$new_pane" @agent_worktree "$agent_worktree"
-    fi
-    approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$agent_worktree")"
-    launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
-    if [[ "$provider" == "claude" ]]; then
-      launch="$launch --settings $(printf '%q' "$approval_settings")"
-    else
-      hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
-      launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
-      launch="$launch -c $(printf '%q' "$(codex_hook_config PermissionRequest "$hook_command" "*")")"
-    fi
-    bin_dir="$(dirname "$PEER_SRC")"
-    root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
-    agent_q="$(printf '%q' "$new_id")"
-    worktree_q="$(printf '%q' "$agent_worktree")"
-    hook_q="$(printf '%q' "$APPROVAL_HOOK")"
-    settings_q="$(printf '%q' "$approval_settings")"
-    tmux send-keys -t "$new_pane" \
-      "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
-    echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
-    # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效。
-    run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
-    # 工作型角色(任何 provider)都受派发硬门保护:派任务前必须先 broker-check,否则首次 peer tell 被拒发。
-    if role_is_gated "$role"; then
-      echo "提示: '$new_id' 的 Approval Broker 起始为 unverified;派任务前先运行 'peer broker-check $new_id' 验证 broker 生效,否则首次 'peer tell $new_id ...' 会被硬门 fail-closed 拒发。"
-    fi
-    if [[ "$provider" == "codex" ]]; then
-      echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook(信任前 broker-check 不会通过)。"
-    fi
-    ;;
-
-  broker-status)
-    ensure_session
-    maybe_id="${1:-}"
-    if [[ -z "$maybe_id" ]]; then
-      maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
-        echo "用法: peer broker-status <id>(多于两人时必须指定 id)" >&2; exit 1; }
-    fi
-    agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
-    bs_json="$(run_approval_broker status --agent-id "$maybe_id" --root "$AGENT_DUO_ROOT")"
-    printf '%s\n' "$bs_json"
-    case "$bs_json" in
-      *'"status":"ready"'*) ;;
-      *) echo "提示: '$maybe_id' broker 非 fresh ready,派发需 broker 保护的任务前请先 'peer broker-check $maybe_id'。" >&2 ;;
+  agent)
+    subcmd="${1:-}"
+    shift || true
+    case "$subcmd" in
+      ls)
+        if [[ $# -gt 0 ]]; then
+          usage_agent >&2
+          exit 1
+        fi
+        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+          echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
+          exit 1
+        fi
+        printf '%-3s %-16s %-12s %-10s %s\n' '' 'ID' 'ROLE' 'PROVIDER' 'PANE'
+        while IFS=$'\t' read -r pane id role provider; do
+          [[ -z "$pane" ]] && continue
+          mark=' '
+          [[ "$pane" == "$SELF_PANE" ]] && mark='*'
+          if [[ -z "$id" ]]; then
+            printf '%-3s %-16s %-12s %-10s %s\n' "$mark" '(unregistered)' '-' '-' "$pane"
+          else
+            printf '%-3s %-16s %-12s %-10s %s\n' "$mark" "$id" "$role" "$provider" "$pane"
+          fi
+        done < <(list_agents)
+        ;;
+      add)
+        ensure_session
+        provider=""; role=""; want_id=""; use_worktree=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --provider) provider="${2:-}"; shift 2 ;;
+            --role)     role="${2:-}"; shift 2 ;;
+            --id)       want_id="${2:-}"; shift 2 ;;
+            --worktree) use_worktree=1; shift ;;
+            *) echo "错误: 未知参数 '$1'。用法: peer agent add --provider claude|codex --role <role> [--id <id>] [--worktree]" >&2; exit 1 ;;
+          esac
+        done
+        if ! reg_validate_provider "$provider"; then
+          echo "错误: provider 必须是 claude 或 codex,当前为 '$provider'。" >&2; exit 1
+        fi
+        if [[ -z "$role" ]]; then
+          echo "错误: 必须用 --role 指定角色。" >&2; exit 1
+        fi
+        if ! is_role_token "$role"; then
+          echo "错误: --role 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
+        fi
+        new_id="$want_id"
+        if [[ -z "$new_id" ]]; then
+          new_id="$(reg_derive_id "$role" "$(agent_ids)")"
+        elif ! is_role_token "$new_id"; then
+          echo "错误: --id 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
+        elif agent_ids | grep -qx "$new_id"; then
+          echo "错误: id '$new_id' 已被占用。" >&2; exit 1
+        fi
+        agent_worktree="$PWD"
+        if [[ "$use_worktree" == "1" ]]; then
+          agent_worktree="$(reg_create_worktree "$new_id" "$AGENT_DUO_ROOT" "$SESSION")"
+          reg_write_worktree_record "$AGENT_DUO_ROOT" "$new_id" "$agent_worktree" "$(reg_worktree_branch "$new_id")"
+        fi
+        new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$agent_worktree" -P -F '#{pane_id}')"
+        tmux set-option -p -t "$new_pane" @agent_id "$new_id"
+        tmux set-option -p -t "$new_pane" @agent_role "$role"
+        tmux set-option -p -t "$new_pane" @agent_provider "$provider"
+        if [[ "$use_worktree" == "1" ]]; then
+          tmux set-option -p -t "$new_pane" @agent_worktree "$agent_worktree"
+        fi
+        approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$agent_worktree")"
+        launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
+        if [[ "$provider" == "claude" ]]; then
+          launch="$launch --settings $(printf '%q' "$approval_settings")"
+        else
+          hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
+          launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
+          launch="$launch -c $(printf '%q' "$(codex_hook_config PermissionRequest "$hook_command" "*")")"
+        fi
+        bin_dir="$(dirname "$PEER_SRC")"
+        root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
+        agent_q="$(printf '%q' "$new_id")"
+        worktree_q="$(printf '%q' "$agent_worktree")"
+        hook_q="$(printf '%q' "$APPROVAL_HOOK")"
+        settings_q="$(printf '%q' "$approval_settings")"
+        tmux send-keys -t "$new_pane" \
+          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
+        echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
+        run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
+        if role_is_gated "$role"; then
+          echo "提示: '$new_id' 的 Approval Broker 起始为 unverified;派任务前先运行 'peer approval check $new_id' 验证 broker 生效,否则首次 'peer tell $new_id ...' 会被硬门 fail-closed 拒发。"
+        fi
+        if [[ "$provider" == "codex" ]]; then
+          echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook(信任前 peer approval check 不会通过)。"
+        fi
+        ;;
+      rm)
+        ensure_session
+        rm_id=""
+        rm_force="$FORCE_SEND"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --force) rm_force=1; shift ;;
+            *)
+              if [[ -n "$rm_id" ]]; then
+                echo "用法: peer agent rm [--force] <id>" >&2; exit 1
+              fi
+              rm_id="$1"
+              shift
+              ;;
+          esac
+        done
+        if [[ -z "$rm_id" ]]; then
+          echo "用法: peer agent rm [--force] <id>" >&2; exit 1
+        fi
+        if [[ "$rm_id" == "$ME" ]]; then
+          echo "错误: 不能移除自己。" >&2; exit 1
+        fi
+        if ! rm_pane="$(pane_for_id "$rm_id")"; then
+          echo "错误: 找不到 agent '$rm_id'。" >&2; exit 1
+        fi
+        tmux kill-window -t "$rm_pane"
+        echo "已移除 agent '$rm_id'(pane=$rm_pane)。"
+        if ! reg_remove_worktree "$AGENT_DUO_ROOT" "$rm_id" "$rm_force"; then
+          rc="$?"
+          if [[ "$rc" != "2" ]]; then
+            exit "$rc"
+          fi
+        fi
+        ;;
+      ""|--help|-h)
+        usage_agent
+        ;;
+      *)
+        usage_agent >&2
+        exit 1
+        ;;
     esac
     ;;
 
-  broker-check)
-    ensure_session
-    maybe_id=""; nonce=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --nonce) nonce="${2:-}"; shift 2 ;;   # 测试用:固定 nonce
-        *) if [[ -z "$maybe_id" ]]; then maybe_id="$1"; shift; else
-             echo "用法: peer broker-check <id> [--nonce <n>]" >&2; exit 1; fi ;;
-      esac
-    done
-    if [[ -z "$maybe_id" ]]; then
-      maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
-        echo "用法: peer broker-check <id>(多于两人时必须指定 id)" >&2; exit 1; }
-    fi
-    agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
-    target="$(pane_for_id "$maybe_id")"
-    [[ -n "$nonce" ]] || nonce="bc$(random_hex_tag)"
-    probe_cmd="$(run_approval_broker selfcheck-cmd --nonce "$nonce")"
-    # 把 probe 作为一条祈使提示投递给 worker;worker 跑该命令 → 触发 hook → 写 ready+nonce。
-    prompt="agent-duo broker self-check。请立刻原样执行下面这条 shell 命令,不要解释、不要询问、不要改写: ${probe_cmd}"
-    check_safe_to_send_keys "$target"
-    buf="peer-brokercheck-${maybe_id}"
-    send_text_to_pane "$target" "$buf" "$prompt"
-    echo "已向 '$maybe_id' 投递 broker 自检探针(nonce=$nonce),等待 hook 拦截…"
-    timeout="${AGENT_DUO_BROKER_CHECK_TIMEOUT:-60}"
-    marker="$AGENT_DUO_DIR/state/$maybe_id/broker.json"
-    i=0
-    while [[ "$i" -lt "$timeout" ]]; do
-      if [[ -f "$marker" ]] \
-        && [[ "$(jq -r '.status // ""' "$marker" 2>/dev/null)" == "ready" ]] \
-        && [[ "$(jq -r '.nonce // ""' "$marker" 2>/dev/null)" == "$nonce" ]]; then
-        echo "✅ broker READY:'$maybe_id' 的 Approval Broker hook 已被 provider 实际调用并拦下探针。"
-        exit 0
-      fi
-      sleep 1
-      i=$(( i + 1 ))
-    done
-    run_approval_broker mark --agent-id "$maybe_id" --status fail-open --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
-    echo "⚠️  broker FAIL-OPEN:${timeout}s 内未观察到 '$maybe_id' 的 hook 拦截探针。" >&2
-    echo "    很可能 Codex hook 未被信任(/hooks 里 trust),或 worker 未执行该命令。" >&2
-    echo "    在该 worker 生效前,不要派给它需要 Approval Broker 保护的任务。" >&2
-    exit 1
+  approval)
+    subcmd="${1:-}"
+    shift || true
+    case "$subcmd" in
+      ls)
+        show_all=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --all) show_all=1; shift ;;
+            *) echo "用法: peer approval ls [--all]" >&2; exit 1 ;;
+          esac
+        done
+        if [[ "$show_all" == "1" ]]; then
+          run_approval_broker list --root "$AGENT_DUO_ROOT" --all
+        else
+          run_approval_broker list --root "$AGENT_DUO_ROOT"
+        fi
+        ;;
+      approve)
+        approval_id="${1:-}"
+        if [[ -z "$approval_id" ]]; then
+          echo "用法: peer approval approve <id>" >&2
+          exit 1
+        fi
+        shift
+        if [[ $# -gt 0 ]]; then
+          echo "用法: peer approval approve <id>" >&2
+          exit 1
+        fi
+        run_approval_broker approve --root "$AGENT_DUO_ROOT" "$approval_id"
+        ;;
+      deny)
+        approval_id="${1:-}"
+        if [[ -z "$approval_id" ]]; then
+          echo "用法: peer approval deny <id> [--reason \"...\"]" >&2
+          exit 1
+        fi
+        shift
+        deny_reason=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --reason) deny_reason="${2:-}"; shift 2 ;;
+            *) echo "用法: peer approval deny <id> [--reason \"...\"]" >&2; exit 1 ;;
+          esac
+        done
+        run_approval_broker deny --root "$AGENT_DUO_ROOT" --reason "$deny_reason" "$approval_id"
+        ;;
+      status)
+        ensure_session
+        maybe_id="${1:-}"
+        if [[ -z "$maybe_id" ]]; then
+          maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
+            echo "用法: peer approval status <id>(多于两人时必须指定 id)" >&2; exit 1; }
+        fi
+        if [[ -n "${2:-}" ]]; then
+          echo "用法: peer approval status [<id>]" >&2
+          exit 1
+        fi
+        agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
+        bs_json="$(run_approval_broker status --agent-id "$maybe_id" --root "$AGENT_DUO_ROOT")"
+        printf '%s\n' "$bs_json"
+        case "$bs_json" in
+          *'"status":"ready"'*) ;;
+          *) echo "提示: '$maybe_id' broker 非 fresh ready,派发需 broker 保护的任务前请先 'peer approval check $maybe_id'。" >&2 ;;
+        esac
+        ;;
+      check)
+        ensure_session
+        maybe_id=""; nonce=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --nonce) nonce="${2:-}"; shift 2 ;;
+            *) if [[ -z "$maybe_id" ]]; then maybe_id="$1"; shift; else
+                 echo "用法: peer approval check <id> [--nonce <n>]" >&2; exit 1; fi ;;
+          esac
+        done
+        if [[ -z "$maybe_id" ]]; then
+          maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
+            echo "用法: peer approval check <id>(多于两人时必须指定 id)" >&2; exit 1; }
+        fi
+        agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
+        target="$(pane_for_id "$maybe_id")"
+        [[ -n "$nonce" ]] || nonce="bc$(random_hex_tag)"
+        probe_cmd="$(run_approval_broker selfcheck-cmd --nonce "$nonce")"
+        prompt="agent-duo broker self-check。请立刻原样执行下面这条 shell 命令,不要解释、不要询问、不要改写: ${probe_cmd}"
+        check_safe_to_send_keys "$target"
+        buf="peer-brokercheck-${maybe_id}"
+        send_text_to_pane "$target" "$buf" "$prompt"
+        echo "已向 '$maybe_id' 投递 broker 自检探针(nonce=$nonce),等待 hook 拦截…"
+        timeout="${AGENT_DUO_BROKER_CHECK_TIMEOUT:-60}"
+        marker="$AGENT_DUO_DIR/state/$maybe_id/broker.json"
+        i=0
+        while [[ "$i" -lt "$timeout" ]]; do
+          if [[ -f "$marker" ]] \
+            && [[ "$(jq -r '.status // ""' "$marker" 2>/dev/null)" == "ready" ]] \
+            && [[ "$(jq -r '.nonce // ""' "$marker" 2>/dev/null)" == "$nonce" ]]; then
+            echo "✅ broker READY:'$maybe_id' 的 Approval Broker hook 已被 provider 实际调用并拦下探针。"
+            exit 0
+          fi
+          sleep 1
+          i=$(( i + 1 ))
+        done
+        run_approval_broker mark --agent-id "$maybe_id" --status fail-open --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
+        echo "⚠️  broker FAIL-OPEN:${timeout}s 内未观察到 '$maybe_id' 的 hook 拦截探针。" >&2
+        echo "    很可能 Codex hook 未被信任(/hooks 里 trust),或 worker 未执行该命令。" >&2
+        echo "    在该 worker 生效前,不要派给它需要 Approval Broker 保护的任务。" >&2
+        exit 1
+        ;;
+      ""|--help|-h)
+        usage_approval
+        ;;
+      *)
+        usage_approval >&2
+        exit 1
+        ;;
+    esac
     ;;
 
   peek)
@@ -2169,19 +2780,21 @@ case "$cmd" in
         fi
         task_next "$target_id"
         ;;
-      ""|--help|-h)
-        if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
-          echo "用法: peer task [<id>] | peer task next [<id>] | peer task init [<id>] --task \"...\" --step s1:\"...\"" >&2
-          exit 0
-        fi
-        task_print "$ME"
-        ;;
-      *)
+      show)
+        shift
+        target_id="${1:-$ME}"
         if [[ -n "${2:-}" ]]; then
-          echo "用法: peer task [<id>] | peer task next [<id>] | peer task init [<id>] --task \"...\" --step s1:\"...\"" >&2
+          usage_task >&2
           exit 1
         fi
-        task_print "$subcmd"
+        task_print "$target_id"
+        ;;
+      ""|--help|-h)
+        usage_task
+        ;;
+      *)
+        echo "已移除: 'peer task <id>' → 改用 'peer task show <id>'" >&2
+        exit 1
         ;;
     esac
     ;;
@@ -2214,7 +2827,7 @@ case "$cmd" in
               ;;
             --max-rounds)
               if [[ -z "${2:-}" ]]; then
-                echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N]" >&2
+                usage_loop >&2
                 exit 1
               fi
               loop_max_rounds="${2:-}"
@@ -2228,19 +2841,19 @@ case "$cmd" in
               loop_success+=("${2:-}")
               shift 2
               ;;
-            --validation)
+            --verify)
               loop_validations+=("${2:-}")
               shift 2
               ;;
-            --validation-satisfies)
+            --verify-satisfies)
               loop_validation_satisfies+=("${2:-}")
               shift 2
               ;;
-            --validation-timeout)
+            --verify-timeout)
               loop_validation_timeouts+=("${2:-}")
               shift 2
               ;;
-            --review)
+            --judge)
               loop_reviews+=("${2:-}")
               shift 2
               ;;
@@ -2252,8 +2865,16 @@ case "$cmd" in
               loop_round="${2:-}"
               shift 2
               ;;
+            --validation|--validation-satisfies|--validation-timeout)
+              echo "已移除: '$1' → 改用 '${1/--validation/--verify}'" >&2
+              exit 1
+              ;;
+            --review)
+              echo "已移除: '--review' → 改用 '--judge'" >&2
+              exit 1
+              ;;
             *)
-              echo "用法: peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N]" >&2
+              usage_loop >&2
               exit 1
               ;;
           esac
@@ -2299,19 +2920,216 @@ case "$cmd" in
         done
         loop_reset "$target_id" "$loop_max_rounds"
         ;;
-      ""|--help|-h)
-        if [[ "$subcmd" == "--help" || "$subcmd" == "-h" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
-          exit 0
-        fi
-        loop_print "$ME"
-        ;;
-      *)
-        if [[ -n "${2:-}" ]]; then
-          echo "用法: peer loop [<id>] | peer loop init [<id>] --mission \"...\" --max-rounds N [--non-goal \"...\"] [--success \"...\"] [--round N] [--validation id:\"cmd\"] [--validation-satisfies id:\"signal\"] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N] | peer loop reset [<id>] [--max-rounds N]" >&2
+      show)
+        shift
+        target_id="${1:-$ME}"
+        if [[ -z "$target_id" || -n "${2:-}" ]]; then
+          usage_loop >&2
           exit 1
         fi
-        loop_print "$subcmd"
+        loop_print "$target_id"
+        ;;
+      ""|--help|-h)
+        usage_loop
+        ;;
+      *)
+        echo "已移除: 'peer loop <id>' → 改用 'peer loop show <id>'" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  judge)
+    subcmd="${1:-}"
+    if [[ "$subcmd" == "ls" ]]; then
+      shift
+      if [[ -z "${1:-}" || "${1:-}" == --* ]]; then
+        usage_judge >&2
+        exit 1
+      fi
+      target_id="$1"
+      shift
+      json_mode=0
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json) json_mode=1; shift ;;
+          *) usage_judge >&2; exit 1 ;;
+        esac
+      done
+      if ! judge_json="$(judge_records_json "$target_id")"; then
+        exit 1
+      fi
+      if [[ "$json_mode" == "1" ]]; then
+        printf '%s\n' "$judge_json"
+      else
+        judge_print_records "$judge_json"
+      fi
+      exit 0
+    fi
+    if [[ "$subcmd" == "--help" || "$subcmd" == "-h" || -z "$subcmd" ]]; then
+      usage_judge
+      exit 0
+    fi
+    target_ref="$subcmd"
+    shift
+    report_type="result"
+    report_status="done"
+    step_ref=""
+    round=""
+    delta=""
+    next_text=""
+    goal_ref=""
+    drift=""
+    evidence_cmd=""
+    evidence_result=""
+    evidence_ref=""
+    needs_kind=""
+    needs_detail=""
+    needs_options=()
+    verdict=""
+    findings=()
+    verdict_seen=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --verdict)
+          verdict_seen=1
+          verdict="${2:-}"
+          shift 2
+          ;;
+        --round)
+          round="${2:-}"
+          shift 2
+          ;;
+        --status)
+          report_status="${2:-}"
+          shift 2
+          ;;
+        --finding)
+          findings+=("${2:-}")
+          shift 2
+          ;;
+        --delta)
+          delta="${2:-}"
+          shift 2
+          ;;
+        --evidence-cmd)
+          evidence_cmd="${2:-}"
+          shift 2
+          ;;
+        --evidence-result)
+          evidence_result="${2:-}"
+          shift 2
+          ;;
+        --evidence-ref)
+          evidence_ref="${2:-}"
+          shift 2
+          ;;
+        --step|--step-ref)
+          step_ref="${2:-}"
+          shift 2
+          ;;
+        --goal|--goal-ref)
+          goal_ref="${2:-}"
+          shift 2
+          ;;
+        --drift)
+          drift="${2:-}"
+          shift 2
+          ;;
+        --next)
+          next_text="${2:-}"
+          shift 2
+          ;;
+        --needs|--needs-kind|--needs-detail|--needs-option|--type|--target-ref)
+          echo "错误: '$1' 不属于 peer judge；verdict 目标请用位置参数 <target-ref>，阻塞诉求请用 peer report --type request。" >&2
+          exit 1
+          ;;
+        *)
+          usage_judge >&2
+          exit 1
+          ;;
+      esac
+    done
+    if [[ "$verdict_seen" != "1" ]]; then
+      echo "错误: peer judge 需要 --verdict V。" >&2
+      exit 1
+    fi
+    findings_json="$(build_findings_json ${findings[@]+"${findings[@]}"})"
+    _emit_report "$report_type" "$report_status" "$step_ref" "$round" "$delta" "$next_text" "$goal_ref" "$drift" \
+      "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_kind" "$needs_detail" \
+      "$verdict" "$target_ref" "$findings_json" ${needs_options[@]+"${needs_options[@]}"}
+    ;;
+
+  verify)
+    subcmd="${1:-}"
+    shift || true
+    case "$subcmd" in
+      ls|show)
+        if [[ -z "${1:-}" || "${1:-}" == --* ]]; then
+          usage_verify >&2
+          exit 1
+        fi
+        target_id="$1"
+        shift
+        round=""
+        json_mode=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --round)
+              round="${2:-}"
+              shift 2
+              ;;
+            --json)
+              json_mode=1
+              shift
+              ;;
+            *)
+              usage_verify >&2
+              exit 1
+              ;;
+          esac
+        done
+        if [[ -z "$round" ]]; then
+          round="$(report_round_for_id "$target_id")"
+        fi
+        if ! verify_json="$(verify_state_json "$target_id" "$round")"; then
+          exit 1
+        fi
+        if [[ "$json_mode" == "1" ]]; then
+          printf '%s\n' "$verify_json"
+        elif [[ "$subcmd" == "ls" ]]; then
+          verify_print_ls "$verify_json"
+        else
+          verify_print_show "$verify_json"
+        fi
+        ;;
+      ""|--help|-h)
+        usage_verify
+        ;;
+      *)
+        usage_verify >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  budget)
+    subcmd="${1:-}"
+    shift || true
+    case "$subcmd" in
+      status)
+        if [[ $# -gt 0 ]]; then
+          usage_budget >&2
+          exit 1
+        fi
+        echo "budget 护栏为预留能力，当前未启用。"
+        ;;
+      ""|--help|-h)
+        usage_budget
+        ;;
+      *)
+        usage_budget >&2
+        exit 1
         ;;
     esac
     ;;
@@ -2331,11 +3149,6 @@ case "$cmd" in
     needs_kind=""
     needs_detail=""
     needs_options=()
-    verdict=""
-    target_ref=""
-    findings=()
-    verdict_target_worker=""
-    verdict_target_round=""
 
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -2395,201 +3208,39 @@ case "$cmd" in
           needs_options+=("${2:-}")
           shift 2
           ;;
-        --verdict)
-          verdict="${2:-}"
-          shift 2
-          ;;
-        --target-ref)
-          target_ref="${2:-}"
-          shift 2
-          ;;
-        --finding)
-          findings+=("${2:-}")
-          shift 2
+        --verdict|--target-ref|--finding)
+          echo "已移除: 'peer report --verdict/--target-ref/--finding' → 改用 'peer judge <target-ref> --verdict V'" >&2
+          exit 1
           ;;
         *)
-          echo "用法: peer report --type <plan|checkpoint|request|result> --status <in_progress|blocked|partial|done|failed|unknown> [--step sN] [--round N] [--delta ...] [--next ...] [--verdict v --target-ref worker@round [--finding severity:note]] [--needs <approval|decision|info|scope|discovery> [--needs-detail ...] [--needs-option ...]]" >&2
+          usage_report >&2
           exit 1
           ;;
       esac
-    done
+	    done
 
-    if ! is_report_type "$report_type"; then
-      echo "错误: --type 必须是 plan、checkpoint、request 或 result。" >&2
-      exit 1
-    fi
-    if ! is_report_status "$report_status"; then
-      echo "错误: --status 必须是 in_progress、blocked、partial、done、failed 或 unknown。" >&2
-      exit 1
-    fi
-    if [[ -n "$round" ]] && ! is_positive_int "$round"; then
-      echo "错误: --round 必须是正整数。" >&2
-      exit 1
-    fi
-    if [[ -n "$needs_kind" ]] && ! is_needs_kind "$needs_kind"; then
-      echo "错误: --needs 必须是 approval、decision、info、scope 或 discovery。" >&2
-      exit 1
-    fi
-    # detail/option 离开 kind 无处安放:fail-closed,别把阻塞诉求悄悄丢成空 needs[]。
-    if [[ -z "$needs_kind" && ( -n "$needs_detail" || ${#needs_options[@]} -gt 0 ) ]]; then
-      echo "错误: --needs-detail / --needs-option 需要同时指定 --needs <approval|decision|info|scope|discovery>。" >&2
-      exit 1
-    fi
-
-    role="$(self_role)"
-    if [[ -n "$verdict" || -n "$target_ref" || ${#findings[@]} -gt 0 ]]; then
-      if [[ -z "$verdict" || -z "$target_ref" ]]; then
-        echo "错误: --verdict 与 --target-ref 必须同时指定。" >&2
-        exit 1
-      fi
-      if [[ "$report_type" != "result" ]]; then
-        echo "错误: --verdict 只能用于 --type result。" >&2
-        exit 1
-      fi
-      if ! is_verdict_token "$verdict"; then
-        echo "错误: --verdict 只能包含字母、数字、下划线和连字符。" >&2
-        exit 1
-      fi
-      if ! is_role_token "$role"; then
-        echo "错误: 当前 agent role '$role' 不能用于 verdict 路由;role 必须以字母或数字开头,且只能包含字母、数字、点、下划线和连字符。" >&2
-        exit 1
-      fi
-      if ! parse_target_ref "$target_ref"; then
-        exit 1
-      fi
-      verdict_target_worker="$TARGET_WORKER"
-      verdict_target_round="$TARGET_ROUND"
-      target_ref="${verdict_target_worker}@${verdict_target_round}"
-    fi
-    findings_json="$(build_findings_json ${findings[@]+"${findings[@]}"})"
-    state_dir="$AGENT_DUO_DIR/state/$ME"
-    events_dir="$AGENT_DUO_DIR/events"
-    mkdir -p "$state_dir" "$events_dir"
-
-    if [[ -z "$round" ]]; then
-      round="$(next_report_round "$state_dir")"
-    fi
-
-    effective_status="$report_status"
-    if [[ "$report_status" == "done" || "$report_status" == "partial" ]]; then
-      if [[ -z "$evidence_cmd" && -z "$evidence_result" && -z "$evidence_ref" ]]; then
-        effective_status="unknown"
-      fi
-    fi
-
-    task_file="$state_dir/task.json"
-    tmp_task=""
-    if [[ -f "$task_file" ]]; then
-      if [[ -n "$step_ref" ]]; then
-        if ! task_step_exists "$task_file" "$step_ref"; then
-          echo "错误: task.json 中不存在 step '$step_ref'。" >&2
-          exit 1
-        fi
-        step_status=""
-        step_status="$(task_step_status_for_report "$report_type" "$report_status" "$effective_status" 2>/dev/null || true)"
-        if [[ -n "$step_status" ]]; then
-          evidence_json="$(task_evidence_json "$evidence_cmd" "$evidence_result" "$evidence_ref")"
-          tmp_task="${state_dir}/.task.json.$$"
-          if ! task_prepare_update "$task_file" "$tmp_task" "$step_ref" "$step_status" "$round" "$evidence_json"; then
-            rm -f "$tmp_task"
-            exit 1
-          fi
-        fi
-      fi
-      task_candidate="$task_file"
-      if [[ -n "$tmp_task" ]]; then task_candidate="$tmp_task"; fi
-      if [[ "$report_type" == "result" && "$effective_status" == "done" ]]; then
-        if ! task_all_steps_done "$task_candidate"; then
-          effective_status="partial"
-        fi
-      fi
-    fi
-
-    report_file="$state_dir/r${round}.json"
-    latest_file="$state_dir/report.json"
-    if [[ -e "$report_file" ]]; then
-      echo "错误: report round 已存在: .agent-duo/state/$ME/r${round}.json" >&2
-      exit 1
-    fi
-
-    # 写临时文件 + rename：保证读者只看到完整文件(原子可见性)。
-    # 注意:不再 fsync —— 去掉 Python 运行时依赖后放弃了跨崩溃耐久性。单机断电/内核崩溃
-    # 极端情形下，已返回成功的 report/event 可能丢失;原子性与正常读写不受影响。
-    needs_json="$(build_needs_json "$needs_kind" "$needs_detail" ${needs_options[@]+"${needs_options[@]}"})"
-    tmp_report="$state_dir/.r${round}.json.$$"
-    write_report_json "$tmp_report" "$round" "$ME" "$role" "$report_type" "$effective_status" \
-      "$goal_ref" "$step_ref" "$delta" "$drift" "$next_text" \
-      "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_json" \
-      "$verdict" "$target_ref" "$findings_json"
-    mv "$tmp_report" "$report_file"
-
-    sha="$(sha256_file "$report_file")"
-    ts="$(iso_ts)"
-    tag="$(codec_tag)"
-    ref=".agent-duo/state/$ME/r${round}.json"
-    event_ref="$ref"
-    gate_created_file=""
-
-    queue="$events_dir/queue.jsonl"
-    event_type="$(event_type_for_report "$report_type" "$effective_status")"
-    summary="$(one_line "$delta")"
-    if [[ -z "$summary" ]]; then summary="$(one_line "$next_text")"; fi
-    # 阻塞诉求要带进 event summary,否则 Stop/loop 注入只能给 supervisor 一个泛化 request/blocked。
-    if [[ -z "$summary" && -n "$needs_detail" ]]; then summary="$(one_line "$needs_detail")"; fi
-    if [[ -z "$summary" && -n "$needs_kind" ]]; then summary="needs:${needs_kind}"; fi
-    if [[ -z "$summary" ]]; then summary="${report_type}/${effective_status}"; fi
-    if [[ "$needs_kind" == "decision" && "$event_type" == "blocked" ]]; then
-      gate_id="$(new_gate_id "$round")"
-      gate_title="$needs_detail"
-      if [[ -z "$gate_title" ]]; then gate_title="Human decision required"; fi
-      if ! create_gate_record "$gate_id" "$ts" "$ME" "$role" "$round" "$gate_title" "$needs_detail" "$ref" ${needs_options[@]+"${needs_options[@]}"}; then
-        rm -f "$report_file"
-        if [[ -n "$tmp_task" ]]; then rm -f "$tmp_task"; fi
-        exit 1
-      fi
-      gate_created_file="$(gate_path "$gate_id")"
-      event_ref=".agent-duo/gates/${gate_id}.json"
-    fi
-    event_id="$(printf 'e%s-%s-%s' "$(date -u '+%Y%m%dT%H%M%SZ')" "$round" "$$")"
-    if ! append_event_json "$queue" "$event_id" "$ts" "$ME" "$event_type" "$round" "$summary" "$event_ref"; then
-      rm -f "$report_file"
-      if [[ -n "$gate_created_file" ]]; then rm -f "$gate_created_file"; fi
-      if [[ -n "$tmp_task" ]]; then rm -f "$tmp_task"; fi
-      exit 1
-    fi
-    if [[ -n "$tmp_task" ]]; then
-      mv "$tmp_task" "$task_file"
-    fi
-    if [[ -n "$gate_created_file" ]]; then
-      append_decision_log "$gate_id" "opened" "$ME" "$summary" "" ""
-    fi
-
-    tmp_latest="$state_dir/.report.json.$$"
-    rm -f "$tmp_latest"
-    ln -s "r${round}.json" "$tmp_latest"
-    mv -f "$tmp_latest" "$latest_file"
-
-    if [[ -n "$verdict" ]]; then
-      if ! route_verdict_record "$verdict_target_worker" "$verdict_target_round" "$role" "$verdict" "$findings_json" "$ts"; then
-        echo "错误: 判决已记入本 agent report,但路由到 ${verdict_target_worker}/reviews/${role}-r${verdict_target_round}.json 失败;请保留同一 --target-ref 重报;若原命令显式带了 --round,重试时换新 round 或省略 --round。" >&2
-        exit 1
-      fi
-    fi
-
-    printf '«AGENTDUO:%s» agent_id=%s round=%s type=%s status=%s file=%s sha=%s ts=%s\n' \
-      "$tag" "$ME" "$round" "$report_type" "$effective_status" "$ref" "$sha" "$ts"
-    ;;
+	    findings_json="[]"
+	    _emit_report "$report_type" "$report_status" "$step_ref" "$round" "$delta" "$next_text" "$goal_ref" "$drift" \
+	      "$evidence_cmd" "$evidence_result" "$evidence_ref" "$needs_kind" "$needs_detail" \
+	      "" "" "$findings_json" ${needs_options[@]+"${needs_options[@]}"}
+	    ;;
 
   gate)
     subcmd="${1:-}"
-    if [[ -z "$subcmd" || "$subcmd" == "--all" ]]; then
+    if [[ "$subcmd" == "ls" ]]; then
+      shift
       show_all=0
-      if [[ "$subcmd" == "--all" ]]; then show_all=1; fi
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --all) show_all=1; shift ;;
+          *) echo "用法: peer gate ls [--all]" >&2; exit 1 ;;
+        esac
+      done
       gate_print_list "$show_all"
       exit 0
     fi
     if [[ "$subcmd" != "open" && "$subcmd" != "resolve" ]]; then
-      echo "用法: peer gate [--all] | peer gate open [<target>] --title \"...\" [--detail \"...\"] [--option \"...\"] | peer gate resolve [<gate-id>|<target-id>] --choice <choice> [--note \"...\"]" >&2
+      usage_gate >&2
       exit 1
     fi
     shift
@@ -2715,52 +3366,6 @@ case "$cmd" in
     esac
     ;;
 
-  approvals)
-    show_all=0
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --all) show_all=1; shift ;;
-        *) echo "用法: peer approvals [--all]" >&2; exit 1 ;;
-      esac
-    done
-    if [[ "$show_all" == "1" ]]; then
-      run_approval_broker list --root "$AGENT_DUO_ROOT" --all
-    else
-      run_approval_broker list --root "$AGENT_DUO_ROOT"
-    fi
-    ;;
-
-  approve)
-    approval_id="${1:-}"
-    if [[ -z "$approval_id" ]]; then
-      echo "用法: peer approve <id>" >&2
-      exit 1
-    fi
-    shift
-    if [[ $# -gt 0 ]]; then
-      echo "用法: peer approve <id>" >&2
-      exit 1
-    fi
-    run_approval_broker approve --root "$AGENT_DUO_ROOT" "$approval_id"
-    ;;
-
-  deny)
-    approval_id="${1:-}"
-    if [[ -z "$approval_id" ]]; then
-      echo "用法: peer deny <id> [--reason \"...\"]" >&2
-      exit 1
-    fi
-    shift
-    deny_reason=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --reason) deny_reason="${2:-}"; shift 2 ;;
-        *) echo "用法: peer deny <id> [--reason \"...\"]" >&2; exit 1 ;;
-      esac
-    done
-    run_approval_broker deny --root "$AGENT_DUO_ROOT" --reason "$deny_reason" "$approval_id"
-    ;;
-
   loopd)
     ensure_session
     exec bash "$PEER_ROOT/scripts/loopd" "$@"
@@ -2772,42 +3377,7 @@ case "$cmd" in
     echo "我是: $ME    会话: $SESSION"
     [[ -n "$target" ]] && echo "目标(默认): $target"
     printf '%s\n' "--- agents ---"
-    "$0" ls
-    ;;
-
-  rm)
-    ensure_session
-    rm_id=""
-    rm_force="$FORCE_SEND"
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --force) rm_force=1; shift ;;
-        *)
-          if [[ -n "$rm_id" ]]; then
-            echo "用法: peer rm [--force] <id>" >&2; exit 1
-          fi
-          rm_id="$1"
-          shift
-          ;;
-      esac
-    done
-    if [[ -z "$rm_id" ]]; then
-      echo "用法: peer rm [--force] <id>" >&2; exit 1
-    fi
-    if [[ "$rm_id" == "$ME" ]]; then
-      echo "错误: 不能移除自己。" >&2; exit 1
-    fi
-    if ! rm_pane="$(pane_for_id "$rm_id")"; then
-      echo "错误: 找不到 agent '$rm_id'。" >&2; exit 1
-    fi
-    tmux kill-window -t "$rm_pane"
-    echo "已移除 agent '$rm_id'(pane=$rm_pane)。"
-    if ! reg_remove_worktree "$AGENT_DUO_ROOT" "$rm_id" "$rm_force"; then
-      rc="$?"
-      if [[ "$rc" != "2" ]]; then
-        exit "$rc"
-      fi
-    fi
+    "$0" agent ls
     ;;
 
   esc)
@@ -2823,6 +3393,6 @@ case "$cmd" in
     ;;
 
   help|*)
-    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+    print_top_help
     ;;
 esac

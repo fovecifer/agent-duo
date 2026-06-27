@@ -221,7 +221,7 @@ reg_remove_worktree() { # <root> <id> <force:0|1>
   dirty="$(git -C "$wt_path" status --porcelain 2>/dev/null || printf 'unknown')"
   if [[ -n "$dirty" && "$force" != "1" ]]; then
     echo "警告: worker $id 的 worktree 有未提交改动($wt_path),已保留。" >&2
-    echo "      提交/处理后 'peer rm --force $id' 丢弃,或手动 git worktree remove。" >&2
+    echo "      提交/处理后 'peer agent rm --force $id' 丢弃,或手动 git worktree remove。" >&2
     return 0
   fi
   if [[ "$force" == "1" ]]; then

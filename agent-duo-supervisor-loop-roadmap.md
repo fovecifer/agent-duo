@@ -2,6 +2,8 @@
 
 日期：2026-06-16
 
+> 术语已统一到当前 loop engineering 命名。CLI 与新文档使用 `verify` / `judge` / `approval` 等词；历史设计细节保留原上下文。参见 [docs/loop-engineering.md](docs/loop-engineering.md) 与 [docs/glossary.md](docs/glossary.md)。
+
 ## 背景
 
 近期关于 Loop Engineering 的讨论，本质上不是“让 Agent 定时重复执行 prompt”，而是把人类过去手动完成的提示、观察、验收、纠偏过程，提升为一套可运行的反馈系统。
@@ -81,7 +83,7 @@ tell -> wait -> peek -> evaluate -> decide
 - 是否将改动发布到 staging、production 或某个客户环境。
 - 成本、安全、合规、可用性之间如何取舍。
 
-这类问题不能简单交给 Worker，也不应该被 `peer approve` 自动处理。它们属于高层决策，需要 Supervisor 暂停 loop，整理上下文和选项，然后让用户做明确选择。
+这类问题不能简单交给 Worker，也不应该被 `peer approval approve` 自动处理。它们属于高层决策，需要 Supervisor 暂停 loop，整理上下文和选项，然后让用户做明确选择。
 
 因此 agent-duo 需要多个控制面：
 
@@ -171,7 +173,7 @@ budget_profile = "cheap"
 这样 `peer` 不再只有“对方”这个概念，而是可以面向具体 Agent 或角色路由：
 
 ```sh
-peer ls
+peer agent ls
 peer peek worker-impl
 peer tell worker-review "Review worker-impl's diff"
 peer ask evaluator-browser "Open the app and verify login flow"
@@ -242,7 +244,7 @@ agent-duo start --profile team.yaml
 对应 `peer` 命令也要从隐式二人模式升级：
 
 ```sh
-peer ls
+peer agent ls
 peer status worker-impl
 peer tell worker-impl "..."
 peer peek worker-review 120
@@ -299,26 +301,26 @@ paths = ["~/.ssh", "~/.aws", ".env", "/"]
 可以逐步引入：
 
 ```sh
-peer approvals
-peer approve --once
-peer approve --lease 30m --policy test
-peer deny
+peer approval ls
+peer approval approve --once
+peer approval approve --lease 30m --policy test
+peer approval deny
 ```
 
 含义：
 
-- `peer approvals`：列出当前卡在权限确认的 Agent、命令、cwd、风险摘要。
-- `peer approve --once`：只批准当前这一次请求。
-- `peer approve --lease`：批准一类动作在限定时间内自动通过。
-- `peer deny`：拒绝当前请求，可选择给 Worker 回写原因。
+- `peer approval ls`：列出当前卡在权限确认的 Agent、命令、cwd、风险摘要。
+- `peer approval approve --once`：只批准当前这一次请求。
+- `peer approval approve --lease`：批准一类动作在限定时间内自动通过。
+- `peer approval deny`：拒绝当前请求，可选择给 Worker 回写原因。
 
-`peer approve` 必须满足三个条件：
+`peer approval approve` 必须满足三个条件：
 
 1. 当前屏幕确实是权限确认 UI。
 2. prompt hash 未变化，避免观察后界面被替换。
 3. 命令和上下文命中 allow policy。
 
-> **更新（2026-06-18）：优先用 hook 实现，而非抓屏+回车。** Claude Code 与 Codex 都提供能程序化 `allow/deny` 工具调用的 hook；Codex 侧主入口是 `PreToolUse`，`PermissionRequest` 用来接管原生权限 prompt。Approval Broker 应做成 worker session 上的 hook：工具执行前触发 → 脚本查 policy → 返回放行/拒绝；需要人工判断时写 pending approval + `blocked` 事件并返回 `deny`，不能依赖 Codex `ask`。这比"识别权限 UI + 校验 prompt hash + 发 Enter"更机械、可审计、不依赖屏幕渲染。详见 [Approval Broker 设计](docs/superpowers/specs/2026-06-17-approval-broker-design.md)、[loop runtime 设计](docs/superpowers/specs/2026-06-17-loop-runtime-design.md) 与 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-validation.md)。
+> **更新（2026-06-18）：优先用 hook 实现，而非抓屏+回车。** Claude Code 与 Codex 都提供能程序化 `allow/deny` 工具调用的 hook；Codex 侧主入口是 `PreToolUse`，`PermissionRequest` 用来接管原生权限 prompt。Approval Broker 应做成 worker session 上的 hook：工具执行前触发 → 脚本查 policy → 返回放行/拒绝；需要人工判断时写 pending approval + `blocked` 事件并返回 `deny`，不能依赖 Codex `ask`。这比"识别权限 UI + 校验 prompt hash + 发 Enter"更机械、可审计、不依赖屏幕渲染。详见 [Approval Broker 设计](docs/superpowers/specs/2026-06-17-approval-broker-design.md)、[loop runtime 设计](docs/superpowers/specs/2026-06-17-loop-runtime-design.md) 与 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-verify.md)。
 
 ## Human Decision Gate
 
@@ -388,7 +390,7 @@ peer gate cancel
 
 含义：
 
-- `peer gate`：查看当前等待人类判断的 gate。
+- `peer gate ls`：查看当前等待人类判断的 gate。
 - `peer gate open`：由 Supervisor 创建一个决策请求。
 - `peer gate resolve`：记录用户选择，并将结果传回 Worker。
 - `peer gate cancel`：取消当前外部动作，让 Worker 改走不需要该决策的方案。
@@ -505,7 +507,7 @@ Supervisor 应该主动检测 Worker 是否卡住，而不是完全相信 Worker
 - 连续 N 轮没有产生 diff、测试结果或新的证据。
 - Worker 重复修改同一处但验证结果不变。
 - Worker 输出大量计划，但没有执行命令或产生文件变化。
-- Worker 声称完成，但 validation command 没有运行。
+- Worker 声称完成，但 verify command 没有运行。
 - Worker 需要外部环境、凭据、网络、资源或人类决策。
 - Worker 进入权限 prompt 或 TUI 卡住状态超过阈值。
 
@@ -896,7 +898,7 @@ direction:
       - "相关测试通过"
       - "reviewer 无阻塞意见"
   detail_trap:
-    max_rounds_without_validation_progress: 2
+    max_rounds_without_verify_progress: 2
     max_unplanned_diff_files: 5
 approval:
   policy: ".agent-duo/policy.toml"
@@ -907,7 +909,7 @@ human_gates:
       - "provision external infrastructure"
       - "open firewall/security-group rules"
       - "deploy to staging or production"
-validation:
+verify:
   commands:
     - "npm test"
     - "npm run typecheck"
@@ -920,7 +922,7 @@ stop:
     - "human decision gate is required"
     - "worker reports done without evidence"
     - "worker is stuck or repeating the same failure"
-    - "worker is stuck in details without validation progress"
+    - "worker is stuck in details without verify progress"
     - "scope expands beyond mission non-goals"
     - "same failure repeats twice"
     - "diff touches files outside allowed scope"
@@ -948,7 +950,7 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 建议写入 `.agent-duo/logs/decisions.jsonl`：
 
 ```json
-{"ts":"2026-06-16T12:15:00Z","gate":"deploy-target","status":"opened","summary":"need public staging endpoint for webhook validation","options":["new-vm","existing-dev-vm","generate-runbook-only"]}
+{"ts":"2026-06-16T12:15:00Z","gate":"deploy-target","status":"opened","summary":"need public staging endpoint for webhook verify","options":["new-vm","existing-dev-vm","generate-runbook-only"]}
 {"ts":"2026-06-16T12:20:00Z","gate":"deploy-target","status":"resolved","choice":"existing-dev-vm","decided_by":"human","notes":"use current dev VM, do not open production firewall"}
 ```
 
@@ -999,13 +1001,13 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 
 ### MVP 1：安全 approve
 
-- 增加 `peer approvals`。
-- 增加 `peer approve --once`。
+- 增加 `peer approval ls`。
+- 增加 `peer approval approve --once`。
 - 只处理当前对方 Agent。
 - 仅支持 allowlist 命令。
 - ~~检查 prompt hash~~ → 改为 `PreToolUse` hook 决策（见上）。
 - 写 `approvals.jsonl`。
-- ~~**broker 生效自检（backlog）**：Codex 未信任 hook 时 broker 是 fail-open（实测见 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-validation.md) 的「Hook trust 首启行为」）。需在 worker 启动后做一次 deny 自检确认 hook 真的生效；未生效时标记该 worker 不可托管保护性任务，而不仅靠启动时的 echo 提醒。~~ ✅ 已实现（issue #9）：就绪 marker（`.agent-duo/state/<agent>/broker.json`）+ `peer broker-check`（自检探针）/ `peer broker-status` + supervisor fail-closed 门控（契约 §2.6、Approval Broker 设计 §7.1）。
+- ~~**broker 生效自检（backlog）**：Codex 未信任 hook 时 broker 是 fail-open（实测见 [Codex hook 交互验证](docs/superpowers/specs/2026-06-18-codex-hook-interaction-verify.md) 的「Hook trust 首启行为」）。需在 worker 启动后做一次 deny 自检确认 hook 真的生效；未生效时标记该 worker 不可托管保护性任务，而不仅靠启动时的 echo 提醒。~~ ✅ 已实现（issue #9）：就绪 marker（`.agent-duo/state/<agent>/broker.json`）+ `peer approval check`（自检探针）/ `peer approval status` + supervisor fail-closed 门控（契约 §2.6、Approval Broker 设计 §7.1）。
 
 目标：解决 80% 的低风险确认打断问题。
 
@@ -1021,7 +1023,7 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 ### MVP 3：agent registry & dynamic roles
 
 - 增加 `.agent-duo/agents.toml`。
-- 增加 `peer ls`。
+- 增加 `peer agent ls`。
 - 支持 `peer tell <agent-id>`、`peer peek <agent-id>`、`peer wait <agent-id>`。
 - 引入 `AGENT_ID`、`AGENT_ROLE`、`AGENT_PROVIDER`。
 - 当 Agent 数量超过两个时，要求显式指定目标。
@@ -1041,13 +1043,13 @@ Supervisor 的职责是执行 contract，而不是自由发挥。
 
 - `peer ask`：`tell + wait + peek`，只返回新增输出。
 - `agent-duo loop run contract.yaml`
-- 支持 max_rounds、validation commands、stop conditions。
+- 支持 max_rounds、verify commands、stop conditions。
 
 目标：让 agent-duo 从“互看互发”升级为“可控 loop harness”。
 
 ### MVP 6：human decision gate
 
-- 增加 `peer gate`。
+- 增加 `peer gate ls`。
 - Supervisor 可创建 Decision Packet。
 - 支持 `blocked-on-human-decision` 状态。
 - 将用户选择写入 `decisions.jsonl`。
@@ -1099,8 +1101,8 @@ Phase 1: Agent Registry & Dynamic Roles
   - dynamic team profile
 
 Phase 2: Approval Broker
-  - peer approvals
-  - peer approve --once
+  - peer approval ls
+  - peer approval approve --once
   - prompt hash
   - audit log
 
@@ -1119,7 +1121,7 @@ Phase 4: Worker Isolation
 Phase 5: Supervisor Harness
   - loop contract
   - evaluator role
-  - validation commands
+  - verify commands
   - stop/escalate/rollback decisions
 
 Phase 6: Human Decision Gate

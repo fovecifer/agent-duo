@@ -1,8 +1,11 @@
 <!-- agent-duo:start -->
 ## 与另一个编码 Agent 协作
 
-本机的同一个 tmux 会话中还运行着另一个交互式编码 Agent(Claude Code 或 Codex,
-环境变量 `AGENT_NAME` 标识了你自己的身份)。你可以通过 `peer` 命令与它交互:
+本机的同一个 tmux 会话中还运行着另一个交互式编码 Agent(Claude Code 或 Codex)。
+你自己的身份由所在 tmux pane 的 `@agent_id` 标记(可用 `peer agent ls` 查看;
+你可能是 supervisor,也可能是某个 worker/reviewer)。你可以通过 `peer` 命令与它交互:
+
+### Transport
 
 - `peer peek [行数]` — 查看对方终端最近的输出(默认 80 行)
 - `peer tell "消息"` — 发送单行消息到对方输入框并回车,效果等同于用户直接对它说话
@@ -16,30 +19,41 @@
 - `peer wait [超时秒]` — 阻塞等待,直到对方屏幕输出稳定(视为它已完成当前任务)
 - `peer esc` — 向对方发送 Escape,打断它正在进行的生成
 - `peer status` — 查看双方身份与窗口状态
-- `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>`
+
+### Loop Building Blocks
+
+- `peer agent ls` — 列出本会话所有 agent(id / role / provider / pane),自己一行带 `*`
+- `peer agent add --provider claude|codex --role <role> [--id <id>] [--worktree]` — 新建一个**可见的**队友 tab 并自动注册;`--worktree` 让 worker 在隔离 git worktree 中编辑,控制状态仍写主仓 `.agent-duo`
+- `peer agent rm [--force] <id>` — 移除一个队友 tab;隔离 worktree 干净才自动删除,脏时保留并提示,`--force` 可丢弃未提交改动
+- `peer task init <id> --task "..." --step s1:"..."` / `peer task next <id>` / `peer task show <id>`
   — supervisor 初始化/查看 worker 的持久化 `task.json` 步骤账本;worker 解阻后按 next 从 `blocked` 或下一个 `pending` 步续跑
-- `peer add --provider claude|codex --role <role> [--id <id>] [--worktree]`
-  — supervisor 新建可见队友 tab;`--worktree` 让 worker 在隔离 git worktree 中编辑,控制状态仍写主仓 `.agent-duo`
-- `peer rm [--force] <id>`
-  — supervisor 移除队友 tab;隔离 worktree 干净才自动删除,脏时保留并提示,`--force` 可丢弃未提交改动
-- `peer loop init <id> --mission "..." --max-rounds N [--validation id:"cmd"] [--review role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop <id>`
-  — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并用异步 validation 与 reviewer/evaluator verdict 双门控 `done`
+- `peer loop init <id> --mission "..." --max-rounds N [--verify id:"cmd"] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>`
+  — supervisor 冻结/查看 worker 的 loop 契约;runtime 会按相对轮次预算截停,并用异步 verify 与 reviewer/evaluator judge 双门控 `done`
 - `peer loop reset <id> [--max-rounds N]`
   — supervisor 在当前最新 report 轮次重新冻结 loop,清空停止状态并给新预算;若最新 report 已是 `done`/`failed`,先用 `peer reframe --force` 推出新非终态 report 再续跑
-- `peer ask <id> "消息"` — supervisor 原子下发一条 loop-gated 消息,等待 worker 下一轮结构化 report,再只读取这轮新结果
-- `peer checkpoint <id> [--json]` — supervisor 只读汇总 worker 的 loop、最近 report、task 与 validation 状态,用于判断继续/纠偏/停止
-- `peer reframe <id> "消息" [--force]` — supervisor 向 worker 下发方向纠偏(`verb=reframe`),并写入 `checkpoints.jsonl` 审计
+- `peer verify ls <id>` / `peer verify show <id>` — 只读查看 loop 契约里的 verify gates 及当前/指定轮次结果
+- `peer judge <target-ref> --verdict approve [--finding severity:"..."]`
+  — reviewer/evaluator 对目标 worker 某一轮写验收 verdict;命中目标 loop 的 veto_on 时 runtime 会保持 worker active 并发 `review_required`
 - `peer report --type request --status blocked --needs decision --needs-detail "..." --needs-option "..."`
   — worker 需要人类做业务/部署/成本/网络等判断时,写结构化阻塞报告并打开 Human Decision Gate
-- `peer report --type result --verdict approve --target-ref worker@N [--finding severity:"..."]`
-  — reviewer/evaluator 对目标 worker 某一轮写验收 verdict;命中目标 loop 的 veto_on 时 runtime 会保持 worker active 并发 `review_required`
-- `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...`
+- `peer gate ls` / `peer gate open ...` / `peer gate resolve --choice ...`
   — supervisor 查看、创建、解决 Human Decision Gate;人类只需对 supervisor 说自然语言,由 supervisor 执行这些命令
+- `peer approval ls` / `peer approval approve <id>` / `peer approval deny <id>` / `peer approval status <id>` / `peer approval check <id>`
+  — 查看/处理 Approval Broker 请求,并验证 worker 的 broker hook 是否实际生效
+- `peer budget status` — 预算护栏预留槽,当前只读说明
+
+### Steering
+
+- `peer ask <id> "消息"` — supervisor 原子下发一条 loop-gated 消息,等待 worker 下一轮结构化 report,再只读取这轮新结果
+- `peer checkpoint <id> [--json]` — supervisor 只读汇总 worker 的 loop、最近 report、task 与 verify 状态,用于判断继续/纠偏/停止
+- `peer reframe <id> "消息" [--force]` — supervisor 向 worker 下发方向纠偏(`verb=reframe`),并写入 `checkpoints.jsonl` 审计
+- 寻址:`peer tell/peek/wait/esc [<id>]` 可指定目标 id;**正好两个 agent 时可省略**(默认发给"另一个");三个及以上必须显式指定 id
 
 ### 使用规则
 
-1. **仅在用户明确要求时**才向对方发送指令(`peer tell` / `peer ask` / `peer reframe` / `peer esc`);
-   `peer peek` 用于查看状态,可以在用户询问对方进展时主动使用。
+1. **仅在用户明确要求时**才向对方发送指令(`peer tell` / `peer ask` / `peer reframe` / `peer esc`)或改变团队
+   编制(`peer agent add` / `peer agent rm`);`peer peek` / `peer agent ls` 用于查看状态,可在用户
+   询问时主动使用。
 2. 典型流程:`peer tell "..."` → `peer wait` → `peer peek 120`,
    然后把对方回复的要点**转述给用户**,不要只说"已发送"。
 3. 对方屏幕是 TUI 界面,`peek` 抓到的文本可能含边框、状态栏等噪音,自行过滤。
@@ -47,4 +61,24 @@
 5. 如果对方处于权限确认/弹窗状态(peek 可以看出来),如实告知用户,由用户决定,
    不要替用户按下确认键。
 
+### 术语与消歧(重要)
+
+"codex" 一词在本机有**两个完全不同**的指代,务必区分,不要混淆:
+
+| 称呼 | 指代 | 如何到达 | 特征 |
+|---|---|---|---|
+| **对方 / peer / 搭档 / 邻座 agent** | 本 tmux 会话里那个交互式协作者 | `peer tell` / `peer peek` 等 | 长期存活、用户看得见、上下文完整;**它可能是 Codex,也可能是另一个 Claude** |
+| **Codex 子 agent / 委派 / 派一个 Codex / spawn** | 某个 agent 临时派生的**无头**子任务进程(如 `codex exec`) | 由该 agent 自己 spawn,不经过 `peer` | 用完即弃、用户通常看不到、是全新空白上下文 |
+
+判定规则:
+
+1. 用户说「**对方 / peer / 搭档 / 另一个 tab / 邻座**」→ 一律指 peer 协作者,用 `peer` 与之交互。
+2. 用户说「**委派 / 派一个 Codex / 让 Codex 子 agent 去跑 / spawn 一个**」→ 指派生无头子 agent,**不要**用 `peer`。
+3. 用户只说「**codex**」而未限定 → 默认理解为 **peer 对方**(这正是 agent-duo 的主题);但若该动作有副作用或你不确定,先向用户确认是哪一个,再行动。
+4. 注意:即使 peer 对方本身就是一个 Codex 实例,它仍属于第一类(peer),与"派生的 Codex 子 agent"是两回事——一个是你身边的固定队友,一个是你临时叫来的零工。
+5. `peer agent add` 创建的是**可见的、长期存活的 peer 队友**(在新 tab 里,用户看得见,
+   用 `peer agent ls`/`peer tell <id>` 与之交互),与第 2 条"派生无头子 agent(codex exec)"
+   完全不同——前者是 agent-duo 工作台的一等成员,后者是临时零工。
+
+安全边界：Approval Broker 只覆盖由 `peer agent add` / `agent-duo-start --with` 注册的交互式 worker pane。当前验证下不要假设无头 `codex exec` 会触发 agent-duo 的 hook；如果任务需要 broker 保护，应派给可见 peer worker，而不是 spawn 无头 Codex。
 <!-- agent-duo:end -->

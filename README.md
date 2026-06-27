@@ -1,10 +1,10 @@
 # agent-duo
 
-**Run visible Claude Code / Codex CLI sessions as a supervised coding workbench inside normal iTerm2 tabs.**
+**A loop engineering framework for visible Claude Code / Codex CLI sessions inside normal iTerm2 tabs.**
 
 [简体中文](README.zh-CN.md)
 
-You say one sentence; the supervisor can add or address a worker, wait, and report back — and the exchange happens live in ordinary tabs, right before your eyes:
+You plan, build, and judge with agents you can actually see: a supervisor drives worker loops, verify gates, judge verdicts, human gates, and approval checks while every exchange happens live in ordinary tabs.
 
 ```
 ┌─ iTerm2 ───────────────────────────────────────────┐
@@ -27,7 +27,7 @@ Unlike MCP-based bridges that spawn a *new* headless subprocess (`codex exec` / 
 
 ## How it works
 
-One tmux session starts with a supervisor tab and a visible `loopd` dashboard. Add workers with `peer add` or start one immediately with `agent-duo-start --with codex:worker`; use `--worktree` / `:isolated` when a worker should edit in its own git worktree. iTerm2's native tmux integration (`tmux -CC`) renders tmux windows as ordinary tabs, and `peer` gives each agent eyes and a keyboard for the others:
+One tmux session starts with a supervisor tab and a visible `loopd` dashboard. Add workers with `peer agent add` or start one immediately with `agent-duo-start --with codex:worker`; use `--worktree` / `:isolated` when a worker should edit in its own git worktree. iTerm2's native tmux integration (`tmux -CC`) renders tmux windows as ordinary tabs, and `peer` gives each agent eyes and a keyboard for the others:
 
 ```mermaid
 flowchart TB
@@ -103,7 +103,7 @@ Answer `y` once and it won't ask again (the marker block records your consent); 
 - Non-interactive shells (CI, pipes) skip injection by default — pass `-y` or set `AGENT_DUO_AUTO_INJECT=1` to inject without the prompt.
 - Prefer to wire it up by hand? Append the body of `docs/AGENT-INSTRUCTIONS.md` to your project's `CLAUDE.md` and `AGENTS.md` yourself. Same snippet for both — `peer` resolves identity from the tmux pane `@agent_id` marker, with `AGENT_NAME` kept only as a migration fallback.
 
-`agent-duo-start` without `--with` creates only the supervisor and loopd; run `peer add --provider codex --role worker` from the supervisor when you want a worker later. Add `--worktree` to give that worker an isolated checkout while keeping `.agent-duo` control state shared in the main repository.
+`agent-duo-start` without `--with` creates only the supervisor and loopd; run `peer agent add --provider codex --role worker` from the supervisor when you want a worker later. Add `--worktree` to give that worker an isolated checkout while keeping `.agent-duo` control state shared in the main repository.
 
 Then just talk naturally:
 
@@ -111,30 +111,47 @@ Then just talk naturally:
 
 The supervisor will run `peer tell` → `peer wait` → `peer peek` and report back. Direct agent-to-agent delegation still stays visible in the worker tabs.
 
-A freshly created worker's Approval Broker starts **unverified** (the hook isn't trusted until the provider actually invokes it), and `peer tell` to a worker is fail-closed against that gate. So the first delegation to a new worker is `peer broker-check <id>` → wait for `ready`, *then* `peer tell`. `agent-duo-start --with` and `peer add` both print this reminder.
+A freshly created worker's Approval Broker starts **unverified** (the hook isn't trusted until the provider actually invokes it), and `peer tell` to a worker is fail-closed against that gate. So the first delegation to a new worker is `peer approval check <id>` → wait for `ready`, *then* `peer tell`. `agent-duo-start --with` and `peer agent add` both print this reminder.
 
 ## The `peer` command
 
+### Transport
+
 | Command | What it does |
 |---|---|
-| `peer peek [lines]` | Show the other agent's recent terminal output (default 80 lines) |
-| `peer tell "message"` | Send a one-line message into the other agent's input box and press Enter |
+| `peer peek [<id>] [lines]` | Show another agent's recent terminal output (default 80 lines) |
+| `peer tell [<id>] "message"` | Send a one-line message into another agent's input box and press Enter |
 | `... \| peer tell` | Deliver a **multi-line** message from stdin (tmux buffer + bracketed paste — quotes, backticks and newlines arrive verbatim, no escaping) |
-| `peer wait [seconds] [interval] [stable-samples]` | Block until the other agent's screen is unchanged for repeated samples (defaults: timeout 300s, interval 5s, stable samples 2) |
-| `peer add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | Create a visible teammate tab; `--worktree` starts it in an isolated git worktree with shared control state |
-| `peer rm [--force] <id>` | Remove a teammate tab; isolated worktrees are deleted only when clean, or with `--force` |
-| `peer task init <id> --task ... --step s1:...` / `peer task next <id>` | Create and inspect a durable `task.json` step ledger for idempotent resume |
-| `peer loop init <id> --mission ... --max-rounds N [--validation id:cmd] [--review role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional validations and reviewer verdicts gate `done`, and empty-delta streaks raise direction events |
-| `peer loop reset <id> [--max-rounds N]` | Re-freeze a loop at the latest report round, clear its stop state, and give it a fresh round budget |
-| `peer ask <id> "message"` | Send a loop-gated message, wait for the worker's next structured report, and print that report summary/ref |
-| `peer checkpoint <id> [--json]` | Read-only summary of loop, recent reports, task steps, and validation for direction decisions |
-| `peer reframe <id> "message" [--force]` | Send a loop/broker-gated direction correction as a `reframe` verb and append `checkpoints.jsonl` audit |
-| `peer report --type request --status blocked --needs decision ...` | Worker writes a structured report and opens a Human Decision Gate when it needs a human choice |
-| `peer report --type result --verdict approve --target-ref worker@N [--finding severity:note]` | Reviewer/evaluator records a verdict on a target worker round; veto verdicts keep the worker loop active |
-| `peer gate` / `peer gate open ...` / `peer gate resolve --choice ...` | List, create, and resolve Human Decision Gates; resolutions are written to `decisions.jsonl` and sent back as `decision` verbs |
-| `peer approvals` / `peer approve` / `peer deny` | Review and resolve Approval Broker requests for tool permissions |
-| `peer esc` | Send Escape to interrupt the other agent's current generation |
+| `peer wait [<id>] [seconds] [interval] [stable-samples]` | Block until another agent's screen is unchanged for repeated samples (defaults: timeout 300s, interval 5s, stable samples 2) |
+| `peer esc [<id>] [--force]` | Send Escape to interrupt another agent's current generation |
 | `peer status` | Show identities and window state |
+
+### Loop Building Blocks
+
+| Command | What it does |
+|---|---|
+| `peer agent ls` | List visible agents in the tmux session |
+| `peer agent add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | Create a visible teammate tab; `--worktree` starts it in an isolated git worktree with shared control state |
+| `peer agent rm [--force] <id>` | Remove a teammate tab; isolated worktrees are deleted only when clean, or with `--force` |
+| `peer task init <id> --task ... --step s1:...` / `peer task next <id>` / `peer task show <id>` | Create and inspect a durable `task.json` step ledger for idempotent resume |
+| `peer loop init <id> --mission ... --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional verify gates and judge verdicts gate `done`, and empty-delta streaks raise direction events |
+| `peer loop reset <id> [--max-rounds N]` | Re-freeze a loop at the latest report round, clear its stop state, and give it a fresh round budget |
+| `peer verify ls <id>` / `peer verify show <id>` | Read frozen verifier gate declarations and current or selected-round results |
+| `peer report --type request --status blocked --needs decision ...` | Worker writes a structured report and opens a Human Decision Gate when it needs a human choice |
+| `peer judge worker@N --verdict approve [--finding severity:note]` | Reviewer/evaluator records a verdict on a target worker round; veto verdicts keep the worker loop active |
+| `peer gate ls` / `peer gate open ...` / `peer gate resolve --choice ...` | List, create, and resolve Human Decision Gates; resolutions are written to `decisions.jsonl` and sent back as `decision` verbs |
+| `peer approval ls` / `peer approval approve` / `peer approval deny` | Review and resolve Approval Broker requests for tool permissions |
+| `peer budget status` | Reserved guardrail surface; currently a read-only stub |
+
+### Steering
+
+| Command | What it does |
+|---|---|
+| `peer ask <id> "message"` | Send a loop-gated message, wait for the worker's next structured report, and print that report summary/ref |
+| `peer checkpoint <id> [--json]` | Read-only summary of loop, recent reports, task steps, and verify for direction decisions |
+| `peer reframe <id> "message" [--force]` | Send a loop/broker-gated direction correction as a `reframe` verb and append `checkpoints.jsonl` audit |
+
+The building-block nouns map back to loop-engineering concepts: `verify` is the mechanical gate, `judge` is independent evaluation, `gate` is a human decision point, `approval` is the tool-permission broker, and `budget` is the guardrail slot.
 
 ## Why these design choices
 
@@ -164,15 +181,17 @@ No — they're complementary. MCP bridges give you structured request/response d
 The instruction snippet explicitly forbids unsupervised back-and-forth; every round must originate from a user instruction. Token burn stays under your control.
 
 **More than two agents?**
-Not yet — see roadmap below.
+Yes. Use `peer agent add --provider claude|codex --role <role> [--id <id>]`; when more than two agents are present, commands that target a teammate require an explicit id.
 
 **Why did iTerm2 open two separate windows instead of tabs?**
 iTerm2 maps tmux windows according to `Settings > General > tmux > When attaching, restore windows as...`. Choose `Tabs in the attaching window`, then attach with `tmux -CC attach -t agents`. The other choices are `Native Windows` and `Native tabs in a new window`.
 
 ## Roadmap
 
-- [ ] N-agent support (`peer tell <name>`, windows discovered dynamically)
-- [ ] `peer ask "..."` — tell + wait + peek in one call, returning only the new output delta
+- [x] N-agent support (`peer agent add`, explicit ids, role/provider tags)
+- [x] `peer ask "..."` — loop-gated send + wait for the next structured report
+- [ ] Budget / handoff packet commands
+- [ ] `policy.toml` + TTL leases for Approval Broker
 - [ ] Linux clipboard helpers and Windows/WSL notes
 - [ ] Demo GIF
 

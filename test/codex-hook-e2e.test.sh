@@ -4,7 +4,7 @@
 # 覆盖两件事(都用真实 Codex + 真实 broker hook,把手工记录固化成可复现实跑):
 #   1. 设计文档 2026-06-18 「修正建议 #5」:`-c hooks.PreToolUse` 的 deny 能在工具执行前阻断。
 #   2. issue #9:hook 真的被 Codex 调用时,broker 就绪 marker 翻成 ready+nonce
-#      (= `peer broker-check` 据以判定 fail-closed 的信号)。
+#      (= `peer approval check` 据以判定 fail-closed 的信号)。
 #
 # 默认跳过(会真实调用 Codex/模型、慢、要联网+鉴权)。显式开启:
 #   AGENT_DUO_E2E_CODEX=1 bash test/codex-hook-e2e.test.sh
@@ -46,7 +46,7 @@ trap cleanup EXIT
 
 mkdir -p "$LAB/work"
 MARKER="$LAB/.agent-duo/state/$AGENT/broker.json"
-# Real broker hook, carrying its env inline (same shape `peer add` injects for Codex).
+# Real broker hook, carrying its env inline (same shape `peer agent add` injects for Codex).
 HOOK_CMD="AGENT_DUO_ROOT=$LAB AGENT_DUO_AGENT_ID=$AGENT AGENT_DUO_WORKTREE=$LAB/work $ROOT/bin/agent-duo-approval-hook"
 PROBE_CMD="$(bash "$ROOT/lib/approval_broker.sh" selfcheck-cmd --nonce "$NONCE")"
 

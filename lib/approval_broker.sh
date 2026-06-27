@@ -7,7 +7,7 @@ ESCALATE_REASON="BLOCKED-PENDING-APPROVAL: 需 supervisor/人批准；报 blocke
 HARD_DENY_REASON="DENIED-BY-POLICY: 禁止；勿重试；改走他法或报 blocked-on-policy。"
 # Broker self-check: a probe whose command/path carries this sentinel is denied by
 # design and ONLY used to prove the hook actually fired (i.e. Codex trusted it).
-# It never creates an approval or blocked event — see ab_run_hook + `peer broker-check`.
+# It never creates an approval or blocked event — see ab_run_hook + `peer approval check`.
 SELFCHECK_SENTINEL="AGENT_DUO_BROKER_SELFCHECK"
 SELFCHECK_REASON="BROKER-SELFCHECK: 探针被设计性拒绝；broker 已生效，无需重试。"
 
@@ -974,7 +974,7 @@ ab_cmd_mark() { # <root> <agent> <status>
 }
 
 # Print the benign shell command a worker should run so the hook records a self-check.
-# Single source of truth for the sentinel so `peer broker-check` stays in sync.
+# Single source of truth for the sentinel so `peer approval check` stays in sync.
 ab_cmd_selfcheck_cmd() { # <nonce>
   printf 'printf agent-duo-broker-check > %s_%s.tmp\n' "$SELFCHECK_SENTINEL" "$1"
 }

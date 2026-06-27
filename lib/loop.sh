@@ -513,7 +513,7 @@ EOF
   [[ "$state" == "blocked" ]] || return 0
   if [[ "$error" == "config_invalid" ]]; then
     event_id="reviewreq-${agent}-${round}-configinvalid"
-    summary="acceptance config invalid"
+    summary="judge config invalid"
     if ! ad_loop_event_id_seen "$root" "$event_id"; then
       ad_loop_append_event_with_id "$root" "$event_id" "$agent" review_required "$round" "$summary" "$ref" || true
     fi
@@ -521,14 +521,14 @@ EOF
   fi
   if [[ -n "$missing" ]]; then
     event_id="reviewreq-${agent}-${round}-pending"
-    summary="review pending: $(ad_loop_csv_human "$missing")"
+    summary="judge pending: $(ad_loop_csv_human "$missing")"
     if ! ad_loop_event_id_seen "$root" "$event_id"; then
       ad_loop_append_event_with_id "$root" "$event_id" "$agent" review_required "$round" "$summary" "$ref" || true
     fi
   fi
   if [[ -n "$vetoed" ]]; then
     event_id="reviewreq-${agent}-${round}-vetoed"
-    summary="review vetoed: $(ad_loop_csv_human "$vetoed")"
+    summary="judge vetoed: $(ad_loop_csv_human "$vetoed")"
     if ! ad_loop_event_id_seen "$root" "$event_id"; then
       ad_loop_append_event_with_id "$root" "$event_id" "$agent" review_required "$round" "$summary" "$ref" || true
     fi
@@ -771,14 +771,14 @@ ad_loop_emit_validation_event() { # <root> <agent> <round> <validation_path>
   event_id="validation-${agent}-${round}"
   if [[ "$status" == "pass" ]]; then
     type="validation_pass"
-    summary="validation pass: ${passed}/${total} checks"
+    summary="verify pass: ${passed}/${total} checks"
   else
     type="validation_fail"
     details="$(jq -r '
       [(.failed_validations[]? | "failed:" + .), (.missing_signals[]? | "missing:" + .)]
       | if length == 0 then "unknown" else join(", ") end
     ' "$validation_path" 2>/dev/null || printf 'unknown')"
-    summary="validation fail: ${details}"
+    summary="verify fail: ${details}"
   fi
   if ! ad_loop_event_id_seen "$root" "$event_id"; then
     ad_loop_append_event_with_id "$root" "$event_id" "$agent" "$type" "$round" "$summary" "$ref"
@@ -1308,10 +1308,10 @@ EOF
     printf 'loop=%s/%s %s' "$rounds_used" "$max_rounds" "$status"
   fi
   if [[ -n "$validation_status" ]]; then
-    printf ' validation=%s' "$validation_status"
+    printf ' verify=%s' "$validation_status"
   fi
   if [[ -n "$acceptance_summary" ]]; then
-    printf ' accept=%s' "$acceptance_summary"
+    printf ' judge=%s' "$acceptance_summary"
   fi
 }
 
