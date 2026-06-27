@@ -1,7 +1,7 @@
 ---
 title: "agent-duo 测试架构：子系统 × 真实度矩阵 + Journey"
 date: 2026-06-27
-status: design
+status: implemented-design
 tags: [testing, test-architecture, layering, journey, agent-duo]
 related: 2026-06-27-loop-engineering-restructure-design.md
 ---
@@ -120,8 +120,8 @@ test/
     journey-supervisor-loop.test.sh # ← 新建：完整用户流程 journey（CI 版）
     start.test.sh                   # ← 平移
   e2e/
-    codex-hook.test.sh              # ← 现 codex-hook-e2e.test.sh 平移（去名字里冗余 -e2e）
-    codex-permreq.test.sh           # ← 现 codex-permreq-e2e.test.sh 平移
+    codex-hook.test.sh              # ← 由旧 codex-hook-e2e.test.sh 平移（去名字里冗余 -e2e）
+    codex-permreq.test.sh           # ← 由旧 codex-permreq-e2e.test.sh 平移
     journey-codex.test.sh           # ← 新建：journey 真 codex/真 tmux 门控骨架
   run.sh                            # 升级为层感知发现 + 选层（§7）
 ```

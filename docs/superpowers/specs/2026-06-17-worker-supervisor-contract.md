@@ -1,8 +1,8 @@
 # agent-duo Worker ↔ Supervisor 交互契约
 
 日期：2026-06-17
-状态：设计稿，待实现
-关联：[supervisor-loop roadmap](../../../agent-duo-supervisor-loop-roadmap.md)、[loop runtime 设计](./2026-06-17-loop-runtime-design.md)、[Approval Broker 设计](./2026-06-17-approval-broker-design.md)、[registry MVP 3 design](./2026-06-16-registry-mvp3-design.md)
+状态：协议设计稿；当前 CLI 已按 2026-06-27 loop-engineering 重构落地
+关联：[supervisor-loop roadmap](../../../agent-duo-supervisor-loop-roadmap.md)、[loop runtime 设计](./2026-06-17-loop-runtime-design.md)、[Approval Broker 设计](./2026-06-17-approval-broker-design.md)、[registry MVP 3 design](./2026-06-16-registry-mvp3-design.md)、[loop-engineering 命令面重构](./2026-06-27-loop-engineering-restructure-design.md)、[NL mission 编排](./2026-06-27-nl-mission-orchestration-design.md)
 
 > 本契约是**水线以下**的内部协议（worker↔supervisor）。人这一层永远只说自然语言，见 [loop runtime 设计 §水线](./2026-06-17-loop-runtime-design.md#第一原则水线凌驾于所有机制之上)。
 
@@ -15,7 +15,7 @@ supervisor-loop roadmap 里后续所有机制——checkpoint、approval、human
 - evidence gate = 契约 schema 的一条**约束**（`done` 必须带 evidence，否则降级）
 - budget = 每回合上行消息**大小有界**、supervisor 读结构化文件而非全屏 peek
 
-所以契约定死，后面的 `peer approve / gate / report / reframe` 等命令就只是它的**表层语法**。本文档定义这份契约。
+所以契约定死，后面的 `peer approval / gate / report / judge / reframe` 等命令就只是它的**表层语法**。本文档定义这份契约。
 
 ## 目标
 
@@ -61,12 +61,12 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 |---|---|---|
 | `assign` | 派任务 + contract 引用 + budget（可含 `steps[]`） | `peer tell` |
 | `proceed` | 批准 plan / 解阻后继续 | `peer tell` |
-| `approve` / `deny` | 答复授权请求 | `peer approve` / `peer deny` |
+| `approve` / `deny` | 答复授权请求 | `peer approval approve` / `peer approval deny` |
 | `decision` | 答复 human gate（选了哪个选项） | `peer gate resolve` |
-| `require_evidence` | 驳回 claim，要证据 | `peer require-evidence` |
+| `require_evidence` | 驳回 claim，要证据 | 当前用 `peer reframe` / `peer ask` 下发证据缺口 |
 | `reframe` | 拉回 mission / 局部重新 scope | `peer reframe` |
 | `assign`（replan） | 发现重大问题，拆法失效，重新冻结 `steps[]` | `peer tell` |
-| `stop` / `handoff` | 终止 / 移交 | `peer budget handoff` |
+| `stop` / `handoff` | 终止 / 移交 | `peer budget status` 目前为只读预留槽，handoff 尚未公开 |
 
 下行同样有最小结构（`peer tell` 注入带前缀的一行 + 自由文本）：
 
@@ -157,7 +157,7 @@ agent-duo 的现实是 supervisor 往 worker 的输入框敲字（`peer tell`）
 
 步骤状态：`pending | in_progress | blocked | done | failed | kept`（`kept` 见重规划）。每个 `done` 步各自带 evidence。
 
-> **CLI 现状（MVP 收窄）**：`peer task init <id> --task "..." --step s1:"..."` 会写 `.agent-duo/state/<id>/task.json` 并把步骤初始化为 `pending`；`peer task <id>` 查看账本；`peer task next <id>` 返回第一个 `blocked` / `in_progress` / `pending` 步作为 resume 点。`peer report --step <id>` 在该 agent 已有 `task.json` 时会校验 step 存在，并按 report 状态更新该步：`in_progress`、`blocked`、`failed`、带 evidence 的 `done`。`result(done)` 若 task 中仍有非 `done`/`kept` 步，会降级为 `partial`，避免静默完成整任务。重规划（`kept`、deps/gate/done_when 的编辑）仍待后续 MVP 扩展。
+> **CLI 现状（MVP 收窄）**：`peer task init <id> --task "..." --step s1:"..."` 会写 `.agent-duo/state/<id>/task.json` 并把步骤初始化为 `pending`；`peer task show <id>` 查看账本；`peer task next <id>` 返回第一个 `blocked` / `in_progress` / `pending` 步作为 resume 点。`peer report --step <id>` 在该 agent 已有 `task.json` 时会校验 step 存在，并按 report 状态更新该步：`in_progress`、`blocked`、`failed`、带 evidence 的 `done`。`result(done)` 若 task 中仍有非 `done`/`kept` 步，会降级为 `partial`，避免静默完成整任务。重规划（`kept`、deps/gate/done_when 的编辑）仍待后续 MVP 扩展。
 
 ### 2.5 acceptance（验收组合规则，写进 loop contract）
 
@@ -172,17 +172,19 @@ acceptance:
   policy: no_blocking_findings   # 或 all_approve
 ```
 
-> **CLI 现状**：`peer loop init <id> --mission "..." --max-rounds N [--non-goal ...] [--success ...] [--validation id:cmd] [--validation-satisfies id:signal] [--validation-timeout id:N] [--review role:veto1,veto2] [--detail-trap-rounds N]` 会写 `.agent-duo/state/<id>/loop.json`；`max_rounds` 是从 `frozen_at_round` 起算的相对 report 轮次预算。`loopd` 每 tick 读取该契约与最新 `report.json`：active 且本轮不会停止时，先检测 `drift` 非空并追加幂等 `direction_drift` 事件、检测连续 N 轮空 `delta` 并追加幂等 `detail_trap` 事件；之后查/启动 validation 并做 stop 判定。命中 `failed` 或预算耗尽时把契约翻成 `stopped` 并追加幂等 `loop_stop` 事件；命中 `done` 时，如果配置了 validation，则必须等该轮异步 validation 完成且机械满足 `success_signals`，并且所有 `acceptance.reviews[]` 都已有非 veto verdict，才会停为 `done`。缺少 verdict、命中 veto 或 acceptance 配置非法时，runtime 保持 loop active 并追加幂等 `review_required` 事件。reviewer/evaluator 用 `peer report --type result --verdict <v> --target-ref <worker>@<round> [--finding severity:note]` 写自身 report，并把 verdict 路由到目标 worker 的 `.agent-duo/state/<worker>/reviews/<role>-rN.json`。validation 由分离的 `loopd --run-validation <id> <round>` runner 执行；运行中 marker 落在 `.agent-duo/state/<id>/validation-rN.running/`，最终 evidence 落在 `.agent-duo/state/<id>/validation-rN.json`，日志落在 `.agent-duo/logs/<id>/validation-rN-<validation-id>.log`，并追加 `validation_pass` / `validation_fail` 事件。validation 命令超时时会尽量杀掉整个进程组；若 runner 入口不可用则退回 tick 内同步执行并告警。`peer loop reset <id> [--max-rounds N]` 会在最新 report 轮次重新冻结预算并清空停止状态；`peer checkpoint <id> [--json]` 只读聚合 loop/report/task/validation 方向状态；`peer reframe <id> "..." [--force]` 下发 `verb=reframe` 并在成功发送后写 `.agent-duo/logs/checkpoints.jsonl`。未配置 validation 时，`success_signals` / `non_goals` 仍只作为 supervisor 的软护栏。
+> **CLI 现状（已按 2026-06-27 重构）**：`peer loop init <id> --mission "..." --max-rounds N [--non-goal ...] [--success ...] [--verify id:cmd] [--verify-satisfies id:signal] [--verify-timeout id:N] [--judge role:veto1,veto2] [--detail-trap-rounds N]` 会写 `.agent-duo/state/<id>/loop.json`；磁盘字段为兼容仍保留 `validation[]` 与 `acceptance.reviews[]`，用户命令面统一叫 verify / judge。`max_rounds` 是从 `frozen_at_round` 起算的相对 report 轮次预算。`loopd` 每 tick 读取该契约与最新 `report.json`：active 且本轮不会停止时，先检测 `drift` 非空并追加幂等 `direction_drift` 事件、检测连续 N 轮空 `delta` 并追加幂等 `detail_trap` 事件；之后查/启动 verify runner 并做 stop 判定。命中 `failed` 或预算耗尽时把契约翻成 `stopped` 并追加幂等 `loop_stop` 事件；命中 `done` 时，如果配置了 verify，则必须等该轮异步 verify 完成且机械满足 `success_signals`，并且所有 `acceptance.reviews[]` 都已有非 veto judge verdict，才会停为 `done`。缺少 verdict、命中 veto 或 acceptance 配置非法时，runtime 保持 loop active 并追加幂等 `review_required` 事件。reviewer/evaluator 用 `peer judge <worker>@<round> --verdict <v> [--finding severity:note]` 写自身 report，并把 verdict 路由到目标 worker 的 `.agent-duo/state/<worker>/reviews/<role>-rN.json`。verify 由分离的 `loopd --run-validation <id> <round>` runner 执行；运行中 marker 落在 `.agent-duo/state/<id>/validation-rN.running/`，最终 evidence 落在 `.agent-duo/state/<id>/validation-rN.json`，日志落在 `.agent-duo/logs/<id>/validation-rN-<validation-id>.log`，并追加 `validation_pass` / `validation_fail` 事件。runner 命令超时时会尽量杀掉整个进程组；若 runner 入口不可用则退回 tick 内同步执行并告警。`peer loop reset <id> [--max-rounds N]` 会在最新 report 轮次重新冻结预算并清空停止状态；`peer verify show <id>` / `peer judge ls <id>` 只读查看合门输入；`peer checkpoint <id> [--json]` 只读聚合 loop/report/task/verify/judge 方向状态；`peer reframe <id> "..." [--force]` 下发 `verb=reframe` 并在成功发送后写 `.agent-duo/logs/checkpoints.jsonl`。未配置 verify 时，`success_signals` / `non_goals` 仍只作为 supervisor 的软护栏。
+
+> **Stop hook 现状**：`scripts/supervisor-stop-drain-hook` 在 supervisor Stop/idle 时复用同一份磁盘状态重新计算合门集：verify pass、无 judge veto、最新 done report 带 evidence、轮次未超预算。预算内未合门时 hook 返回 block 并注入继续指令；预算耗尽仍未合门时不再无限阻塞，而是写 `.agent-duo/gates/stop-drain-<agent>-r<round>.json` 与 `logs/decisions.jsonl`，升级为 Human Decision Gate。
 
 ### 2.6 broker 就绪门控（issue #9）
 
 Approval Broker 只在 hook 被 provider **实际调用**时才生效。Codex 非托管 hook 未信任时 fail-open（hook 不运行、工具照常执行），所以「派了 worker」不等于「该 worker 被 broker 保护」。
 
 - 每个 worker 有一个就绪状态：`ready | stale | unverified | fail-open`，落在 `.agent-duo/state/<agent>/broker.json`，由 hook 自身/自检写入（见 [Approval Broker 设计](./2026-06-17-approval-broker-design.md) §7.1）。marker 现携带 `updated_epoch`（用于鉴新）和 `session_id`（用于溯源取证）。
-- **派发门控要求 fresh `ready`**：`ready` marker 存在且其 `updated_epoch` 距当前不超过 `AGENT_DUO_BROKER_TTL`（默认 60s）才算就绪。若 `ready` marker 超龄，`status` 子命令报 `stale`——例如 worker 的 Codex session 重启后回到未信任、hook 不再被调用时，旧 `ready` 随即变 `stale`。
-- **`peer tell` 对工作型角色目标是机械 fail-closed 硬门**：工作型 = 除 `supervisor`/`daemon`/`loopd` 外的所有角色（含 `worker`、`reviewer` 及自定义角色）。`peer tell` 在发送前自动读取目标 broker marker，若状态非 fresh `ready` 则直接拒发（非零退出、不触发任何 tmux 操作）——supervisor 无需自行记得检查。探针路径（`peer broker-check`）及发往豁免名单角色（`supervisor`/`daemon`/`loopd`）的消息豁免此门控；`reviewer`/自定义工作角色**不**豁免（实现按豁免名单取反，不是只拦字面 `worker`——见 [派发硬门设计](./2026-06-19-broker-dispatch-hard-gate-design.md)）。
+- **派发门控要求 fresh `ready`**：`ready` marker 存在且其 `updated_epoch` 距当前不超过 `AGENT_DUO_BROKER_TTL`（默认 60s）才算就绪。若 `ready` marker 超龄，`peer approval status` 子命令报 `stale`——例如 worker 的 Codex session 重启后回到未信任、hook 不再被调用时，旧 `ready` 随即变 `stale`。
+- **`peer tell` 对工作型角色目标是机械 fail-closed 硬门**：工作型 = 除 `supervisor`/`daemon`/`loopd` 外的所有角色（含 `worker`、`reviewer` 及自定义角色）。`peer tell` 在发送前自动读取目标 broker marker，若状态非 fresh `ready` 则直接拒发（非零退出、不触发任何 tmux 操作）——supervisor 无需自行记得检查。探针路径（`peer approval check`）及发往豁免名单角色（`supervisor`/`daemon`/`loopd`）的消息豁免此门控；`reviewer`/自定义工作角色**不**豁免（实现按豁免名单取反，不是只拦字面 `worker`——见 [派发硬门设计](./2026-06-19-broker-dispatch-hard-gate-design.md)）。
 - **`--force` / `AGENT_DUO_NO_BROKER_GATE=1` 可绕过硬门**：在需要强制派发的场景（如调试、紧急恢复）可使用，但需自行承担 broker 未生效的风险。
-- 硬门拒发后的处理路径：对 `stale` / `unverified` / `fail-open` 的 worker 先运行 `peer broker-check <id>`，返回 `ready` 后再派发，或改派给已 fresh `ready` 的 worker。（这条约束由上面的硬门自动执行，supervisor 无需手动把关。）
+- 硬门拒发后的处理路径：对 `stale` / `unverified` / `fail-open` 的 worker 先运行 `peer approval check <id>`，返回 `ready` 后再派发，或改派给已 fresh `ready` 的 worker。（这条约束由上面的硬门自动执行，supervisor 无需手动把关。）
 - 这是 fail-closed 原则：宁可不派，也不要把保护性任务交给一个 broker 实际没生效的 worker。
 
 ---
@@ -300,19 +302,19 @@ supervisor:    不直接 accept，而是 assign reviewer {
                   target_ref: "worker-impl@r5",
                   artifact:   worktree 路径 + diff ref   // 就是 worker 那条 result 的 evidence
                }
-worker-review: result(done, verdict=request_changes, findings[])
+worker-review: peer judge worker-impl@r5 --verdict request_changes --finding ...
 supervisor:    把 findings 映射成 reframe/assign 回发 worker-impl  → 重新 in_progress
                …循环…
-worker-review: result(done, verdict=approve)
-supervisor:    accept worker-impl                       → done
+worker-review: peer judge worker-impl@rN --verdict approve
+supervisor:    verify pass + judge 无 veto + evidence 存在 → loop stopped:done
 ```
 
 ### 要点
 
-- **verdict 只出现在 reviewer/evaluator 的 result 上**；普通 worker 没有 verdict，只有 status。
+- **verdict 只由 reviewer/evaluator 通过 `peer judge` 写入**；普通 worker 没有 verdict，只有 status。
 - **findings 流向**：reviewer→supervisor→(reframe/assign)→worker，从不直连；每跳进 `reports.jsonl`，可回放"为什么打回"。
 - **证据双用途**：worker 的 `evidence[]`（worktree、diff、log 引用）对 supervisor 是证明，对 reviewer 同时是输入。这也是为什么 worktree 隔离（MVP 4）是前提——reviewer 只读 worker 的 worktree。
-- **天然扩展到 N 审 + evaluator**：supervisor 扇出多个 reviewer/evaluator，收齐 verdict 按 `acceptance.policy` 聚合。evaluator 的 verdict 是 `pass/fail`，evidence 是截图。
+- **天然扩展到 N 审 + evaluator**：supervisor 扇出多个 reviewer/evaluator，收齐 verdict 按 judge 契约聚合。evaluator 的 verdict 是 `pass/fail`，evidence 是截图。
 - **`severity` 让"带 nit 接受"成为可能**——不是每条意见都触发新一轮，否则永不收敛。
 
 这套机械化了 contract 里的 `stop.success: "reviewer has no blocking findings"`。
@@ -352,7 +354,7 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 
 ## 8. 不变式（协议的保证）
 
-1. **没有静默 done。** worker `status=done` 只是 claim，必须 supervisor `accept`（且通过配置的 review）。→ 兑现 evidence/review gate。
+1. **没有静默 done。** worker `status=done` 只是 claim，必须通过 verify / judge / evidence 合门集；Stop hook 会在预算内拦截假完成。→ 兑现 evidence / verify / judge gate。
 2. **阻塞消息一定挂起 worker。** 不许越过 gate 凭假设往前跑。
 3. **claim 无证据即降级。** `done/partial` 缺 `evidence[]` → 自动变 `unknown`。→ Truthful Progress 写成 schema 约束。
 4. **一回合一 Report，大小有界。** → supervisor 读取成本有上界，兑现 budget。
@@ -369,20 +371,22 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 |---|---|
 | 上行任意 Report（写文件 + sentinel） | `peer report --type … --status … [--step …] --file …` |
 | `peer wait` 等回合边界 | `peer wait <id> --round N`（等 sentinel） |
-| 创建 / 移除可见 worker | `peer add --provider <p> --role <role> [--id <id>] [--worktree]` / `peer rm [--force] <id>` |
-| 初始化 / 查看步骤账本 | `peer task init <id> --task … --step s1:…` / `peer task next <id>` |
-| 初始化 / 查看 / 重置 loop contract | `peer loop init <id> --mission … --max-rounds N [--validation id:cmd] [--review role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop <id>` / `peer loop reset <id> [--max-rounds N]` |
+| 创建 / 移除可见 worker | `peer agent add --provider <p> --role <role> [--id <id>] [--worktree]` / `peer agent rm [--force] <id>` |
+| 初始化 / 查看步骤账本 | `peer task init <id> --task … --step s1:…` / `peer task next <id>` / `peer task show <id>` |
+| 初始化 / 查看 / 重置 loop contract | `peer loop init <id> --mission … --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` / `peer loop reset <id> [--max-rounds N]` |
+| 查看 verify gate | `peer verify ls <id>` / `peer verify show <id>` |
 | 原子下行并等待新 report | `peer ask <id> "..."`（loop-gated tell + poll report.json） |
 | 读取方向快照 | `peer checkpoint <id> [--json]` |
-| answer approval | `peer approve` / `peer deny` |
+| answer approval | `peer approval approve <approval-id>` / `peer approval deny <approval-id>` |
+| broker 就绪检查 | `peer approval status <id>` / `peer approval check <id>` |
 | answer human gate | `peer gate resolve --choice …` |
 | create human gate | `peer gate open --title … [--option …]` |
-| 驳回 claim | `peer require-evidence --for …` |
-| 写入验收判决 | `peer report --type result --verdict <v> --target-ref <worker>@<round> [--finding severity:note]` |
+| 驳回 claim | `peer reframe <id> "补充/重跑具体 evidence"` |
+| 写入验收判决 | `peer judge <worker>@<round> --verdict <v> [--finding severity:note]` / `peer judge ls <worker>` |
 | 拉回方向 | `peer reframe <id> "..." [--force]` |
-| 移交 | `peer budget handoff` |
+| 预算槽位 | `peer budget status`（当前只读预留） |
 
-`peer report` 与 `peer wait --round` 是本契约引入的**新表层**，其余复用 roadmap 既有草案。
+`peer report` 与 `peer wait --round` 是本契约引入的结构化表层；2026-06-27 后公开命令面已名词化为 `agent` / `verify` / `judge` / `approval`，旧的 `peer add`、`peer loop <id>`、`peer task <id>`、`peer report --verdict` 等 shorthand 均为 fail-closed。
 
 ---
 
@@ -393,6 +397,6 @@ result(done)  ← 此刻才合法，s1/s2/s3 各有 evidence
 1. **codec 地基**（无安全面）：`peer report`（写文件 + sentinel）、`peer wait --round`、Report schema、单步 `result`。让上行结构化、回合边界精确。
 2. **step ledger**：`task.json`、`plan`→`proceed` 冻结、`step_ref`、幂等 resume、per-step stuck。
 3. **阻塞与出口**：`request`/`needs` 路由、四出口（proceed/reframe/replan/stop）、`discovery` kind。
-4. **review**：`target_ref/verdict/findings`、`acceptance` 聚合（已由 acceptance veto 实现；隔离 worktree 可降低审查/实现相互污染）。
+4. **judge**：`peer judge` 写 `target_ref/verdict/findings` 并路由到目标 `reviews/`，由 `acceptance`/judge 契约聚合（已由 veto 实现；隔离 worktree 可降低审查/实现相互污染）。
 
 每步都可独立验证、独立产出价值，符合 roadmap"小步可实现"的取舍。

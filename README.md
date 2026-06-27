@@ -4,7 +4,7 @@
 
 [简体中文](README.zh-CN.md)
 
-You plan, build, and judge with agents you can actually see: a supervisor drives worker loops, verify gates, judge verdicts, human gates, and approval checks while every exchange happens live in ordinary tabs.
+You plan, build, and judge with agents you can actually see: a supervisor turns a natural-language mission into visible worker loops, verify gates, judge verdicts, human gates, and approval checks while every exchange happens live in ordinary tabs.
 
 ```
 ┌─ iTerm2 ───────────────────────────────────────────┐
@@ -105,17 +105,33 @@ Answer `y` once and it won't ask again (the marker block records your consent); 
 
 `agent-duo-start` without `--with` creates only the supervisor and loopd; run `peer agent add --provider codex --role worker` from the supervisor when you want a worker later. Add `--worktree` to give that worker an isolated checkout while keeping `.agent-duo` control state shared in the main repository.
 
-Then just talk naturally:
+Then just talk naturally. For a small delegation:
 
 > *"Ask a Codex worker to review the `internal/auth` package, wait for it to finish, and summarize its conclusions for me."*
 
 The supervisor will run `peer tell` → `peer wait` → `peer peek` and report back. Direct agent-to-agent delegation still stays visible in the worker tabs.
+
+For a full plan/build/judge loop, give the supervisor a mission in the shape of [`docs/mission-template.md`](docs/mission-template.md), or just say those three sections in prose:
+
+> *"Run this as a loop: build Release Desk, a local-first release checklist tool. Done means smoke tests pass, reviewer/evaluator do not veto, and the final report has evidence. Do not deploy, buy resources, or touch production."*
+
+The injected instructions point the supervisor at [`docs/SUPERVISOR-LOOP-PLAYBOOK.md`](docs/SUPERVISOR-LOOP-PLAYBOOK.md). The supervisor uses `peer` internally to provision planner/builder/reviewer/evaluator roles, freeze verify/judge gates, iterate with `ask`/`checkpoint`/`reframe`, and come back only for human gates or final evidence. Those commands stay available for debugging, but they are not the main human interface.
 
 A freshly created worker's Approval Broker starts **unverified** (the hook isn't trusted until the provider actually invokes it), and `peer tell` to a worker is fail-closed against that gate. So the first delegation to a new worker is `peer approval check <id>` → wait for `ready`, *then* `peer tell`. `agent-duo-start --with` and `peer agent add` both print this reminder.
 
 ## Testing
 
 Tests are split by layer under `test/{unit,cli,integration,e2e}/`. Run all layers with `bash test/run.sh`, or select layers such as `bash test/run.sh unit` and `bash test/run.sh cli integration`.
+
+## Documentation
+
+- [Detailed user manual (Chinese)](docs/USER-MANUAL.zh-CN.md)
+- [Loop engineering philosophy and references (Chinese)](docs/LOOP-ENGINEERING-PHILOSOPHY.zh-CN.md)
+- [Product-building loop case study with multiple agents (Chinese)](docs/LOOP-ENGINEERING-PRODUCT-CASE.zh-CN.md)
+- [Implementation details (Chinese)](docs/IMPLEMENTATION.zh-CN.md)
+- [Mission template](docs/mission-template.md)
+- [Supervisor loop playbook](docs/SUPERVISOR-LOOP-PLAYBOOK.md)
+- [Agent collaboration instructions](docs/AGENT-INSTRUCTIONS.md)
 
 ## The `peer` command
 
@@ -138,7 +154,7 @@ Tests are split by layer under `test/{unit,cli,integration,e2e}/`. Run all layer
 | `peer agent add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | Create a visible teammate tab; `--worktree` starts it in an isolated git worktree with shared control state |
 | `peer agent rm [--force] <id>` | Remove a teammate tab; isolated worktrees are deleted only when clean, or with `--force` |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` / `peer task show <id>` | Create and inspect a durable `task.json` step ledger for idempotent resume |
-| `peer loop init <id> --mission ... --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; optional verify gates and judge verdicts gate `done`, and empty-delta streaks raise direction events |
+| `peer loop init <id> --mission ... --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` | Freeze and inspect a worker loop contract with a mechanical round budget; verify gates and judge verdicts gate `done`, the Stop hook blocks false completion, and empty-delta streaks raise direction events |
 | `peer loop reset <id> [--max-rounds N]` | Re-freeze a loop at the latest report round, clear its stop state, and give it a fresh round budget |
 | `peer verify ls <id>` / `peer verify show <id>` | Read frozen verifier gate declarations and current or selected-round results |
 | `peer report --type request --status blocked --needs decision ...` | Worker writes a structured report and opens a Human Decision Gate when it needs a human choice |

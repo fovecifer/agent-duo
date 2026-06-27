@@ -7,10 +7,12 @@ agent-duo is a loop engineering framework for visible coding agents. It keeps th
 | Phase | agent-duo surface |
 |---|---|
 | DISCOVER | `peer peek`, `peer checkpoint`, `peer task show` |
-| PLAN | `peer task init`, `peer loop init` |
+| PLAN | `docs/mission-template.md`, `docs/SUPERVISOR-LOOP-PLAYBOOK.md`, `peer task init`, `peer loop init` |
 | EXECUTE | `peer ask`, `peer tell`, `peer reframe` |
 | VERIFY | `peer verify ls`, `peer verify show`, runtime verify gates |
 | ITERATE | `peer judge`, `peer loop reset`, `peer gate resolve` |
+
+For a concrete plan/build/judge product loop with `planner`, `builder`, `reviewer`, and `evaluator` agents, see [LOOP-ENGINEERING-PRODUCT-CASE.zh-CN.md](LOOP-ENGINEERING-PRODUCT-CASE.zh-CN.md). For the current natural-language entry point, start from [mission-template.md](mission-template.md); the injected supervisor instructions point to [SUPERVISOR-LOOP-PLAYBOOK.md](SUPERVISOR-LOOP-PLAYBOOK.md).
 
 ## Three Command Layers
 
@@ -34,13 +36,14 @@ agent-duo is a loop engineering framework for visible coding agents. It keeps th
 2. Capture the repeated work as a skill or project instruction, then use `peer task init` to make the worker's steps resumable.
 3. Wrap the work in `peer loop init` with a round budget, `--verify` gates, and `--judge` veto rules so `done` is gated by evidence rather than confidence.
 4. Use `peer ask`, `peer checkpoint`, and `peer reframe` for supervised iteration.
-5. Add scheduling or external triggers only after the manual loop is boring and the verify/judge gates are stable.
+5. For full product loops, let the supervisor follow `SUPERVISOR-LOOP-PLAYBOOK.md`: parse the mission, propose gates, provision roles, run build/judge, and report only at human gates or final evidence.
+6. Add scheduling or external triggers only after the manual loop is boring and the verify/judge gates are stable.
 
 ## Risks And Guardrails
 
 Loop engineering compounds both useful work and waste. The expensive failures are token compounding, low-signal reports, and changes that pass through review but are not accepted by the user.
 
-`peer budget status` is a reserved guardrail surface for future budget and cost controls. Today the practical guardrails are explicit round budgets in `peer loop init`, mechanical `verify` gates, independent `judge` verdicts, and Human Decision Gates for business, deployment, cost, network, or scope decisions.
+`peer budget status` is a reserved guardrail surface for future budget and cost controls. Today the practical guardrails are explicit round budgets in `peer loop init`, mechanical `verify` gates, independent `judge` verdicts, Human Decision Gates for business, deployment, cost, network, or scope decisions, and the supervisor Stop hook. The Stop hook reads the same loop state and blocks false completion while budget remains; when the budget is exhausted and the gate set is still unmet, it opens a Human Decision Gate instead of blocking forever.
 
 Track cost per accepted change, not just whether the loop eventually finishes. A loop that needs many rounds, repeated reframes, or large discarded deltas should be narrowed, given better verify gates, or moved back to manual operation.
 

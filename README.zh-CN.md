@@ -2,7 +2,7 @@
 
 **把可见的 Claude Code / Codex CLI 会话组织成一个 loop engineering 框架 —— 就在普通 iTerm2 tab 里。**
 
-你用 plan → build → judge 的节奏驱动可见 agent：supervisor 管 loop 契约、verify gates、judge verdicts、human gates 与 approval checks，整个过程都在你眼前的普通 tab 里发生：
+你用 plan → build → judge 的节奏驱动可见 agent：supervisor 把自然语言 mission 物化成 loop 契约、verify gates、judge verdicts、human gates 与 approval checks，整个过程都在你眼前的普通 tab 里发生：
 
 ```
 ┌─ iTerm2 ───────────────────────────────────────────┐
@@ -72,8 +72,20 @@ sequenceDiagram
 agent-duo/
 ├── start.sh                 # 一键启动 supervisor + loopd,可选再起 worker
 ├── bin/peer                 # 互看/互发指令的核心命令
-└── docs/AGENT-INSTRUCTIONS.md
-                              # 追加到 CLAUDE.md / AGENTS.md 的协作说明
+└── docs/
+    ├── AGENT-INSTRUCTIONS.md
+    │                         # 追加到 CLAUDE.md / AGENTS.md 的协作说明
+    ├── mission-template.md    # 自然语言 mission 三段模板
+    ├── SUPERVISOR-LOOP-PLAYBOOK.md
+    │                         # supervisor 按相位自动编排 loop 的 playbook
+    ├── roles/                 # planner/builder/reviewer/evaluator 角色定义
+    ├── USER-MANUAL.zh-CN.md  # 详尽使用手册
+    ├── LOOP-ENGINEERING-PHILOSOPHY.zh-CN.md
+    │                         # loop engineering 设计哲学与资料
+    ├── LOOP-ENGINEERING-PRODUCT-CASE.zh-CN.md
+    │                         # 多 agent 从 0 做产品的实际用例
+    └── IMPLEMENTATION.zh-CN.md
+                              # 项目实现细节
 ```
 
 ## 安装(一次性)
@@ -136,6 +148,20 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
   → 它会 `peer tell` → `peer wait` → `peer peek`,再向你汇报
 - 对 Codex 说:「问问 Claude 它对这个方案的意见」 → 反方向同理
 
+如果要跑完整 plan/build/judge loop，可以给 supervisor 一份
+[`docs/mission-template.md`](docs/mission-template.md) 形状的三段 mission，或者直接用自然语言说清：
+
+```text
+请把这个目标跑成 loop：做一个本地优先的 Release Desk 发布检查清单工具。
+完成条件：smoke test 通过，reviewer/evaluator 不 veto，最终 report 带 evidence。
+不做：不部署、不购买资源、不碰生产。
+```
+
+注入说明会让 supervisor 先读
+[`docs/SUPERVISOR-LOOP-PLAYBOOK.md`](docs/SUPERVISOR-LOOP-PLAYBOOK.md)，再自动完成编队、
+broker 自检、verify/judge gate 冻结、ask/checkpoint/reframe 循环和最终证据汇报。`peer`
+命令仍是可调试的内部控制面，但普通用户不需要手动敲完整命令串。
+
 新建 worker 的 Approval Broker 起始为 **unverified**(hook 未被 provider 实际调用前不可信),
 而 `peer tell` 发给 worker 是对这道门 fail-closed 的。所以对一个新 worker 的第一次派发是
 `peer approval check <id>` → 等到 `ready`,**再** `peer tell`。`agent-duo-start --with` 和
@@ -164,7 +190,7 @@ tmux -CC attach -t agents     # 在 iTerm2 中附加;tmux window → 原生 tab
 | `peer agent add --provider claude\|codex --role <role> [--id <id>] [--worktree]` | 新建可见队友 tab;`--worktree` 让它在隔离 git worktree 中编辑,控制状态仍共享 |
 | `peer agent rm [--force] <id>` | 移除队友 tab;隔离 worktree 干净才删除,脏时保留,`--force` 可丢弃 |
 | `peer task init <id> --task ... --step s1:...` / `peer task next <id>` / `peer task show <id>` | 创建并查看持久化 `task.json` 步骤账本,供解阻后幂等续跑 |
-| `peer loop init <id> --mission ... --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;可选 verify 与 judge 双门控 `done`,连续空 `delta` 会触发方向事件 |
+| `peer loop init <id> --mission ... --max-rounds N [--verify id:cmd] [--judge role:veto1,veto2] [--detail-trap-rounds N]` / `peer loop show <id>` | 冻结并查看 worker 的 loop 契约,包含机械轮次预算;verify 与 judge 双门控 `done`,Stop hook 会拦截假完成,连续空 `delta` 会触发方向事件 |
 | `peer loop reset <id> [--max-rounds N]` | 在最新 report 轮次重新冻结 loop,清空停止状态,给 worker 一份新轮次预算 |
 | `peer verify ls <id>` / `peer verify show <id>` | 只读查看 loop 契约里的 verify gates 及当前/指定轮次结果 |
 | `peer report --type request --status blocked --needs decision ...` | worker 写结构化报告；需要人类选择时自动打开 Human Decision Gate |
