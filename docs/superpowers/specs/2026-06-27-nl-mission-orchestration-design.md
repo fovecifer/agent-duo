@@ -1,5 +1,5 @@
 ---
-title: "NL Mission 入口与 supervisor 自动编排（对齐 Agent Teams 设计）"
+title: "Loop Engineering 的自然语言入口：NL Mission 与 supervisor 自动编排"
 date: 2026-06-27
 status: design
 tags: [natural-language, orchestration, loop-engineering, agent-teams, mission, agent-duo]
@@ -12,12 +12,13 @@ related:
 
 ## 0. 最高约束（凌驾本 spec 所有设计决策）
 
-> 借 Claude Code **Agent Teams** 的入口人体工学，但**全在 agent-duo 自有、工具无关的底座上原生实现，
-> 不依赖原生 Agent Teams**；**loop / verifier 永远是脊柱**——任何简化不得削弱 verify / judge / stop 闸门，
-> 不得削弱跨工具桥（Claude ↔ Codex）。
+> agent-duo 的核心定位是 **loop engineering**——verify-gated 的迭代收敛（plan → build → judge，
+> **verifier 是脊柱**，跑到合门条件为真才停）。本 spec 只做一件事：**给这套 loop 换一个自然语言入口**。
+> **loop / verifier 永远是脊柱**——任何简化不得削弱 verify / judge / stop 闸门，不得削弱跨工具桥（Claude ↔ Codex）。
 
-依据：Agent Teams 是「空间轴」并行底座，没有内建 loop（跑完即关、无心跳、无「验证通过才停」），且只
-Claude↔Claude、session resumption 弱。agent-duo 的不可替代价值＝跨工具桥 + loop 纪律层，二者都留在自己手里。
+*脚注（来源说明，非定位）*：NL 入口的人体工学借鉴自 Claude Code Agent Teams——但 Agent Teams 是「空间轴」
+并行底座、**没有内建 loop**（跑完即关、无「验证通过才停」）、只 Claude↔Claude、resumption 弱。所以这里**只借机制、
+不借身份**：全在 agent-duo 自有、工具无关底座原生实现，**不依赖原生 Agent Teams**。loop 纪律层 + 跨工具桥才是定位。
 
 ## 1. 背景与动机
 
@@ -25,12 +26,13 @@ Claude↔Claude、session resumption 弱。agent-duo 的不可替代价值＝跨
 reframe`，对照 Claude Code `/goal`「一个提示词文件就把 loop 跑起来」UX 落差太大。**自然语言与框架交互是
 agent-duo 的核心设计原则**：`peer` 命令面应退为 supervisor 的内部实现细节，人类接口收敛到自然语言。
 
-本 spec 是「底座对齐 Agent Teams」系列的**第一个子项目**：**NL mission 入口 + supervisor 自动组队编排
-（含可复用角色定义 #6）**。后续子项目（共享 task list / mailbox 自动投递 / hook 质量门 / plan approval）
-各自再 brainstorm。
+本 spec 是「**给 loop engineering 装一个自然语言入口**」系列的**第一个子项目**：**NL mission 入口 +
+supervisor 自动组队编排（含可复用角色定义 #6）**。后续子项目（共享 task list / mailbox 自动投递 /
+hook 质量门 / plan approval）各自再 brainstorm。
 
-学 Agent Teams 的：①NL-first 入口 + ②supervisor 主动提议组队 + ⑥可复用角色定义。
-坚持 agent-duo 差异：supervisor 中介、全程可见、人类 gate（不学 AT 的无人值守自取互聊）。
+借鉴的 Agent Teams 设计点（仅入口人体工学）：①NL-first 入口 + ②supervisor 主动提议组队 + ⑥可复用角色定义。
+坚持 agent-duo 的 loop 纪律与差异：plan-build-judge + verify/judge/stop 闸门、supervisor 中介、全程可见、
+人类 gate（不学 AT 的无人值守自取互聊）。
 
 ## 2. 目标体验与架构
 
