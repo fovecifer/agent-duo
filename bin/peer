@@ -389,7 +389,7 @@ role_is_gated() {
 }
 
 run_approval_broker() {
-  bash "$APPROVAL_BROKER" "$@"
+  /bin/bash "$APPROVAL_BROKER" "$@"
 }
 
 # role_for_id <id> → 打印该 id 的 @agent_role;读不到时打印 "worker"(fail-closed)。
@@ -3410,7 +3410,7 @@ case "$cmd" in
 
   loopd)
     ensure_session
-    exec bash "$PEER_ROOT/scripts/loopd" "$@"
+    exec /bin/bash "$PEER_ROOT/scripts/loopd" "$@"
     ;;
 
   status)

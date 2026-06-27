@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Mark supervisor idle, then drain one pending runtime event via Stop block.
 set -euo pipefail
 

@@ -24,6 +24,10 @@ assert_ok "broker: bash backend exists" test -f "$ROOT/lib/approval_broker.sh"
 assert_ok "broker: python backend removed" test ! -e "$ROOT/lib/approval_broker.py"
 PY_RUNTIME="python""3"
 assert_not_contains "broker: hook has no python dependency" "$(cat "$ROOT/bin/agent-duo-approval-hook" "$ROOT/lib/approval_broker.sh")" "$PY_RUNTIME"
+first_hook_line="$(sed -n '1p' "$ROOT/bin/agent-duo-approval-hook")"
+assert_eq "broker: hook entrypoint uses absolute bash" "$first_hook_line" "#!/bin/bash"
+assert_not_contains "broker: hook does not rely on PATH bash" "$(cat "$ROOT/bin/agent-duo-approval-hook")" '/usr/bin/env bash'
+assert_contains "broker: hook invokes backend with absolute bash" "$(cat "$ROOT/bin/agent-duo-approval-hook")" '/bin/bash "$ROOT/lib/approval_broker.sh" hook'
 assert_ok "broker: jq is available for safe JSON parsing" sh -c 'command -v jq >/dev/null'
 
 run_hook() {

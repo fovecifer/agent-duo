@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Single PreToolUse hook entrypoint for agent-duo Approval Broker MVP1.
 set -euo pipefail
 
@@ -6,4 +6,4 @@ SRC="${BASH_SOURCE[0]}"
 while [ -L "$SRC" ]; do SRC="$(readlink "$SRC")"; done
 ROOT="$(cd "$(dirname "$SRC")/.." && pwd)"
 
-bash "$ROOT/lib/approval_broker.sh" hook
+/bin/bash "$ROOT/lib/approval_broker.sh" hook

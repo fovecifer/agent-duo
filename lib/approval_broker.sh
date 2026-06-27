@@ -927,7 +927,7 @@ ab_cmd_install() {
   local root="$1" agent="$2" provider="$3" hook="$4" worktree="$5" output="$6" command settings_path settings
   settings_path="$output"
   if [[ -z "$settings_path" ]]; then settings_path="$(ab_state_dir "$root")/$agent/session-settings.json"; fi
-  command="AGENT_DUO_ROOT=$(ab_shell_quote "$root") AGENT_DUO_AGENT_ID=$(ab_shell_quote "$agent") AGENT_DUO_WORKTREE=$(ab_shell_quote "$worktree") $(ab_shell_quote "$hook")"
+  command="AGENT_DUO_ROOT=$(ab_shell_quote "$root") AGENT_DUO_AGENT_ID=$(ab_shell_quote "$agent") AGENT_DUO_WORKTREE=$(ab_shell_quote "$worktree") /bin/bash $(ab_shell_quote "$hook")"
   settings="{\"agent_duo_approval_broker\":{\"version\":1,\"agent_id\":\"$(ab_json_escape "$agent")\","
   settings="${settings}\"provider\":\"$(ab_json_escape "$provider")\",\"hook\":\"$(ab_json_escape "$hook")\","
   settings="${settings}\"worktree\":\"$(ab_json_escape "$worktree")\","

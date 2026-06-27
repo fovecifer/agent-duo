@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Mark supervisor busy at the start of a user/submitted turn.
 set -euo pipefail
 

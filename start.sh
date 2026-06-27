@@ -202,8 +202,8 @@ write_supervisor_session_settings() { # <root>
   mkdir -p "$settings_dir"
   user_hook="$SCRIPT_DIR/scripts/supervisor-user-prompt-submit-hook"
   stop_hook="$SCRIPT_DIR/scripts/supervisor-stop-drain-hook"
-  user_cmd="AGENT_DUO_ROOT=$(shell_quote "$root") $(shell_quote "$user_hook")"
-  stop_cmd="AGENT_DUO_ROOT=$(shell_quote "$root") $(shell_quote "$stop_hook")"
+  user_cmd="AGENT_DUO_ROOT=$(shell_quote "$root") /bin/bash $(shell_quote "$user_hook")"
+  stop_cmd="AGENT_DUO_ROOT=$(shell_quote "$root") /bin/bash $(shell_quote "$stop_hook")"
   tmp="$settings_path.$$"
   jq -cn \
     --arg user_cmd "$user_cmd" \
@@ -283,7 +283,7 @@ if [[ -n "$WITH_SPEC" ]]; then
   if [[ "$WITH_ISOLATED" == "1" ]]; then
     tmux set-option -p -t "$W_PANE" @agent_worktree "$W_WORKDIR"
   fi
-  W_SETTINGS="$(bash "$APPROVAL_BROKER" install \
+  W_SETTINGS="$(/bin/bash "$APPROVAL_BROKER" install \
     --agent-id "$W_ROLE" \
     --provider "$W_PROVIDER" \
     --hook "$APPROVAL_HOOK" \
@@ -304,7 +304,7 @@ if [[ -n "$WITH_SPEC" ]]; then
     "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
   # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效(等价 peer agent add)。
   # 必须覆盖同一 workdir 旧 session 可能残留的 fresh ready marker,否则硬门会误放行未信任的新 worker。
-  bash "$APPROVAL_BROKER" mark --agent-id "$W_ROLE" --status unverified --root "$WORKDIR" >/dev/null 2>&1 || true
+  /bin/bash "$APPROVAL_BROKER" mark --agent-id "$W_ROLE" --status unverified --root "$WORKDIR" >/dev/null 2>&1 || true
 fi
 
 cat <<EOF

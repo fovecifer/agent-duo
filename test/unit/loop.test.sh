@@ -132,6 +132,15 @@ wait_for_validation_runner_log() {
   return 1
 }
 
+# Provider hook environments can have a minimal PATH; hook entrypoints must not
+# rely on /usr/bin/env finding bash.
+assert_eq "hook user submit: absolute bash shebang" \
+  "$(sed -n '1p' "$ROOT/scripts/supervisor-user-prompt-submit-hook")" "#!/bin/bash"
+assert_eq "hook stop: absolute bash shebang" \
+  "$(sed -n '1p' "$ROOT/scripts/supervisor-stop-drain-hook")" "#!/bin/bash"
+assert_not_contains "hook supervisor entrypoints: no env bash" \
+  "$(cat "$ROOT/scripts/supervisor-user-prompt-submit-hook" "$ROOT/scripts/supervisor-stop-drain-hook")" '/usr/bin/env bash'
+
 # UserPromptSubmit marks the supervisor turn busy.
 setup
 assert_ok "hook user submit: marks busy" run_hook bash "$ROOT/scripts/supervisor-user-prompt-submit-hook"
