@@ -90,12 +90,15 @@ assert_not_ok "yes: n"     adk_answer_yes "n"
 assert_not_ok "yes: empty" adk_answer_yes ""
 assert_not_ok "yes: junk"  adk_answer_yes "maybe"
 
-# --- instructions file is pure (no editorial HTML comment, real content present) ---
+# --- instructions file is marker-wrapped injection content with the mission playbook pointer ---
 INSTR_FILE="$ROOT/docs/AGENT-INSTRUCTIONS.md"
 firstline="$(sed -n '1p' "$INSTR_FILE")"
-assert_not_contains "instr: no leading HTML comment" "$firstline" '<!--'
+lastline="$(tail -1 "$INSTR_FILE")"
+assert_eq "instr: starts with marker" "$firstline" '<!-- agent-duo:start -->'
+assert_eq "instr: ends with marker" "$lastline" '<!-- agent-duo:end -->'
 allbody="$(cat "$INSTR_FILE")"
 assert_contains "instr: keeps collaboration heading" "$allbody" '与另一个编码 Agent 协作'
 assert_contains "instr: keeps peer tell"             "$allbody" 'peer tell'
+assert_contains "instr: has playbook pointer"         "$allbody" 'docs/SUPERVISOR-LOOP-PLAYBOOK.md'
 
 exit "$ADK_FAIL"

@@ -31,6 +31,18 @@ write_report_with_direction() { # <agent> <round> <status> <delta> <drift>
   ln -s "r${round}.json" "$state/report.json"
 }
 
+write_result_report_with_evidence() { # <agent> <round> <status>
+  local agent="$1" round="$2" status="$3" state
+  state="$PROJECT/.agent-duo/state/$agent"
+  mkdir -p "$state"
+  jq -cn \
+    --argjson round "$round" --arg agent "$agent" --arg status "$status" \
+    '{protocol:"1",round:$round,agent_id:$agent,role:"worker",type:"result",status:$status,delta:"done",drift:null,next:"",needs:[],evidence:[{cmd:"bash test/run.sh",result:"ALL TESTS PASSED",ref:".agent-duo/logs/test.log"}]}' \
+    > "$state/r${round}.json"
+  rm -f "$state/report.json"
+  ln -s "r${round}.json" "$state/report.json"
+}
+
 write_loop_contract() { # <agent> <max_rounds> <frozen_at_round>
   local agent="$1" max_rounds="$2" frozen="$3" state
   state="$PROJECT/.agent-duo/state/$agent"
@@ -60,6 +72,14 @@ write_loop_contract_with_acceptance() { # <agent> <max_rounds> <frozen_at_round>
     --arg agent "$agent" --argjson max "$max_rounds" --argjson frozen "$frozen" --argjson reviews "$reviews" \
     '{protocol:"1",agent_id:$agent,mission:"m",non_goals:[],success_signals:[],validation:[],acceptance:{reviews:$reviews},max_rounds:$max,frozen_at_round:$frozen,status:"active",stop:{on_terminal:true,reason:null,stopped_at_round:null,stopped_at:null},created_at:"2026-06-21T00:00:00Z",updated_at:"2026-06-21T00:00:00Z"}' \
     > "$state/loop.json"
+}
+
+add_acceptance_to_contract() { # <agent> <reviews_json>
+  local agent="$1" reviews="$2" state tmp
+  state="$PROJECT/.agent-duo/state/$agent"
+  tmp="$state/.loop.json.$$"
+  jq --argjson reviews "$reviews" '.acceptance = {reviews:$reviews}' "$state/loop.json" > "$tmp"
+  mv "$tmp" "$state/loop.json"
 }
 
 write_review_record() { # <agent> <role> <round> <verdict>
@@ -181,6 +201,43 @@ assert_eq "hook stop priority: cursor count one" "$(cat "$PROJECT/.agent-duo/eve
 assert_ok "hook stop priority: then checkpoint" run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook"
 assert_contains "hook stop priority: checkpoint second" "$(cat "$OUT")" 'id=e1 agent=worker type=checkpoint round=1'
 assert_eq "hook stop priority: cursor count two" "$(cat "$PROJECT/.agent-duo/events/cursor")" "2"
+teardown
+
+# Stop hook hard gate allows only when verify pass + judge clear + evidence are all true.
+setup
+write_result_report_with_evidence builder 2 done
+write_loop_contract_with_validation builder 5 1 "printf ok" '["tests pass"]' '["tests pass"]'
+add_acceptance_to_contract builder '[{"role":"reviewer","veto_on":["request_changes","reject"]}]'
+write_validation_result builder 2 pass '["tests pass"]' '[]' '[]'
+write_review_record builder reviewer 2 approve
+assert_ok "stop-hook gate: satisfied allows" run_stop_hook builder
+assert_eq "stop-hook gate: satisfied no output" "$(cat "$OUT")" ""
+teardown
+
+# Stop hook hard gate blocks a false done while budget remains and injects a continue directive.
+setup
+write_result_report_with_evidence builder 2 done
+write_loop_contract_with_validation builder 5 1 "false" '["tests pass"]' '["tests pass"]'
+write_validation_result builder 2 fail '[]' '["tests pass"]' '["smoke"]'
+assert_exit_code "stop-hook gate: verify fail blocks" 2 run_stop_hook builder
+assert_contains "stop-hook gate: block decision" "$(cat "$OUT")" '"decision":"block"'
+assert_contains "stop-hook gate: continue directive" "$(cat "$OUT")" '继续'
+assert_ok "stop-hook gate: under budget opens no gate" test ! -d "$PROJECT/.agent-duo/gates"
+teardown
+
+# Stop hook hard gate opens a human gate instead of blocking forever once budget is exhausted.
+setup
+write_result_report_with_evidence builder 3 done
+write_loop_contract_with_validation builder 3 1 "false" '["tests pass"]' '["tests pass"]'
+write_validation_result builder 3 fail '[]' '["tests pass"]' '["smoke"]'
+assert_ok "stop-hook gate: exhausted opens gate" run_stop_hook builder
+assert_contains "stop-hook gate: exhausted output mentions gate" "$(cat "$OUT")" '"gate"'
+gate_path="$(ls "$PROJECT/.agent-duo/gates"/*.json)"
+gate_json="$(cat "$gate_path")"
+assert_contains "stop-hook gate: packet pending" "$gate_json" '"status":"pending"'
+assert_contains "stop-hook gate: packet target" "$gate_json" '"agent_id":"builder"'
+assert_contains "stop-hook gate: packet title" "$gate_json" '预算耗尽未合门'
+assert_contains "stop-hook gate: decision log opened" "$(cat "$PROJECT/.agent-duo/logs/decisions.jsonl")" '"status":"opened"'
 teardown
 
 # loopd idle-arrival injects one pending event through peer tell and shares the same cursor.

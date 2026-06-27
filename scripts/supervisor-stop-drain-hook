@@ -9,4 +9,192 @@ ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
 source "$ROOT/lib/loop.sh"
 
 AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
-ad_loop_stop_drain "$AGENT_DUO_ROOT"
+
+stop_gate_report_has_evidence() { # <report_path>
+  jq -e '
+    [(.evidence // [])[]?
+      | select(
+          (((.cmd // "") | tostring | length) > 0)
+          or (((.result // "") | tostring | length) > 0)
+          or (((.ref // "") | tostring | length) > 0)
+        )
+    ] | length > 0
+  ' "$1" >/dev/null 2>&1
+}
+
+stop_gate_join_reasons() {
+  local out="" sep="" reason
+  for reason in "$@"; do
+    [[ -n "$reason" ]] || continue
+    out="${out}${sep}${reason}"
+    sep="; "
+  done
+  printf '%s' "$out"
+}
+
+stop_gate_write_budget_gate() { # <root> <agent> <round> <detail>
+  local root="$1" agent="$2" round="$3" detail="$4"
+  local duo gates logs safe_agent gate_id path tmp ts options_json
+  duo="$(ad_loop_duo_dir "$root")"
+  gates="$duo/gates"
+  logs="$duo/logs"
+  mkdir -p "$gates" "$logs"
+  safe_agent="$(printf '%s' "$agent" | sed 's/[^A-Za-z0-9._-]/_/g')"
+  [[ -n "$safe_agent" ]] || safe_agent="agent"
+  gate_id="stop-drain-${safe_agent}-r${round}"
+  path="$gates/${gate_id}.json"
+  ts="$(ad_loop_iso_ts)"
+  options_json='["continue","accept-risk","stop"]'
+  if [[ ! -f "$path" ]]; then
+    tmp="$gates/.${gate_id}.json.$$"
+    jq -cn \
+      --arg id "$gate_id" \
+      --arg agent "$agent" \
+      --arg role "worker" \
+      --arg title "预算耗尽未合门" \
+      --arg detail "$detail" \
+      --arg report_ref ".agent-duo/state/${agent}/report.json" \
+      --arg created "$ts" \
+      --argjson round "$round" \
+      --argjson options "$options_json" \
+      '{protocol:"1",id:$id,status:"pending",kind:"decision",agent_id:$agent,role:$role,round:$round,title:$title,detail:$detail,options:$options,report_ref:$report_ref,created_at:$created,resolved_at:null,resolved_by:null,choice:null,note:null}' \
+      > "$tmp"
+    mv "$tmp" "$path"
+    jq -cn \
+      --arg ts "$ts" \
+      --arg gate "$gate_id" \
+      --arg agent "$agent" \
+      --arg summary "$detail" \
+      '{ts:$ts,gate:$gate,status:"opened",agent:$agent,summary:$summary,choice:null,note:null}' \
+      >> "$logs/decisions.jsonl"
+  fi
+  jq -cn --arg gate "$gate_id" --arg reason "$detail" '{decision:"allow",gate:$gate,reason:$reason}'
+}
+
+stop_gate_eval_agent() { # <root> <agent>
+  local root="$1" agent="$2"
+  local contract report parsed status max_rounds frozen_round current_round rounds_used
+  local report_status validation_count validation_file validation_status acceptance_tsv acceptance_state acceptance_summary
+  local reasons reason detail
+  reasons=()
+
+  contract="$(ad_loop_contract_path "$root" "$agent")"
+  [[ -f "$contract" ]] || return 0
+  if ! parsed="$(jq -c '.' "$contract" 2>/dev/null)"; then
+    return 0
+  fi
+  status="$(jq -r '.status // "active"' <<EOF
+$parsed
+EOF
+)"
+  [[ "$status" == "active" ]] || return 0
+
+  max_rounds="$(jq -r '.max_rounds // empty' <<EOF
+$parsed
+EOF
+)"
+  frozen_round="$(jq -r '.frozen_at_round // empty' <<EOF
+$parsed
+EOF
+)"
+  if ! ad_loop_is_nonnegative_int "$max_rounds" || [[ "$max_rounds" == "0" ]] \
+     || ! ad_loop_is_nonnegative_int "$frozen_round" || [[ "$frozen_round" == "0" ]]; then
+    return 0
+  fi
+
+  report="$(ad_loop_report_path "$root" "$agent")"
+  current_round="$(ad_loop_report_round "$report")"
+  report_status="$(ad_loop_report_status "$report")"
+  rounds_used=0
+  if ad_loop_is_nonnegative_int "$current_round" && (( current_round > 0 )); then
+    rounds_used="$(( current_round - frozen_round + 1 ))"
+  fi
+  if (( current_round <= 0 || rounds_used <= 0 )); then
+    reasons+=("builder has no report")
+  fi
+  if (( rounds_used > max_rounds )); then
+    reasons+=("round budget exceeded (${rounds_used}/${max_rounds})")
+  fi
+
+  if [[ "$report_status" != "done" ]]; then
+    reasons+=("builder not done(status=${report_status})")
+  elif ! stop_gate_report_has_evidence "$report"; then
+    reasons+=("done report missing evidence")
+  fi
+
+  validation_count="$(jq -r '(.validation // []) | length' <<EOF
+$parsed
+EOF
+)"
+  if ! ad_loop_is_nonnegative_int "$validation_count"; then
+    reasons+=("verify config invalid")
+  elif (( validation_count > 0 )); then
+    validation_file="$(ad_loop_validation_path "$root" "$agent" "$current_round")"
+    if [[ ! -f "$validation_file" ]]; then
+      reasons+=("verify not_run")
+    else
+      validation_status="$(jq -r '.status // "unknown"' "$validation_file" 2>/dev/null || printf 'unknown')"
+      if [[ "$validation_status" != "pass" ]]; then
+        reasons+=("verify=${validation_status}")
+      fi
+    fi
+  fi
+
+  acceptance_tsv="$(ad_loop_acceptance_state "$root" "$agent" "$current_round" "$contract")"
+  acceptance_state="${acceptance_tsv%%|*}"
+  if [[ "$acceptance_state" != "satisfied" ]]; then
+    acceptance_summary="$(ad_loop_acceptance_dashboard "$acceptance_tsv")"
+    reasons+=("judge=${acceptance_summary}")
+  fi
+
+  if (( ${#reasons[@]} == 0 )); then
+    return 0
+  fi
+
+  reason="$(stop_gate_join_reasons "${reasons[@]}")"
+  detail="合门未达(agent=${agent} r${current_round} used=${rounds_used}/${max_rounds}): ${reason}"
+  if (( rounds_used >= max_rounds )); then
+    stop_gate_write_budget_gate "$root" "$agent" "$current_round" "$detail"
+    return 0
+  fi
+
+  ad_loop_print_block_decision "${detail}; 继续修复,勿停。"
+  return 2
+}
+
+stop_gate_eval_all() { # <root> [agent...]
+  local root="$1" agent rc
+  shift || true
+  if [[ "$#" -gt 0 ]]; then
+    for agent in "$@"; do
+      stop_gate_eval_agent "$root" "$agent"
+      rc="$?"
+      [[ "$rc" == "0" ]] || return "$rc"
+    done
+    return 0
+  fi
+  while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    stop_gate_eval_agent "$root" "$agent"
+    rc="$?"
+    [[ "$rc" == "0" ]] || return "$rc"
+  done < <(ad_loop_contract_agents "$root")
+  return 0
+}
+
+ad_loop_mark_supervisor_turn "$AGENT_DUO_ROOT" idle
+if ad_loop_maybe_block_daemon_offline "$AGENT_DUO_ROOT"; then
+  exit 0
+fi
+
+set +e
+stop_gate_eval_all "$AGENT_DUO_ROOT" "$@"
+gate_rc="$?"
+set -e
+if [[ "$gate_rc" != "0" ]]; then
+  exit "$gate_rc"
+fi
+
+if ad_loop_with_cursor_lock "$AGENT_DUO_ROOT" ad_loop_deliver_next_event_locked "$AGENT_DUO_ROOT" block; then
+  exit 0
+fi

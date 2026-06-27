@@ -449,6 +449,10 @@ run_hook() {
   PATH="$STUB_BIN:$PATH" AGENT_DUO_ROOT="$PROJECT" "$@" >"$OUT" 2>"$ERR"
 }
 
+run_stop_hook() {
+  run_hook bash "$ROOT/scripts/supervisor-stop-drain-hook" "$@"
+}
+
 run_loopd_once() {
   : > "$OUT"; : > "$ERR"; : > "$TMUX_STUB_LOG"
   [[ -n "${PEER_STUB_LOG:-}" ]] && : > "$PEER_STUB_LOG"
