@@ -148,6 +148,27 @@ usage_report() {
 EOF
 }
 
+usage_ask() {
+  cat <<'EOF'
+用法:
+  peer ask [<id>] "消息" [--timeout N] [--interval N] [--force]
+EOF
+}
+
+usage_checkpoint() {
+  cat <<'EOF'
+用法:
+  peer checkpoint [<id>] [--json]
+EOF
+}
+
+usage_reframe() {
+  cat <<'EOF'
+用法:
+  peer reframe [<id>] "消息" [--force]
+EOF
+}
+
 static_preflight_dispatch() {
   if [[ "${1:-}" == "--force" ]]; then shift; fi
 
@@ -199,6 +220,15 @@ static_preflight_dispatch() {
             ;;
         esac
       done
+      ;;
+    ask)
+      case "$second" in --help|-h) usage_ask; exit 0 ;; esac
+      ;;
+    checkpoint)
+      case "$second" in --help|-h) usage_checkpoint; exit 0 ;; esac
+      ;;
+    reframe)
+      case "$second" in --help|-h) usage_reframe; exit 0 ;; esac
       ;;
     ls)
       echo "已移除: 'peer ls' → 改用 'peer agent ls'" >&2
@@ -2454,6 +2484,10 @@ case "$cmd" in
     ;;
 
   ask)
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+      usage_ask
+      exit 0
+    fi
     ensure_session
     maybe_id=""
     ask_timeout="${PEER_ASK_TIMEOUT:-300}"
@@ -2496,7 +2530,7 @@ case "$cmd" in
       exit 1
     fi
     if [[ ${#ask_parts[@]} -eq 0 ]]; then
-      echo "用法: peer ask [<id>] \"消息\" [--timeout N] [--interval N] [--force]" >&2
+      usage_ask >&2
       exit 1
     fi
     target="$(resolve_target_pane "$maybe_id")"
@@ -2531,6 +2565,10 @@ case "$cmd" in
     ;;
 
   reframe)
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+      usage_reframe
+      exit 0
+    fi
     ensure_session
     maybe_id=""
     reframe_parts=()
@@ -2555,7 +2593,7 @@ case "$cmd" in
       esac
     done
     if [[ ${#reframe_parts[@]} -eq 0 ]]; then
-      echo "用法: peer reframe [<id>] \"消息\" [--force]" >&2
+      usage_reframe >&2
       exit 1
     fi
     reframe_message="${reframe_parts[*]}"
@@ -2581,6 +2619,10 @@ case "$cmd" in
     ;;
 
   checkpoint)
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+      usage_checkpoint
+      exit 0
+    fi
     ensure_session
     maybe_id=""
     checkpoint_json_mode=0
@@ -2595,7 +2637,7 @@ case "$cmd" in
             maybe_id="$1"
             shift
           else
-            echo "用法: peer checkpoint [<id>] [--json]" >&2
+            usage_checkpoint >&2
             exit 1
           fi
           ;;

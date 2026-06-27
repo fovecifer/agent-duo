@@ -22,6 +22,9 @@ assert_ok "help: gate noun" run_peer gate --help
 assert_ok "help: budget noun" run_peer budget --help
 assert_ok "help: task noun" run_peer task --help
 assert_ok "help: report noun" run_peer report --help
+assert_ok "help: ask steering" run_peer ask --help
+assert_ok "help: checkpoint steering" run_peer checkpoint --help
+assert_ok "help: reframe steering" run_peer reframe --help
 teardown
 
 # 旧命令面 fail-closed,并提示新命令。
