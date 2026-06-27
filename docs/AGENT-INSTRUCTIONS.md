@@ -1,3 +1,4 @@
+<!-- agent-duo:start -->
 ## 与另一个编码 Agent 协作
 
 本机的同一个 tmux 会话中还运行着另一个交互式编码 Agent(Claude Code 或 Codex)。
@@ -59,6 +60,9 @@
 4. 不要与对方进入无人监督的自动循环对话;每轮交互都应源自用户的指令。
 5. 如果对方处于权限确认/弹窗状态(peek 可以看出来),如实告知用户,由用户决定,
    不要替用户按下确认键。
+6. **跑 loop / 接 mission**:当用户给你一份 mission(见 `docs/mission-template.md`)或要你把一个目标
+   「跑成 loop」时,先读 `docs/SUPERVISOR-LOOP-PLAYBOOK.md` 并严格按它执行;peer 命令对用户隐身,
+   只在人类 gate 与最终合门时回来找人。
 
 ### 术语与消歧(重要)
 
@@ -80,3 +84,4 @@
    完全不同——前者是 agent-duo 工作台的一等成员,后者是临时零工。
 
 安全边界：Approval Broker 只覆盖由 `peer agent add` / `agent-duo-start --with` 注册的交互式 worker pane。当前验证下不要假设无头 `codex exec` 会触发 agent-duo 的 hook；如果任务需要 broker 保护，应派给可见 peer worker，而不是 spawn 无头 Codex。
+<!-- agent-duo:end -->
