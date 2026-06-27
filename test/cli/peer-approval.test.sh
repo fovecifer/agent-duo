@@ -6,6 +6,52 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 source "$DIR/../lib/harness.sh"
 
+approval_run_hook() {
+  local payload="$1"
+  : > "$OUT"
+  : > "$ERR"
+  (
+    cd "$PROJECT"
+    printf '%s' "$payload" | \
+      AGENT_DUO_ROOT="$PROJECT" \
+      AGENT_DUO_AGENT_ID="worker" \
+      AGENT_DUO_WORKTREE="$PROJECT" \
+      "$ROOT/bin/agent-duo-approval-hook" >"$OUT" 2>"$ERR"
+  )
+}
+
+approval_latest_id() {
+  local f
+  f="$(ls "$PROJECT/.agent-duo/approvals"/*.json | sort | tail -n 1)"
+  basename "$f" .json
+}
+
+# peer approval ls/approve/deny are supervisor-internal actions over approval files.
+setup
+if ! approval_run_hook '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":7}'; then
+  printf 'FAIL peer approval fixture: creates pending request\n'
+  ADK_FAIL=1
+fi
+pending_id="$(approval_latest_id)"
+assert_ok "peer approval ls: lists pending" run_peer approval ls
+assert_contains "peer approval ls: shows id" "$(cat "$OUT")" "$pending_id"
+
+assert_ok "peer approval approve: marks approved" run_peer approval approve "$pending_id"
+assert_contains "peer approval approve: file approved" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"approved"'
+
+assert_ok "hook: approved request allows once" approval_run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":8}'
+assert_contains "hook: approved request decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_contains "hook: approved request consumed" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"consumed"'
+
+assert_ok "hook: creates second pending request" approval_run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":9}'
+deny_id="$(approval_latest_id)"
+assert_ok "peer approval deny: marks denied" run_peer approval deny "$deny_id" --reason "not now"
+assert_contains "peer approval deny: file denied" "$(cat "$PROJECT/.agent-duo/approvals/$deny_id.json")" '"status":"denied"'
+assert_contains "peer approval deny: reason recorded" "$(cat "$PROJECT/.agent-duo/approvals/$deny_id.json")" 'not now'
+teardown
+
 # broker-status:无 marker 时报 unverified。
 setup
 assert_ok "broker-status: succeeds" run_peer approval status worker
@@ -114,6 +160,27 @@ setup
 printf '%%1\tsupervisor\tsupervisor\tclaude\n%%2\tworker\tworker\tcodex\n%%4\tloopd\tdaemon\tclaude\n' > "$TMUX_STUB_REGISTRY"
 assert_ok "gate: daemon/loopd target not gated" run_peer tell loopd "tick"
 assert_eq "gate: loopd buffer written" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2loopd")" "tick"
+teardown
+
+# peer agent add installs per-agent broker session settings and exports hook env into the worker session.
+setup
+printf '%%1\tsupervisor\tsupervisor\tclaude\n' > "$TMUX_STUB_REGISTRY"
+TMUX_STUB_NEW_PANE="%2" assert_ok "peer agent add: installs approval hook settings" \
+  run_peer agent add --provider codex --role worker --id worker
+SETTINGS="$PROJECT/.agent-duo/state/worker/session-settings.json"
+assert_ok "peer agent add: settings file exists" test -f "$SETTINGS"
+assert_contains "peer agent add: settings contains hook" "$(cat "$SETTINGS")" 'PreToolUse'
+assert_contains "peer agent add: settings contains permission hook" "$(cat "$SETTINGS")" 'PermissionRequest'
+assert_contains "peer agent add: settings contains hook command" "$(cat "$SETTINGS")" 'agent-duo-approval-hook'
+assert_contains "peer agent add: send exports hook" "$(cat "$TMUX_STUB_LOG")" 'AGENT_DUO_APPROVAL_HOOK='
+assert_contains "peer agent add: send exports worker id" "$(cat "$TMUX_STUB_LOG")" 'AGENT_DUO_AGENT_ID=worker'
+assert_contains "peer agent add: codex send has hook config" "$(cat "$TMUX_STUB_LOG")" 'hooks.PreToolUse'
+assert_contains "peer agent add: codex send has permission hook config" "$(cat "$TMUX_STUB_LOG")" 'hooks.PermissionRequest'
+
+TMUX_STUB_NEW_PANE="%3" assert_ok "peer agent add claude: loads approval settings" \
+  run_peer agent add --provider claude --role reviewer --id reviewer
+assert_contains "peer agent add claude: send has --settings" "$(cat "$TMUX_STUB_LOG")" '--settings'
+assert_contains "peer agent add claude: send has reviewer settings path" "$(cat "$TMUX_STUB_LOG")" '.agent-duo/state/reviewer/session-settings.json'
 teardown
 
 exit "$ADK_FAIL"

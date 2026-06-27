@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test/approval.test.sh — Approval Broker MVP1 hook + peer command tests.
+# test/unit/broker.test.sh — Approval Broker hook and policy tests.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,28 +181,6 @@ assert_ok "hook: bash unknown escalates" run_hook \
 assert_contains "hook: pending reason" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
 pending_id="$(latest_approval_id)"
 assert_contains "hook: pending file status" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"pending"'
-
-# peer approval ls/approve/deny are supervisor-internal actions over approval files.
-assert_ok "peer approval ls: lists pending" \
-  env AGENT_NAME=supervisor AGENT_DUO_ROOT="$PROJECT" "$ROOT/bin/peer" approval ls >"$TMP/approvals.txt"
-assert_contains "peer approval ls: shows id" "$(cat "$TMP/approvals.txt")" "$pending_id"
-
-assert_ok "peer approval approve: marks approved" \
-  env AGENT_NAME=supervisor AGENT_DUO_ROOT="$PROJECT" "$ROOT/bin/peer" approval approve "$pending_id" >"$TMP/approve.txt"
-assert_contains "peer approval approve: file approved" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"approved"'
-
-assert_ok "hook: approved request allows once" run_hook \
-  '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":8}'
-assert_contains "hook: approved request decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
-assert_contains "hook: approved request consumed" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"consumed"'
-
-assert_ok "hook: creates second pending request" run_hook \
-  '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":9}'
-deny_id="$(latest_approval_id)"
-assert_ok "peer approval deny: marks denied" \
-  env AGENT_NAME=supervisor AGENT_DUO_ROOT="$PROJECT" "$ROOT/bin/peer" approval deny "$deny_id" --reason "not now" >"$TMP/deny.txt"
-assert_contains "peer approval deny: file denied" "$(cat "$PROJECT/.agent-duo/approvals/$deny_id.json")" '"status":"denied"'
-assert_contains "peer approval deny: reason recorded" "$(cat "$PROJECT/.agent-duo/approvals/$deny_id.json")" 'not now'
 
 # Edit/Write path policy: worktree writes are allowed; outside writes escalate; secret paths hard-deny.
 inside="$WORKTREE/src/app.txt"
@@ -387,43 +365,5 @@ printf '{"agent":"worker","status":"fail-open","updated_epoch":1000000000}' \
   > "$PROJECT/.agent-duo/state/worker/broker.json"
 FO="$(broker_status)"
 assert_contains "broker: fail-open survives freshness" "$FO" '"status":"fail-open"'
-
-# peer agent add installs per-agent broker session settings and exports hook env into the worker session.
-STUB_BIN="$TMP/stub-bin"
-mkdir -p "$STUB_BIN"
-TMUX_LOG="$TMP/tmux.log"
-TMUX_STUB_LOG="$TMUX_LOG"; : > "$TMUX_STUB_LOG"
-TMUX_STUB_BUFFER_DIR="$TMP/buffers"; mkdir -p "$TMUX_STUB_BUFFER_DIR"
-TMUX_STUB_CAPTURE_COUNT="$TMP/capture-count"; : > "$TMUX_STUB_CAPTURE_COUNT"
-TMUX_STUB_REGISTRY="$TMP/registry.tsv"
-TMUX_STUB_NEW_PANE="%2"
-printf '%%1\tsupervisor\tsupervisor\tclaude\n' > "$TMUX_STUB_REGISTRY"
-harness_install_tmux_stub
-
-assert_ok "peer agent add: installs approval hook settings" \
-  env PATH="$STUB_BIN:$PATH" AGENT_NAME=supervisor TMUX_PANE=%1 AGENT_SESSION=agents \
-    TMUX_STUB_LOG="$TMUX_STUB_LOG" TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
-    TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
-    TMUX_STUB_NEW_PANE="$TMUX_STUB_NEW_PANE" AGENT_DUO_ROOT="$PROJECT" \
-    "$ROOT/bin/peer" agent add --provider codex --role worker --id worker >"$TMP/add.txt"
-SETTINGS="$PROJECT/.agent-duo/state/worker/session-settings.json"
-assert_ok "peer agent add: settings file exists" test -f "$SETTINGS"
-assert_contains "peer agent add: settings contains hook" "$(cat "$SETTINGS")" 'PreToolUse'
-assert_contains "peer agent add: settings contains permission hook" "$(cat "$SETTINGS")" 'PermissionRequest'
-assert_contains "peer agent add: settings contains hook command" "$(cat "$SETTINGS")" 'agent-duo-approval-hook'
-assert_contains "peer agent add: send exports hook" "$(cat "$TMUX_LOG")" 'AGENT_DUO_APPROVAL_HOOK='
-assert_contains "peer agent add: send exports worker id" "$(cat "$TMUX_LOG")" 'AGENT_DUO_AGENT_ID=worker'
-assert_contains "peer agent add: codex send has hook config" "$(cat "$TMUX_LOG")" 'hooks.PreToolUse'
-assert_contains "peer agent add: codex send has permission hook config" "$(cat "$TMUX_LOG")" 'hooks.PermissionRequest'
-
-: > "$TMUX_LOG"
-assert_ok "peer agent add claude: loads approval settings" \
-  env PATH="$STUB_BIN:$PATH" AGENT_NAME=supervisor TMUX_PANE=%1 AGENT_SESSION=agents \
-    TMUX_STUB_LOG="$TMUX_STUB_LOG" TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
-    TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
-    TMUX_STUB_NEW_PANE="$TMUX_STUB_NEW_PANE" AGENT_DUO_ROOT="$PROJECT" \
-    "$ROOT/bin/peer" agent add --provider claude --role reviewer --id reviewer >"$TMP/add-claude.txt"
-assert_contains "peer agent add claude: send has --settings" "$(cat "$TMUX_LOG")" '--settings'
-assert_contains "peer agent add claude: send has reviewer settings path" "$(cat "$TMUX_LOG")" '.agent-duo/state/reviewer/session-settings.json'
 
 exit "$ADK_FAIL"
