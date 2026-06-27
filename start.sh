@@ -263,7 +263,7 @@ write_supervisor_session_settings() { # <root>
 }
 
 toml_string() { # <value>
-  jq -Rn --arg s "$1" '$s | @json'
+  jq -Rn -r --arg s "$1" '$s | @json'
 }
 
 codex_hook_config() { # <event> <command> [matcher]

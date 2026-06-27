@@ -202,6 +202,7 @@ assert_contains     "G: codex supervisor gets settings env" "$(cat "$SENDLOG")" 
 assert_contains     "G: codex supervisor has user hook config" "$(cat "$SENDLOG")" 'hooks.UserPromptSubmit'
 assert_contains     "G: codex supervisor has stop hook config" "$(cat "$SENDLOG")" 'hooks.Stop'
 assert_contains     "G: codex supervisor hook uses absolute bash" "$(cat "$SENDLOG")" '/bin/bash'
+assert_not_contains "G: codex supervisor hook command is not double-encoded" "$(cat "$SENDLOG")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains     "G: creates loopd window"            "$(cat "$SENDLOG")" "$tmux_new_window -t agents -n loopd"
 assert_contains     "G: launches loopd"                  "$(cat "$SENDLOG")" 'peer loopd'
 teardown
@@ -224,6 +225,7 @@ assert_contains  "H: worker exports approval hook" "$(cat "$SENDLOG")" 'AGENT_DU
 assert_contains  "H: worker settings hook uses absolute bash" "$(cat "$PROJECT/.agent-duo/state/worker/session-settings.json")" '/bin/bash'
 assert_contains  "H: codex worker has pretool hook config" "$(cat "$SENDLOG")" 'hooks.PreToolUse'
 assert_contains  "H: codex worker has permission hook config" "$(cat "$SENDLOG")" 'hooks.PermissionRequest'
+assert_not_contains "H: codex worker hook command is not double-encoded" "$(cat "$SENDLOG")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains  "H: prints approval check hint for new worker" "$(cat "$SCENARIO_TMP/out.txt")" 'peer approval check worker'
 teardown
 

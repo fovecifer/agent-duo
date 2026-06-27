@@ -500,7 +500,7 @@ event_type_for_report() { # <report_type> <status>
 }
 
 toml_string() { # <value>
-  jq -Rn --arg s "$1" '$s | @json'
+  jq -Rn -r --arg s "$1" '$s | @json'
 }
 
 codex_hook_config() { # <event> <command> [matcher]

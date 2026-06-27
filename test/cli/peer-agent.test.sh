@@ -32,6 +32,7 @@ assert_contains "add: tags id"       "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t
 assert_contains "add: tags role"     "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_role worker'
 assert_contains "add: tags provider" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_provider codex'
 assert_contains "add: launches codex" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %5'
+assert_not_contains "add: codex hook command is not double-encoded" "$(cat "$TMUX_STUB_LOG")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains "add: prints id" "$(cat "$OUT")" 'helper'
 teardown
 
