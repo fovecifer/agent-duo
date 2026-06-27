@@ -20,8 +20,8 @@
 #   AGENT_DUO_E2E_CODEX=1 bash test/codex-permreq-e2e.test.sh
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/assert.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/assert.sh"
 
 skip() { printf 'skip %s: %s\n' "codex-permreq-e2e" "$1"; exit 0; }
 

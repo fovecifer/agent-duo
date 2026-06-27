@@ -3,8 +3,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/harness.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/harness.sh"
 setup() { loop_setup; }
 
 write_event() { # <id> <agent> <type> <round> <summary> <ref>

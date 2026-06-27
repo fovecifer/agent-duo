@@ -11,8 +11,8 @@
 # 缺 codex / tmux / ~/.codex/auth.json 时自动跳过,保持 `test/run.sh` 在任何机器上绿。
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/assert.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/assert.sh"
 
 skip() { printf 'skip %s: %s\n' "codex-hook-e2e" "$1"; exit 0; }
 

@@ -276,6 +276,10 @@ harness_write_registry() {
   printf '%s\n' "$@" > "$TMUX_STUB_REGISTRY"
 }
 
+harness_registry() {
+  harness_write_registry "$@"
+}
+
 cli_setup() {
   harness_tmp
   TMUX_STUB_LOG="$SCENARIO_TMP/tmux.log"; : > "$TMUX_STUB_LOG"
@@ -475,4 +479,8 @@ mark_broker_ready() {
   mkdir -p "$PROJECT/.agent-duo/state/$1"
   printf '{"agent":"%s","status":"ready","updated_epoch":%s,"nonce":"n1"}\n' "$1" "$(date +%s)" \
     > "$PROJECT/.agent-duo/state/$1/broker.json"
+}
+
+harness_broker_ready() {
+  mark_broker_ready "$@"
 }

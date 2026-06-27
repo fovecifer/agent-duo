@@ -2,8 +2,8 @@
 # test/start.test.sh — start.sh 注入接线的集成测试(用 stub 替换 tmux/claude/codex)
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/harness.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/harness.sh"
 setup() { start_setup; }
 
 run_start() { # 在 stub PATH + 指定 stdin/env 下运行 start.sh

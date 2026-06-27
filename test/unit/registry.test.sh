@@ -2,8 +2,8 @@
 # test/registry.test.sh — lib/registry.sh 纯函数单测(不依赖 tmux)
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/harness.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/harness.sh"
 source "$ROOT/lib/registry.sh"
 
 exit_code_helper="assert""_exit_code"

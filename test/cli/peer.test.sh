@@ -3,8 +3,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/harness.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/harness.sh"
 
 # 运行时和安装路径不应再依赖额外 Python 运行时。
 PY_RUNTIME="python""3"

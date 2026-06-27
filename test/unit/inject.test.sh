@@ -2,8 +2,8 @@
 # test/inject.test.sh — lib/inject.sh 的单元测试
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
-source "$DIR/lib/harness.sh"
+ROOT="$(cd "$DIR/../.." && pwd)"
+source "$DIR/../lib/harness.sh"
 source "$ROOT/lib/inject.sh"
 
 TMP="$(make_tmp)"
