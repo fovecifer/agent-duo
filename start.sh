@@ -17,9 +17,32 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+用法:
+  agent-duo-start [工作目录] [--supervisor claude|codex] [--with <provider>:<role>[:isolated]] [-y]
+
+示例:
+  agent-duo-start
+  agent-duo-start --supervisor codex
+  agent-duo-start --with codex:worker
+  agent-duo-start --with codex:worker:isolated
+
+选项:
+  -y, --yes        非交互注入 peer 协作说明
+  -h, --help       显示帮助
+EOF
+}
+
+usage_error() { # <message>
+  printf '错误: %s\n\n' "$1" >&2
+  usage >&2
+  exit 2
+}
+
 SESSION="${AGENT_SESSION:-agents}"
 
-# 解析 -y/--yes、--supervisor <provider>、--with <provider>:<role>[:isolated](其余参数原样保留);
+# 解析 -y/--yes、-h/--help、--supervisor <provider>、--with <provider>:<role>[:isolated](其余参数原样保留);
 # AGENT_DUO_AUTO_INJECT=1 等价于 -y。
 AUTO=0
 [[ "${AGENT_DUO_AUTO_INJECT:-0}" == "1" ]] && AUTO=1
@@ -31,15 +54,35 @@ WITH_ISOLATED=0
 _args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     -y|--yes) AUTO=1; shift ;;
-    --supervisor) SUPERVISOR_PROVIDER="${2:-}"; shift 2 ;;
-    --with) WITH_SPEC="${2:-}"; shift 2 ;;
+    --supervisor)
+      [[ $# -ge 2 && "${2:-}" != --* ]] || usage_error "--supervisor 需要参数 claude 或 codex"
+      SUPERVISOR_PROVIDER="$2"
+      shift 2
+      ;;
+    --with)
+      [[ $# -ge 2 && "${2:-}" != --* ]] || usage_error "--with 需要参数 <provider>:<role>[:isolated]"
+      WITH_SPEC="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        _args+=("$1")
+        shift
+      done
+      ;;
+    -*) usage_error "未知选项 '$1'" ;;
     *) _args+=("$1"); shift ;;
   esac
 done
 set -- ${_args[@]+"${_args[@]}"}
+if [[ "$#" -gt 1 ]]; then
+  usage_error "只能指定一个工作目录"
+fi
 
-WORKDIR="$(cd "${1:-$PWD}" && pwd)"
+WORKDIR="$(cd -- "${1:-$PWD}" && pwd)"
 # 解引用软链接,保证从 ~/.local/bin 调用时也能定位到仓库里的 bin/
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done

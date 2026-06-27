@@ -23,6 +23,76 @@ else
   ADK_FAIL=1
 fi
 
+# 场景 Help:-h/--help 必须在工作目录解析和环境检查前直接返回。
+setup
+PATH="$STUB_BIN:$PATH" bash "$ROOT/start.sh" -h \
+  >"$SCENARIO_TMP/out.txt" 2>&1
+assert_contains "Help: -h prints usage" "$(cat "$SCENARIO_TMP/out.txt")" 'agent-duo-start [工作目录]'
+assert_not_contains "Help: -h does not treat flag as cd target" "$(cat "$SCENARIO_TMP/out.txt")" 'invalid option'
+assert_eq "Help: -h launches no tmux" "$(cat "$SENDLOG")" ""
+teardown
+
+setup
+PATH="$STUB_BIN:$PATH" bash "$ROOT/start.sh" --help \
+  >"$SCENARIO_TMP/out.txt" 2>&1
+assert_contains "Help: --help prints usage" "$(cat "$SCENARIO_TMP/out.txt")" 'agent-duo-start [工作目录]'
+assert_not_contains "Help: --help does not check dependencies" "$(cat "$SCENARIO_TMP/out.txt")" '找不到'
+assert_eq "Help: --help launches no tmux" "$(cat "$SENDLOG")" ""
+teardown
+
+# 场景 Args:基础参数错误必须 fail fast,不能退化成 cd/shift 的 shell 报错。
+setup
+if PATH="$STUB_BIN:$PATH" bash "$ROOT/start.sh" --bogus \
+  >"$SCENARIO_TMP/out.txt" 2>&1; then
+  printf 'FAIL Args: unknown option should fail\n'
+  ADK_FAIL=1
+else
+  printf 'ok   Args: unknown option fails\n'
+fi
+assert_contains "Args: unknown option message" "$(cat "$SCENARIO_TMP/out.txt")" "未知选项 '--bogus'"
+assert_contains "Args: unknown option prints usage" "$(cat "$SCENARIO_TMP/out.txt")" 'agent-duo-start [工作目录]'
+assert_not_contains "Args: unknown option no cd error" "$(cat "$SCENARIO_TMP/out.txt")" 'invalid option'
+assert_eq "Args: unknown option launches no tmux" "$(cat "$SENDLOG")" ""
+teardown
+
+setup
+if PATH="$STUB_BIN:$PATH" bash "$ROOT/start.sh" --supervisor \
+  >"$SCENARIO_TMP/out.txt" 2>&1; then
+  printf 'FAIL Args: missing supervisor value should fail\n'
+  ADK_FAIL=1
+else
+  printf 'ok   Args: missing supervisor value fails\n'
+fi
+assert_contains "Args: missing supervisor message" "$(cat "$SCENARIO_TMP/out.txt")" '--supervisor 需要参数'
+assert_not_contains "Args: missing supervisor no shift error" "$(cat "$SCENARIO_TMP/out.txt")" 'shift'
+assert_eq "Args: missing supervisor launches no tmux" "$(cat "$SENDLOG")" ""
+teardown
+
+setup
+if PATH="$STUB_BIN:$PATH" bash "$ROOT/start.sh" --with \
+  >"$SCENARIO_TMP/out.txt" 2>&1; then
+  printf 'FAIL Args: missing with value should fail\n'
+  ADK_FAIL=1
+else
+  printf 'ok   Args: missing with value fails\n'
+fi
+assert_contains "Args: missing with message" "$(cat "$SCENARIO_TMP/out.txt")" '--with 需要参数'
+assert_not_contains "Args: missing with no shift error" "$(cat "$SCENARIO_TMP/out.txt")" 'shift'
+assert_eq "Args: missing with launches no tmux" "$(cat "$SENDLOG")" ""
+teardown
+
+setup
+if PATH="$STUB_BIN:$PATH" bash "$ROOT/start.sh" "$PROJECT" "$PROJECT/extra" \
+  >"$SCENARIO_TMP/out.txt" 2>&1; then
+  printf 'FAIL Args: extra workdir should fail\n'
+  ADK_FAIL=1
+else
+  printf 'ok   Args: extra workdir fails\n'
+fi
+assert_contains "Args: extra workdir message" "$(cat "$SCENARIO_TMP/out.txt")" '只能指定一个工作目录'
+assert_eq "Args: extra workdir launches no tmux" "$(cat "$SENDLOG")" ""
+teardown
+
 # 场景 A:AUTO_INJECT=1 → 无询问,写块,claude 带 --append-system-prompt
 setup
 AGENT_DUO_AUTO_INJECT=1 run_start </dev/null
