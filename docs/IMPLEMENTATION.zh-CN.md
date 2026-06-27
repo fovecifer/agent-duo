@@ -260,7 +260,8 @@ agent-duo/<id>
 
 ## 6. peer 命令入口
 
-[bin/peer](../bin/peer) 负责所有用户命令。文件顶部的 `static_preflight_dispatch` 在加载运行逻辑前处理：
+[bin/peer](../bin/peer) 负责所有 `peer` 命令。普通用户推荐通过 supervisor 的自然语言 mission 入口触发编排；
+`peer` 是 supervisor 和维护者使用的控制面。文件顶部的 `static_preflight_dispatch` 在加载运行逻辑前处理：
 
 - `--help`
 - 子命令 help
@@ -1116,7 +1117,7 @@ bash test/run.sh cli integration
 目录分层：
 
 - `test/lib/`：`assert.sh` 与 `harness.sh`，包含唯一 tmux stub 实现。
-- `test/unit/`：`loop`、`broker`、`registry`、`inject`，不依赖真实 tmux。
+- `test/unit/`：`loop`、`broker`、`registry`、`inject`、`docs`，不依赖真实 tmux。
 - `test/cli/`：`peer-*.test.sh`，按 noun 拆分 `peer` 命令面，只 stub tmux。
 - `test/integration/`：`supervisor-loop`、`journey-supervisor-loop`、`start`，串起 `peer`、`loopd` 和共享 lib。
 - `test/e2e/`：`codex-hook`、`codex-permreq`、`journey-codex`，默认能力探测后 skip。

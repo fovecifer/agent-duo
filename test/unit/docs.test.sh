@@ -50,4 +50,9 @@ assert_contains "docs instructions: playbook pointer" "$instructions" 'docs/SUPE
 assert_contains "docs instructions: current agent noun" "$instructions" 'peer agent add'
 assert_contains "docs instructions: current approval noun" "$instructions" 'peer approval check'
 
+root_instructions="$(read_file AGENTS.md)"
+assert_contains "docs root instructions: playbook pointer" "$root_instructions" 'docs/SUPERVISOR-LOOP-PLAYBOOK.md'
+assert_contains "docs root instructions: current agent noun" "$root_instructions" 'peer agent add'
+assert_contains "docs root instructions: current approval noun" "$root_instructions" 'peer approval check'
+
 exit "$ADK_FAIL"
