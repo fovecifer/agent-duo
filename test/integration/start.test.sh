@@ -98,10 +98,10 @@ setup
 AGENT_DUO_AUTO_INJECT=1 run_start </dev/null
 assert_ok        "A: AGENTS.md created" test -f "$PROJECT/AGENTS.md"
 assert_contains  "A: block written"     "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
-assert_contains  "A: claude got flag"   "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" '--append-system-prompt'
+assert_contains  "A: claude got flag"   "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--append-system-prompt'
 assert_ok        "A: supervisor settings created" test -f "$PROJECT/.agent-duo/state/supervisor/session-settings.json"
 assert_contains  "A: supervisor settings has Stop hook" "$(cat "$PROJECT/.agent-duo/state/supervisor/session-settings.json")" 'supervisor-stop-drain-hook'
-assert_contains  "A: claude loads settings" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" '--settings'
+assert_contains  "A: claude loads settings" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--settings'
 teardown
 
 # 场景 B:已有块 → 友好提示,不重复块,claude 仍带参数
@@ -111,14 +111,14 @@ run_start </dev/null
 cnt="$(grep -cF '<!-- agent-duo:start -->' "$PROJECT/AGENTS.md")"
 assert_eq        "B: no duplicate block" "$cnt" "1"
 assert_contains  "B: friendly notice"    "$(cat "$SCENARIO_TMP/out.txt")" '已就绪'
-assert_contains  "B: claude got flag"    "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" '--append-system-prompt'
+assert_contains  "B: claude got flag"    "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--append-system-prompt'
 teardown
 
 # 场景 C:非交互(无 TTY)、无 AUTO → 跳过注入,裸 claude,打印手动说明
 setup
 run_start </dev/null
 assert_ok        "C: no AGENTS.md written" test ! -f "$PROJECT/AGENTS.md"
-assert_not_contains "C: claude is plain" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" '--append-system-prompt'
+assert_not_contains "C: claude is plain" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--append-system-prompt'
 assert_contains  "C: prints manual hint" "$(cat "$SCENARIO_TMP/out.txt")" 'AGENT_DUO_AUTO_INJECT'
 teardown
 
@@ -129,7 +129,7 @@ PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest bash "$ROOT/start.sh" "$PROJECT" -y
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_ok        "D: AGENTS.md created (-y)" test -f "$PROJECT/AGENTS.md"
 assert_contains  "D: block written (-y)"    "$(cat "$PROJECT/AGENTS.md")" '<!-- agent-duo:start -->'
-assert_contains  "D: claude got flag (-y)"  "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" '--append-system-prompt'
+assert_contains  "D: claude got flag (-y)"  "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--append-system-prompt'
 teardown
 
 # 场景 E:缺少 claude/codex 预检失败,且不创建 tmux pane。
@@ -183,15 +183,14 @@ PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
 assert_contains     "F: single supervisor window"   "$(cat "$SENDLOG")" 'new-session -d -s agents -n supervisor'
 assert_contains     "F: tags supervisor id"          "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_id supervisor'
 assert_contains     "F: tags supervisor provider"    "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
-assert_contains     "F: loads supervisor launch"     "$(cat "$SENDLOG")" 'load-buffer -b agent-duo-start-supervisor -'
-assert_contains     "F: pastes supervisor launch"    "$(cat "$SENDLOG")" 'paste-buffer -b agent-duo-start-supervisor -t %1 -d -p'
-assert_contains     "F: launches claude"             "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'claude'
-assert_contains     "F: supervisor exports agent id" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'AGENT_DUO_AGENT_ID=supervisor'
+assert_contains     "F: supervisor launches via script" "$(cat "$SENDLOG")" '.agent-duo/state/supervisor/launch.sh'
+assert_contains     "F: launches claude"             "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'claude'
+assert_contains     "F: supervisor exports agent id" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'AGENT_DUO_AGENT_ID=supervisor'
 assert_contains     "F: creates loopd window"         "$(cat "$SENDLOG")" "$tmux_new_window -t agents -n loopd"
 assert_contains     "F: tags loopd id"                "$(cat "$SENDLOG")" '@agent_id loopd'
 assert_contains     "F: tags loopd role"              "$(cat "$SENDLOG")" '@agent_role daemon'
-assert_contains     "F: loopd exports agent id"       "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-loopd")" 'AGENT_DUO_AGENT_ID=loopd'
-assert_contains     "F: launches loopd"               "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-loopd")" 'peer loopd'
+assert_contains     "F: loopd exports agent id"       "$(cat "$PROJECT/.agent-duo/state/loopd/launch.sh")" 'AGENT_DUO_AGENT_ID=loopd'
+assert_contains     "F: launches loopd"               "$(cat "$PROJECT/.agent-duo/state/loopd/launch.sh")" 'peer loopd'
 teardown
 
 # 场景 G:--supervisor codex → supervisor provider 为 codex,且仍启动 loopd。
@@ -201,17 +200,17 @@ PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
   bash "$ROOT/start.sh" "$PROJECT" --supervisor codex \
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_contains     "G: tags supervisor provider codex" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider codex'
-assert_contains     "G: launches codex"                 "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'codex '
-assert_contains     "G: codex supervisor exports agent id" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'AGENT_DUO_AGENT_ID=supervisor'
-assert_contains     "G: codex supervisor inherits shell env" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'shell_environment_policy.inherit=all'
-assert_contains     "G: codex supervisor pins tool PATH" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'shell_environment_policy.set.PATH'
-assert_contains     "G: codex supervisor gets settings env" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'AGENT_DUO_SUPERVISOR_SETTINGS='
-assert_contains     "G: codex supervisor has user hook config" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'hooks.UserPromptSubmit'
-assert_contains     "G: codex supervisor has stop hook config" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'hooks.Stop'
-assert_contains     "G: codex supervisor hook uses absolute bash" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" '/bin/bash'
-assert_not_contains "G: codex supervisor hook command is not double-encoded" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-supervisor")" 'command=\"\\\"AGENT_DUO_ROOT'
+assert_contains     "G: launches codex"                 "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'codex '
+assert_contains     "G: codex supervisor exports agent id" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'AGENT_DUO_AGENT_ID=supervisor'
+assert_contains     "G: codex supervisor inherits shell env" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'shell_environment_policy.inherit=all'
+assert_contains     "G: codex supervisor pins tool PATH" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'shell_environment_policy.set.PATH'
+assert_contains     "G: codex supervisor gets settings env" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'AGENT_DUO_SUPERVISOR_SETTINGS='
+assert_contains     "G: codex supervisor has user hook config" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'hooks.UserPromptSubmit'
+assert_contains     "G: codex supervisor has stop hook config" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'hooks.Stop'
+assert_contains     "G: codex supervisor hook uses absolute bash" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '/bin/bash'
+assert_not_contains "G: codex supervisor hook command is not double-encoded" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains     "G: creates loopd window"            "$(cat "$SENDLOG")" "$tmux_new_window -t agents -n loopd"
-assert_contains     "G: launches loopd"                  "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-loopd")" 'peer loopd'
+assert_contains     "G: launches loopd"                  "$(cat "$PROJECT/.agent-duo/state/loopd/launch.sh")" 'peer loopd'
 teardown
 
 # 场景 H:--with codex:worker → loopd 之外额外创建一个 worker 窗口,打 @agent_* 标签,启动 codex。
@@ -221,22 +220,22 @@ PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_contains  "H: supervisor still claude" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
 assert_contains  "H: creates loopd window"    "$(cat "$SENDLOG")" "$tmux_new_window -t adktest -n loopd"
-assert_contains  "H: launches loopd"          "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-loopd")" 'peer loopd'
+assert_contains  "H: launches loopd"          "$(cat "$PROJECT/.agent-duo/state/loopd/launch.sh")" 'peer loopd'
 assert_contains  "H: creates worker window"   "$(cat "$SENDLOG")" "$tmux_new_window -t adktest -n worker"
 assert_contains  "H: tags worker id"          "$(cat "$SENDLOG")" '@agent_id worker'
 assert_contains  "H: tags worker provider"    "$(cat "$SENDLOG")" '@agent_provider codex'
-assert_contains  "H: launches worker"         "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'codex '
-assert_contains  "H: worker exports role"     "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_AGENT_ROLE=worker'
-assert_contains  "H: worker exports provider" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_AGENT_PROVIDER=codex'
-assert_contains  "H: codex worker inherits shell env" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'shell_environment_policy.inherit=all'
-assert_contains  "H: codex worker pins tool PATH" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'shell_environment_policy.set.PATH'
+assert_contains  "H: launches worker"         "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'codex '
+assert_contains  "H: worker exports role"     "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_AGENT_ROLE=worker'
+assert_contains  "H: worker exports provider" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_AGENT_PROVIDER=codex'
+assert_contains  "H: codex worker inherits shell env" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.inherit=all'
+assert_contains  "H: codex worker pins tool PATH" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.set.PATH'
 assert_ok        "H: worker settings created" test -f "$PROJECT/.agent-duo/state/worker/session-settings.json"
-assert_contains  "H: worker exports approval settings" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_APPROVAL_SETTINGS='
-assert_contains  "H: worker exports approval hook" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_APPROVAL_HOOK='
+assert_contains  "H: worker exports approval settings" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_APPROVAL_SETTINGS='
+assert_contains  "H: worker exports approval hook" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_APPROVAL_HOOK='
 assert_contains  "H: worker settings hook uses absolute bash" "$(cat "$PROJECT/.agent-duo/state/worker/session-settings.json")" '/bin/bash'
-assert_contains  "H: codex worker has pretool hook config" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'hooks.PreToolUse'
-assert_contains  "H: codex worker has permission hook config" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'hooks.PermissionRequest'
-assert_not_contains "H: codex worker hook command is not double-encoded" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'command=\"\\\"AGENT_DUO_ROOT'
+assert_contains  "H: codex worker has pretool hook config" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'hooks.PreToolUse'
+assert_contains  "H: codex worker has permission hook config" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'hooks.PermissionRequest'
+assert_not_contains "H: codex worker hook command is not double-encoded" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains  "H: prints approval check hint for new worker" "$(cat "$SCENARIO_TMP/out.txt")" 'peer approval check worker'
 teardown
 
@@ -253,8 +252,8 @@ assert_ok        "H-iso: worktree exists" test -d "$wt_path"
 assert_contains  "H-iso: branch recorded" "$(cat "$record")" '"branch":"agent-duo/worker"'
 assert_contains  "H-iso: worker window cwd" "$(cat "$SENDLOG")" "$tmux_new_window -t adktest -n worker -c $wt_path"
 assert_contains  "H-iso: pane worktree option" "$(cat "$SENDLOG")" "@agent_worktree $wt_path"
-assert_contains  "H-iso: root stays main" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" "AGENT_DUO_ROOT=$PROJECT"
-assert_contains  "H-iso: worker worktree env" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" "AGENT_DUO_WORKTREE=$wt_path"
+assert_contains  "H-iso: root stays main" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" "AGENT_DUO_ROOT=$PROJECT"
+assert_contains  "H-iso: worker worktree env" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" "AGENT_DUO_WORKTREE=$wt_path"
 assert_contains  "H-iso: broker scoped to worktree" "$(cat "$PROJECT/.agent-duo/state/worker/session-settings.json")" "\"worktree\":\"$wt_path\""
 teardown
 
@@ -279,8 +278,8 @@ PATH="$STUB_BIN:$PATH" AGENT_SESSION=adktest AGENT_DUO_AUTO_INJECT=1 \
   bash "$ROOT/start.sh" "$PROJECT" --with claude:reviewer \
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_ok        "I: reviewer settings created" test -f "$PROJECT/.agent-duo/state/reviewer/session-settings.json"
-assert_contains  "I: reviewer loads settings" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-reviewer")" '--settings'
-assert_contains  "I: reviewer settings path" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-reviewer")" '.agent-duo/state/reviewer/session-settings.json'
+assert_contains  "I: reviewer loads settings" "$(cat "$PROJECT/.agent-duo/state/reviewer/launch.sh")" '--settings'
+assert_contains  "I: reviewer settings path" "$(cat "$PROJECT/.agent-duo/state/reviewer/launch.sh")" '.agent-duo/state/reviewer/session-settings.json'
 teardown
 
 # 说明:prompt 分支(无块 + 无 AUTO + 有 TTY)需要伪终端才能驱动,本无依赖测试框架无法模拟;

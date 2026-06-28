@@ -238,14 +238,29 @@ shell_quote() {
   printf '%q' "$1"
 }
 
-start_pane_command() { # <pane> <buffer-name> <command>
-  local pane="$1" buf="$2" command="$3"
-  printf '%s' "$command" | tmux load-buffer -b "$buf" -
-  # Long provider launch lines contain nested TOML/shell quoting. Paste them as
-  # one bracketed block so tmux does not truncate or reinterpret them as keys.
-  tmux paste-buffer -b "$buf" -t "$pane" -d -p
-  sleep 0.5
-  tmux send-keys -t "$pane" Enter
+write_launch_script() { # <root> <agent-id> <body>
+  local root="$1" agent_id="$2" body="$3" dir path tmp
+  dir="$root/.agent-duo/state/$agent_id"
+  path="$dir/launch.sh"
+  mkdir -p "$dir"
+  tmp="$path.$$"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -uo pipefail\n'
+    printf '%s\n' "$body"
+    cat <<'EOF'
+status=$?
+printf '\n[agent-duo] launch exited with status %s\n' "$status" >&2
+exec "${SHELL:-/bin/zsh}" -l
+EOF
+  } > "$tmp"
+  chmod +x "$tmp"
+  mv -f "$tmp" "$path"
+  printf '%s' "$path"
+}
+
+launch_script_command() { # <script-path>
+  printf '/bin/bash %q' "$1"
 }
 
 write_supervisor_session_settings() { # <root>
@@ -301,31 +316,31 @@ SUP_SETTINGS_Q="$(shell_quote "$SUP_SETTINGS")"
 SUP_USER_CMD="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$SUP_SETTINGS")"
 SUP_STOP_CMD="$(jq -r '.hooks.Stop[0].hooks[0].command' "$SUP_SETTINGS")"
 
-# 单 supervisor 窗口(默认 claude,可用 --supervisor 指定 codex)。
-# 身份主路径走 tmux per-pane 用户选项 @agent_*;同时注入 AGENT_DUO_AGENT_ID,
-# 兜底 Codex/Claude 工具子进程丢失 TMUX_PANE 的场景。
-SUP_PANE="$(tmux new-session -d -s "$SESSION" -n supervisor -c "$WORKDIR" -P -F '#{pane_id}')"
-tmux set-option -p -t "$SUP_PANE" @agent_id supervisor
-tmux set-option -p -t "$SUP_PANE" @agent_role supervisor
-tmux set-option -p -t "$SUP_PANE" @agent_provider "$SUPERVISOR_PROVIDER"
-
 if [[ "$SUPERVISOR_PROVIDER" == "claude" ]]; then
   SUP_LAUNCH="$CLAUDE_LAUNCH --settings $SUP_SETTINGS_Q"
 else
   SUP_LAUNCH="codex $(codex_shell_env_args "$BIN_DIR") -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
 fi
-start_pane_command "$SUP_PANE" "agent-duo-start-supervisor" \
-  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=supervisor AGENT_DUO_AGENT_ROLE=supervisor AGENT_DUO_AGENT_PROVIDER=$SUPERVISOR_PROVIDER AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH"
+SUP_LAUNCH_SCRIPT="$(write_launch_script "$WORKDIR" supervisor \
+  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=supervisor AGENT_DUO_AGENT_ROLE=supervisor AGENT_DUO_AGENT_PROVIDER=$SUPERVISOR_PROVIDER AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH")"
+
+# 单 supervisor 窗口(默认 claude,可用 --supervisor 指定 codex)。
+# 身份主路径走 tmux per-pane 用户选项 @agent_*;同时注入 AGENT_DUO_AGENT_ID,
+# 兜底 Codex/Claude 工具子进程丢失 TMUX_PANE 的场景。
+SUP_PANE="$(tmux new-session -d -s "$SESSION" -n supervisor -c "$WORKDIR" -P -F '#{pane_id}' "$(launch_script_command "$SUP_LAUNCH_SCRIPT")")"
+tmux set-option -p -t "$SUP_PANE" @agent_id supervisor
+tmux set-option -p -t "$SUP_PANE" @agent_role supervisor
+tmux set-option -p -t "$SUP_PANE" @agent_provider "$SUPERVISOR_PROVIDER"
 
 # loopd 是可见 pane:负责 cursor 投递、liveness/tick 与看板。
-LOOPD_PANE="$(tmux new-window -t "$SESSION" -n loopd -c "$WORKDIR" -P -F '#{pane_id}')"
+LOOPD_LAUNCH_SCRIPT="$(write_launch_script "$WORKDIR" loopd \
+  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=loopd AGENT_DUO_AGENT_ROLE=daemon AGENT_DUO_AGENT_PROVIDER=bash PATH=$BIN_DIR_Q:\$PATH; peer loopd")"
+LOOPD_PANE="$(tmux new-window -t "$SESSION" -n loopd -c "$WORKDIR" -P -F '#{pane_id}' "$(launch_script_command "$LOOPD_LAUNCH_SCRIPT")")"
 tmux set-option -p -t "$LOOPD_PANE" @agent_id loopd
 tmux set-option -p -t "$LOOPD_PANE" @agent_role daemon
 tmux set-option -p -t "$LOOPD_PANE" @agent_provider bash
 mkdir -p "$WORKDIR/.agent-duo/state"
 date +%s > "$WORKDIR/.agent-duo/state/daemon.expected"
-start_pane_command "$LOOPD_PANE" "agent-duo-start-loopd" \
-  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=loopd AGENT_DUO_AGENT_ROLE=daemon AGENT_DUO_AGENT_PROVIDER=bash PATH=$BIN_DIR_Q:\$PATH; peer loopd"
 
 # --with <provider>:<role> → 立即再起一个 worker(等价 peer agent add)。
 if [[ -n "$WITH_SPEC" ]]; then
@@ -337,13 +352,6 @@ if [[ -n "$WITH_SPEC" ]]; then
     reg_write_worktree_record "$WORKDIR" "$W_ROLE" "$W_WORKDIR" "$(reg_worktree_branch "$W_ROLE")"
   fi
   W_WORKDIR_Q="$(shell_quote "$W_WORKDIR")"
-  W_PANE="$(tmux new-window -t "$SESSION" -n "$W_ROLE" -c "$W_WORKDIR" -P -F '#{pane_id}')"
-  tmux set-option -p -t "$W_PANE" @agent_id "$W_ROLE"
-  tmux set-option -p -t "$W_PANE" @agent_role "$W_ROLE"
-  tmux set-option -p -t "$W_PANE" @agent_provider "$W_PROVIDER"
-  if [[ "$WITH_ISOLATED" == "1" ]]; then
-    tmux set-option -p -t "$W_PANE" @agent_worktree "$W_WORKDIR"
-  fi
   W_SETTINGS="$(/bin/bash "$APPROVAL_BROKER" install \
     --agent-id "$W_ROLE" \
     --provider "$W_PROVIDER" \
@@ -362,8 +370,15 @@ if [[ -n "$WITH_SPEC" ]]; then
   W_ID_Q="$(shell_quote "$W_ROLE")"
   APPROVAL_HOOK_Q="$(shell_quote "$APPROVAL_HOOK")"
   W_SETTINGS_Q="$(shell_quote "$W_SETTINGS")"
-  start_pane_command "$W_PANE" "agent-duo-start-$W_ROLE" \
-    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_AGENT_ROLE=$W_ID_Q AGENT_DUO_AGENT_PROVIDER=$W_PROVIDER AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH"
+  W_LAUNCH_SCRIPT="$(write_launch_script "$WORKDIR" "$W_ROLE" \
+    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_AGENT_ROLE=$W_ID_Q AGENT_DUO_AGENT_PROVIDER=$W_PROVIDER AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH")"
+  W_PANE="$(tmux new-window -t "$SESSION" -n "$W_ROLE" -c "$W_WORKDIR" -P -F '#{pane_id}' "$(launch_script_command "$W_LAUNCH_SCRIPT")")"
+  tmux set-option -p -t "$W_PANE" @agent_id "$W_ROLE"
+  tmux set-option -p -t "$W_PANE" @agent_role "$W_ROLE"
+  tmux set-option -p -t "$W_PANE" @agent_provider "$W_PROVIDER"
+  if [[ "$WITH_ISOLATED" == "1" ]]; then
+    tmux set-option -p -t "$W_PANE" @agent_worktree "$W_WORKDIR"
+  fi
   # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效(等价 peer agent add)。
   # 必须覆盖同一 workdir 旧 session 可能残留的 fresh ready marker,否则硬门会误放行未信任的新 worker。
   /bin/bash "$APPROVAL_BROKER" mark --agent-id "$W_ROLE" --status unverified --root "$WORKDIR" >/dev/null 2>&1 || true

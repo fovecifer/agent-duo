@@ -180,21 +180,20 @@ assert_ok "peer agent add: settings file exists" test -f "$SETTINGS"
 assert_contains "peer agent add: settings contains hook" "$(cat "$SETTINGS")" 'PreToolUse'
 assert_contains "peer agent add: settings contains permission hook" "$(cat "$SETTINGS")" 'PermissionRequest'
 assert_contains "peer agent add: settings contains hook command" "$(cat "$SETTINGS")" 'agent-duo-approval-hook'
-assert_contains "peer agent add: launch loaded through buffer" "$(cat "$TMUX_STUB_LOG")" 'load-buffer -b agent-duo-start-worker -'
-assert_contains "peer agent add: launch pasted" "$(cat "$TMUX_STUB_LOG")" 'paste-buffer -b agent-duo-start-worker -t %2 -d -p'
-assert_contains "peer agent add: send exports hook" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_APPROVAL_HOOK='
-assert_contains "peer agent add: send exports worker id" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_AGENT_ID=worker'
-assert_contains "peer agent add: send exports worker role" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_AGENT_ROLE=worker'
-assert_contains "peer agent add: send exports worker provider" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'AGENT_DUO_AGENT_PROVIDER=codex'
-assert_contains "peer agent add: codex inherits shell env" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'shell_environment_policy.inherit=all'
-assert_contains "peer agent add: codex pins tool PATH" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'shell_environment_policy.set.PATH'
-assert_contains "peer agent add: codex send has hook config" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'hooks.PreToolUse'
-assert_contains "peer agent add: codex send has permission hook config" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-worker")" 'hooks.PermissionRequest'
+assert_contains "peer agent add: launch script used" "$(cat "$TMUX_STUB_LOG")" '.agent-duo/state/worker/launch.sh'
+assert_contains "peer agent add: send exports hook" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_APPROVAL_HOOK='
+assert_contains "peer agent add: send exports worker id" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_AGENT_ID=worker'
+assert_contains "peer agent add: send exports worker role" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_AGENT_ROLE=worker'
+assert_contains "peer agent add: send exports worker provider" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_AGENT_PROVIDER=codex'
+assert_contains "peer agent add: codex inherits shell env" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.inherit=all'
+assert_contains "peer agent add: codex pins tool PATH" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.set.PATH'
+assert_contains "peer agent add: codex send has hook config" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'hooks.PreToolUse'
+assert_contains "peer agent add: codex send has permission hook config" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'hooks.PermissionRequest'
 
 TMUX_STUB_NEW_PANE="%3" assert_ok "peer agent add claude: loads approval settings" \
   run_peer agent add --provider claude --role reviewer --id reviewer
-assert_contains "peer agent add claude: send has --settings" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-reviewer")" '--settings'
-assert_contains "peer agent add claude: send has reviewer settings path" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-reviewer")" '.agent-duo/state/reviewer/session-settings.json'
+assert_contains "peer agent add claude: send has --settings" "$(cat "$PROJECT/.agent-duo/state/reviewer/launch.sh")" '--settings'
+assert_contains "peer agent add claude: send has reviewer settings path" "$(cat "$PROJECT/.agent-duo/state/reviewer/launch.sh")" '.agent-duo/state/reviewer/session-settings.json'
 teardown
 
 exit "$ADK_FAIL"

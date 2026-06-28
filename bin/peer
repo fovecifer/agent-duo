@@ -2191,6 +2191,31 @@ send_text_to_pane() { # <pane> <buffer_name> <text>
   paste_buffer_and_enter "$pane" "$buf"
 }
 
+write_agent_launch_script() { # <agent-id> <body>
+  local agent_id="$1" body="$2" dir path tmp
+  dir="$AGENT_DUO_DIR/state/$agent_id"
+  path="$dir/launch.sh"
+  mkdir -p "$dir"
+  tmp="$path.$$"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -uo pipefail\n'
+    printf '%s\n' "$body"
+    cat <<'EOF'
+status=$?
+printf '\n[agent-duo] launch exited with status %s\n' "$status" >&2
+exec "${SHELL:-/bin/zsh}" -l
+EOF
+  } > "$tmp"
+  chmod +x "$tmp"
+  mv -f "$tmp" "$path"
+  printf '%s' "$path"
+}
+
+launch_script_command() { # <script-path>
+  printf '/bin/bash %q' "$1"
+}
+
 FORCE_SEND=0
 if [[ "${1:-}" == "--force" ]]; then
   FORCE_SEND=1
@@ -2262,13 +2287,6 @@ case "$cmd" in
           agent_worktree="$(reg_create_worktree "$new_id" "$AGENT_DUO_ROOT" "$SESSION")"
           reg_write_worktree_record "$AGENT_DUO_ROOT" "$new_id" "$agent_worktree" "$(reg_worktree_branch "$new_id")"
         fi
-        new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$agent_worktree" -P -F '#{pane_id}')"
-        tmux set-option -p -t "$new_pane" @agent_id "$new_id"
-        tmux set-option -p -t "$new_pane" @agent_role "$role"
-        tmux set-option -p -t "$new_pane" @agent_provider "$provider"
-        if [[ "$use_worktree" == "1" ]]; then
-          tmux set-option -p -t "$new_pane" @agent_worktree "$agent_worktree"
-        fi
         approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$agent_worktree")"
         launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
         bin_dir="$(dirname "$PEER_SRC")"
@@ -2287,8 +2305,15 @@ case "$cmd" in
         worktree_q="$(printf '%q' "$agent_worktree")"
         hook_q="$(printf '%q' "$APPROVAL_HOOK")"
         settings_q="$(printf '%q' "$approval_settings")"
-        send_text_to_pane "$new_pane" "agent-duo-start-$new_id" \
-          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_AGENT_ROLE=$role_q AGENT_DUO_AGENT_PROVIDER=$provider_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch"
+        launch_script="$(write_agent_launch_script "$new_id" \
+          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_AGENT_ROLE=$role_q AGENT_DUO_AGENT_PROVIDER=$provider_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch")"
+        new_pane="$(tmux new-window -t "$SESSION" -n "$new_id" -c "$agent_worktree" -P -F '#{pane_id}' "$(launch_script_command "$launch_script")")"
+        tmux set-option -p -t "$new_pane" @agent_id "$new_id"
+        tmux set-option -p -t "$new_pane" @agent_role "$role"
+        tmux set-option -p -t "$new_pane" @agent_provider "$provider"
+        if [[ "$use_worktree" == "1" ]]; then
+          tmux set-option -p -t "$new_pane" @agent_worktree "$agent_worktree"
+        fi
         echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
         run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
         if role_is_gated "$role"; then
