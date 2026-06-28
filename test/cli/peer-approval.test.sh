@@ -26,6 +26,14 @@ approval_latest_id() {
   basename "$f" .json
 }
 
+# approval check --help 是纯帮助路径,不应要求 tmux pane / agent 身份,也不应触发 grep 选项噪音。
+setup
+assert_ok "approval check help: no identity required" run_peer_without_agent approval check --help
+assert_contains "approval check help: prints usage" "$(cat "$OUT")" 'peer approval check'
+assert_not_contains "approval check help: no missing agent error" "$(cat "$ERR")" '找不到 agent'
+assert_not_contains "approval check help: no grep usage" "$(cat "$ERR")" 'usage: grep'
+teardown
+
 # peer approval ls/approve/deny are supervisor-internal actions over approval files.
 setup
 if ! approval_run_hook '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":7}'; then
@@ -41,7 +49,7 @@ assert_contains "peer approval approve: file approved" "$(cat "$PROJECT/.agent-d
 
 assert_ok "hook: approved request allows once" approval_run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"python deploy.py"},"round":8}'
-assert_contains "hook: approved request decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_eq "hook: approved request allow output" "$(cat "$OUT")" "{}"
 assert_contains "hook: approved request consumed" "$(cat "$PROJECT/.agent-duo/approvals/$pending_id.json")" '"status":"consumed"'
 
 assert_ok "hook: creates second pending request" approval_run_hook \
@@ -174,6 +182,10 @@ assert_contains "peer agent add: settings contains permission hook" "$(cat "$SET
 assert_contains "peer agent add: settings contains hook command" "$(cat "$SETTINGS")" 'agent-duo-approval-hook'
 assert_contains "peer agent add: send exports hook" "$(cat "$TMUX_STUB_LOG")" 'AGENT_DUO_APPROVAL_HOOK='
 assert_contains "peer agent add: send exports worker id" "$(cat "$TMUX_STUB_LOG")" 'AGENT_DUO_AGENT_ID=worker'
+assert_contains "peer agent add: send exports worker role" "$(cat "$TMUX_STUB_LOG")" 'AGENT_DUO_AGENT_ROLE=worker'
+assert_contains "peer agent add: send exports worker provider" "$(cat "$TMUX_STUB_LOG")" 'AGENT_DUO_AGENT_PROVIDER=codex'
+assert_contains "peer agent add: codex inherits shell env" "$(cat "$TMUX_STUB_LOG")" 'shell_environment_policy.inherit=all'
+assert_contains "peer agent add: codex pins tool PATH" "$(cat "$TMUX_STUB_LOG")" 'shell_environment_policy.set.PATH'
 assert_contains "peer agent add: codex send has hook config" "$(cat "$TMUX_STUB_LOG")" 'hooks.PreToolUse'
 assert_contains "peer agent add: codex send has permission hook config" "$(cat "$TMUX_STUB_LOG")" 'hooks.PermissionRequest'
 

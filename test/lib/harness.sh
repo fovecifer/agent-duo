@@ -122,6 +122,20 @@ case "$cmd" in
         printf 'Review complete: no issues found.\n'
         printf '❯ \n'
         ;;
+      stale_prompt)
+        has_start=0
+        for arg in "$@"; do
+          [[ "$arg" == "-S" ]] && has_start=1
+        done
+        if [[ "$has_start" == "1" ]]; then
+          printf 'Hooks need review\n'
+          printf '  1. Review hooks\n'
+          printf '  2. Trust all and continue\n'
+          printf 'Press enter to confirm\n'
+        fi
+        printf 'Review complete: no issues found.\n'
+        printf '❯ \n'
+        ;;
       sentinel)
         printf 'prior output\n'
         printf '%s\n' "$TMUX_STUB_SENTINEL"
@@ -413,7 +427,7 @@ run_peer_without_agent() {
   : > "$OUT"
   : > "$ERR"
   (
-    unset AGENT_NAME AGENT_CLAUDE_PANE AGENT_CODEX_PANE TMUX_PANE
+    unset AGENT_NAME AGENT_CLAUDE_PANE AGENT_CODEX_PANE TMUX_PANE AGENT_DUO_AGENT_ID AGENT_DUO_AGENT_ROLE
     PATH="$STUB_BIN:$PATH" \
       AGENT_SESSION="${TEST_AGENT_SESSION:-agents}" \
       TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
@@ -421,6 +435,30 @@ run_peer_without_agent() {
       TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" \
       TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
       TMUX_STUB_CAPTURE_TEXT="${TMUX_STUB_CAPTURE_TEXT:-stable-screen}" \
+      TMUX_STUB_HAS_SESSION="${TMUX_STUB_HAS_SESSION:-1}" \
+      "$ROOT/bin/peer" "$@" >"$OUT" 2>"$ERR"
+  )
+}
+
+run_peer_with_agent_id_without_pane() {
+  : > "$OUT"
+  : > "$ERR"
+  : > "$TMUX_STUB_LOG"
+  (
+    unset AGENT_NAME AGENT_CLAUDE_PANE AGENT_CODEX_PANE TMUX_PANE
+    PATH="$STUB_BIN:$PATH" \
+      AGENT_SESSION="${TEST_AGENT_SESSION:-agents}" \
+      AGENT_DUO_ROOT="${TEST_AGENT_DUO_ROOT:-$PROJECT}" \
+      AGENT_DUO_AGENT_ID="${TEST_AGENT_DUO_AGENT_ID:-supervisor}" \
+      AGENT_DUO_AGENT_ROLE="${TEST_AGENT_DUO_AGENT_ROLE:-supervisor}" \
+      TMUX_STUB_REGISTRY="$TMUX_STUB_REGISTRY" \
+      TMUX_STUB_LOG="$TMUX_STUB_LOG" \
+      TMUX_STUB_BUFFER_DIR="$TMUX_STUB_BUFFER_DIR" \
+      TMUX_STUB_CAPTURE_COUNT="$TMUX_STUB_CAPTURE_COUNT" \
+      TMUX_STUB_CAPTURE_TEXT="${TMUX_STUB_CAPTURE_TEXT:-stable-screen}" \
+      TMUX_STUB_CAPTURE_MODE="${TMUX_STUB_CAPTURE_MODE:-stable}" \
+      TMUX_STUB_SENTINEL="${TMUX_STUB_SENTINEL:-}" \
+      TMUX_STUB_CODEC_TAG="${TMUX_STUB_CODEC_TAG:-}" \
       TMUX_STUB_HAS_SESSION="${TMUX_STUB_HAS_SESSION:-1}" \
       "$ROOT/bin/peer" "$@" >"$OUT" 2>"$ERR"
   )

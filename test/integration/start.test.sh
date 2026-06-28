@@ -184,9 +184,11 @@ assert_contains     "F: single supervisor window"   "$(cat "$SENDLOG")" 'new-ses
 assert_contains     "F: tags supervisor id"          "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_id supervisor'
 assert_contains     "F: tags supervisor provider"    "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider claude'
 assert_contains     "F: launches claude"             "$(cat "$SENDLOG")" 'send-keys -t %1'
+assert_contains     "F: supervisor exports agent id" "$(cat "$SENDLOG")" 'AGENT_DUO_AGENT_ID=supervisor'
 assert_contains     "F: creates loopd window"         "$(cat "$SENDLOG")" "$tmux_new_window -t agents -n loopd"
 assert_contains     "F: tags loopd id"                "$(cat "$SENDLOG")" '@agent_id loopd'
 assert_contains     "F: tags loopd role"              "$(cat "$SENDLOG")" '@agent_role daemon'
+assert_contains     "F: loopd exports agent id"       "$(cat "$SENDLOG")" 'AGENT_DUO_AGENT_ID=loopd'
 assert_contains     "F: launches loopd"               "$(cat "$SENDLOG")" 'peer loopd'
 teardown
 
@@ -198,6 +200,9 @@ PATH="$STUB_BIN:$PATH" AGENT_DUO_AUTO_INJECT=1 \
   </dev/null >"$SCENARIO_TMP/out.txt" 2>&1
 assert_contains     "G: tags supervisor provider codex" "$(cat "$SENDLOG")" 'set-option -p -t %1 @agent_provider codex'
 assert_contains     "G: launches codex"                 "$(cat "$SENDLOG")" 'send-keys -t %1 export AGENT_SESSION=agents'
+assert_contains     "G: codex supervisor exports agent id" "$(cat "$SENDLOG")" 'AGENT_DUO_AGENT_ID=supervisor'
+assert_contains     "G: codex supervisor inherits shell env" "$(cat "$SENDLOG")" 'shell_environment_policy.inherit=all'
+assert_contains     "G: codex supervisor pins tool PATH" "$(cat "$SENDLOG")" 'shell_environment_policy.set.PATH'
 assert_contains     "G: codex supervisor gets settings env" "$(cat "$SENDLOG")" 'AGENT_DUO_SUPERVISOR_SETTINGS='
 assert_contains     "G: codex supervisor has user hook config" "$(cat "$SENDLOG")" 'hooks.UserPromptSubmit'
 assert_contains     "G: codex supervisor has stop hook config" "$(cat "$SENDLOG")" 'hooks.Stop'
@@ -219,6 +224,10 @@ assert_contains  "H: creates worker window"   "$(cat "$SENDLOG")" "$tmux_new_win
 assert_contains  "H: tags worker id"          "$(cat "$SENDLOG")" '@agent_id worker'
 assert_contains  "H: tags worker provider"    "$(cat "$SENDLOG")" '@agent_provider codex'
 assert_contains  "H: launches worker"         "$(cat "$SENDLOG")" 'send-keys -t %2'
+assert_contains  "H: worker exports role"     "$(cat "$SENDLOG")" 'AGENT_DUO_AGENT_ROLE=worker'
+assert_contains  "H: worker exports provider" "$(cat "$SENDLOG")" 'AGENT_DUO_AGENT_PROVIDER=codex'
+assert_contains  "H: codex worker inherits shell env" "$(cat "$SENDLOG")" 'shell_environment_policy.inherit=all'
+assert_contains  "H: codex worker pins tool PATH" "$(cat "$SENDLOG")" 'shell_environment_policy.set.PATH'
 assert_ok        "H: worker settings created" test -f "$PROJECT/.agent-duo/state/worker/session-settings.json"
 assert_contains  "H: worker exports approval settings" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_SETTINGS='
 assert_contains  "H: worker exports approval hook" "$(cat "$SENDLOG")" 'AGENT_DUO_APPROVAL_HOOK='

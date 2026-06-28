@@ -9,7 +9,8 @@
 #
 # 依赖环境变量:
 #   AGENT_SESSION  tmux 会话名,默认 agents
-#   AGENT_NAME     迁移兼容:当 pane @agent_id 缺失时回退为自身身份
+#   AGENT_DUO_AGENT_ID  稳定自身身份;Codex/Claude 工具子进程可能没有 TMUX_PANE
+#   AGENT_NAME     迁移兼容:当 pane/env 身份缺失时回退为自身身份
 #   PEER_FORCE=1   跳过 tell/esc 的权限弹窗检测
 
 set -euo pipefail
@@ -182,7 +183,12 @@ static_preflight_dispatch() {
       case "$second" in --help|-h|"") usage_agent; exit 0 ;; esac
       ;;
     approval)
-      case "$second" in --help|-h|"") usage_approval; exit 0 ;; esac
+      case "$second" in
+        --help|-h|"") usage_approval; exit 0 ;;
+        ls|approve|deny|status|check)
+          case "${3:-}" in --help|-h) usage_approval; exit 0 ;; esac
+          ;;
+      esac
       ;;
     loop)
       case "$second" in --help|-h|"") usage_loop; exit 0 ;; init|show|reset) ;; *)
@@ -267,11 +273,15 @@ static_preflight_dispatch() {
 
 static_preflight_dispatch "$@"
 
-# 自识别:优先读自己 pane 的 @agent_id;缺失则回退 AGENT_NAME(迁移兼容)。
+# 自识别:优先读自己 pane 的 @agent_id;缺失则回退启动注入的稳定身份,
+# 最后回退 AGENT_NAME(迁移兼容)。
 self_id() {
   local id=""
   if [[ -n "$SELF_PANE" ]]; then
     id="$(tmux display-message -p -t "$SELF_PANE" '#{@agent_id}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$id" ]]; then
+    id="${AGENT_DUO_AGENT_ID:-}"
   fi
   if [[ -z "$id" ]]; then
     id="${AGENT_NAME:-}"
@@ -285,6 +295,9 @@ self_role() {
     role="$(tmux display-message -p -t "$SELF_PANE" '#{@agent_role}' 2>/dev/null || true)"
   fi
   if [[ -z "$role" ]]; then
+    role="${AGENT_DUO_AGENT_ROLE:-}"
+  fi
+  if [[ -z "$role" ]]; then
     role="${AGENT_ROLE:-worker}"
   fi
   printf '%s' "$role"
@@ -292,7 +305,7 @@ self_role() {
 
 ME="$(self_id)"
 if [[ -z "$ME" ]]; then
-  echo "错误: 无法确定自身身份(既无 pane @agent_id 也无 AGENT_NAME)。请通过 start.sh 启动。" >&2
+  echo "错误: 无法确定自身身份(既无 pane @agent_id,也无 AGENT_DUO_AGENT_ID/AGENT_NAME)。请通过 start.sh 启动。" >&2
   exit 1
 fi
 
@@ -336,7 +349,7 @@ resolve_target_pane() {
   if [[ "$rc" == "2" ]]; then
     echo "错误: 会话里没有其他 agent 可作为目标。" >&2
   else
-    echo "错误: 会话内有多个 agent,请指定目标。可用: $(printf '%s ' $(printf '%s\n' "$ids" | grep -vx "$ME"))" >&2
+    echo "错误: 会话内有多个 agent,请指定目标。可用: $(printf '%s ' $(printf '%s\n' "$ids" | grep -vx -- "$ME"))" >&2
   fi
   exit 1
 }
@@ -511,6 +524,13 @@ codex_hook_config() { # <event> <command> [matcher]
   else
     printf 'hooks.%s=[{hooks=[{type="command",command=%s}]}]' "$event" "$command_toml"
   fi
+}
+
+codex_shell_env_args() { # <agent_duo_bin_dir>
+  local bin_dir="$1" tool_path
+  tool_path="$bin_dir:${PATH:-}"
+  printf -- '-c shell_environment_policy.inherit=all -c %s' \
+    "$(printf '%q' "shell_environment_policy.set.PATH=$(toml_string "$tool_path")")"
 }
 
 json_escape() {
@@ -2096,6 +2116,11 @@ capture() { # <pane> <lines>
   tmux capture-pane -p -J -t "$pane" -S "-$lines"
 }
 
+capture_visible() { # <pane>
+  local pane="$1"
+  tmux capture-pane -p -J -t "$pane"
+}
+
 matches_screen() {
   local screen="$1" pattern="$2"
   printf '%s\n' "$screen" | grep -Eiq "$pattern"
@@ -2142,14 +2167,8 @@ check_safe_to_send_keys() { # <pane>
     return 0
   fi
 
-  local lines="${PEER_PROMPT_CHECK_LINES:-80}"
-  if ! is_positive_int "$lines"; then
-    echo "错误: PEER_PROMPT_CHECK_LINES 必须是正整数。" >&2
-    exit 1
-  fi
-
   local screen
-  screen="$(capture "$pane" "$lines")"
+  screen="$(capture_visible "$pane")"
   if looks_like_prompt "$screen"; then
     echo "错误: 目标 agent 疑似正在等待权限确认/弹窗,peer 未发送按键。请人工查看;如确认强制发送,用 --force 或 PEER_FORCE=1。" >&2
     exit 3
@@ -2199,7 +2218,9 @@ case "$cmd" in
         while IFS=$'\t' read -r pane id role provider; do
           [[ -z "$pane" ]] && continue
           mark=' '
-          [[ "$pane" == "$SELF_PANE" ]] && mark='*'
+          if [[ -n "$SELF_PANE" && "$pane" == "$SELF_PANE" ]] || [[ -z "$SELF_PANE" && -n "$id" && "$id" == "$ME" ]]; then
+            mark='*'
+          fi
           if [[ -z "$id" ]]; then
             printf '%-3s %-16s %-12s %-10s %s\n' "$mark" '(unregistered)' '-' '-' "$pane"
           else
@@ -2233,7 +2254,7 @@ case "$cmd" in
           new_id="$(reg_derive_id "$role" "$(agent_ids)")"
         elif ! is_role_token "$new_id"; then
           echo "错误: --id 只能包含字母、数字、点、下划线和连字符,且必须以字母或数字开头。" >&2; exit 1
-        elif agent_ids | grep -qx "$new_id"; then
+        elif agent_ids | grep -qx -- "$new_id"; then
           echo "错误: id '$new_id' 已被占用。" >&2; exit 1
         fi
         agent_worktree="$PWD"
@@ -2250,21 +2271,24 @@ case "$cmd" in
         fi
         approval_settings="$(install_approval_session_settings "$new_id" "$provider" "$agent_worktree")"
         launch="$(reg_provider_launch_cmd "$provider" "$PEER_INSTR")"
+        bin_dir="$(dirname "$PEER_SRC")"
         if [[ "$provider" == "claude" ]]; then
           launch="$launch --settings $(printf '%q' "$approval_settings")"
         else
           hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
+          launch="$launch $(codex_shell_env_args "$bin_dir")"
           launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
           launch="$launch -c $(printf '%q' "$(codex_hook_config PermissionRequest "$hook_command" "*")")"
         fi
-        bin_dir="$(dirname "$PEER_SRC")"
         root_q="$(printf '%q' "$AGENT_DUO_ROOT")"
         agent_q="$(printf '%q' "$new_id")"
+        role_q="$(printf '%q' "$role")"
+        provider_q="$(printf '%q' "$provider")"
         worktree_q="$(printf '%q' "$agent_worktree")"
         hook_q="$(printf '%q' "$APPROVAL_HOOK")"
         settings_q="$(printf '%q' "$approval_settings")"
         tmux send-keys -t "$new_pane" \
-          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
+          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_AGENT_ROLE=$role_q AGENT_DUO_AGENT_PROVIDER=$provider_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
         echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
         run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
         if role_is_gated "$role"; then
@@ -2376,7 +2400,7 @@ case "$cmd" in
           echo "用法: peer approval status [<id>]" >&2
           exit 1
         fi
-        agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
+        agent_ids | grep -qx -- "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
         bs_json="$(run_approval_broker status --agent-id "$maybe_id" --root "$AGENT_DUO_ROOT")"
         printf '%s\n' "$bs_json"
         case "$bs_json" in
@@ -2398,7 +2422,7 @@ case "$cmd" in
           maybe_id="$(reg_pick_other "$(self_id)" "$(agent_ids)")" || {
             echo "用法: peer approval check <id>(多于两人时必须指定 id)" >&2; exit 1; }
         fi
-        agent_ids | grep -qx "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
+        agent_ids | grep -qx -- "$maybe_id" || { echo "错误: 找不到 agent '$maybe_id'。" >&2; exit 1; }
         target="$(pane_for_id "$maybe_id")"
         [[ -n "$nonce" ]] || nonce="bc$(random_hex_tag)"
         probe_cmd="$(run_approval_broker selfcheck-cmd --nonce "$nonce")"
@@ -2459,7 +2483,7 @@ case "$cmd" in
     fi
     # 首参若精确匹配某已注册 id → 作为目标消费掉。
     maybe_id=""
-    if [[ -n "${1:-}" ]] && agent_ids | grep -qx "$1"; then
+    if [[ -n "${1:-}" ]] && agent_ids | grep -qx -- "$1"; then
       maybe_id="$1"; shift
     fi
     target="$(resolve_target_pane "$maybe_id")"
@@ -2512,7 +2536,7 @@ case "$cmd" in
           while [[ $# -gt 0 ]]; do ask_parts+=("$1"); shift; done
           ;;
         *)
-          if [[ -z "$maybe_id" && ${#ask_parts[@]} -eq 0 ]] && agent_ids | grep -qx "$1"; then
+          if [[ -z "$maybe_id" && ${#ask_parts[@]} -eq 0 ]] && agent_ids | grep -qx -- "$1"; then
             maybe_id="$1"
           else
             ask_parts+=("$1")
@@ -2583,7 +2607,7 @@ case "$cmd" in
           while [[ $# -gt 0 ]]; do reframe_parts+=("$1"); shift; done
           ;;
         *)
-          if [[ -z "$maybe_id" && ${#reframe_parts[@]} -eq 0 ]] && agent_ids | grep -qx "$1"; then
+          if [[ -z "$maybe_id" && ${#reframe_parts[@]} -eq 0 ]] && agent_ids | grep -qx -- "$1"; then
             maybe_id="$1"
           else
             reframe_parts+=("$1")

@@ -14,6 +14,17 @@ TEST_TMUX_PANE="%1" assert_ok "identity: self from tmux pane" run_peer status
 assert_contains "identity: prints self id" "$(cat "$OUT")" 'supervisor'
 teardown
 
+# 身份:Codex/Claude 工具子进程可能丢失 TMUX_PANE,此时回退启动注入的 AGENT_DUO_AGENT_ID。
+setup
+assert_ok "identity: self from agent id env fallback" run_peer_with_agent_id_without_pane status
+assert_contains "identity: env fallback prints self id" "$(cat "$OUT")" '我是: supervisor'
+teardown
+
+setup
+assert_ok "identity: env fallback marks self in agent ls" run_peer_with_agent_id_without_pane agent ls
+assert_contains "identity: env fallback self mark" "$(cat "$OUT")" '*   supervisor'
+teardown
+
 # status:命令分发与默认目标展示。
 setup
 assert_ok "status: succeeds" run_peer status
@@ -87,6 +98,14 @@ setup
 AGENT_DUO_NO_BROKER_GATE=1 TMUX_STUB_CAPTURE_MODE=normal_prompt assert_ok "tell: normal prompt screen succeeds" run_peer tell "ordinary"
 assert_eq "tell: normal prompt buffer content" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "ordinary"
 assert_contains "tell: normal prompt enter" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %2 Enter'
+teardown
+
+# tell:旧 scrollback 里的权限提示不应阻塞当前可见的正常输入提示。
+setup
+AGENT_DUO_NO_BROKER_GATE=1 TMUX_STUB_CAPTURE_MODE=stale_prompt assert_ok "tell: stale prompt history ignored" run_peer tell "after trust"
+assert_eq "tell: stale prompt buffer content" "$(cat "$TMUX_STUB_BUFFER_DIR/peer-supervisor2worker")" "after trust"
+assert_contains "tell: stale prompt uses visible capture" "$(cat "$TMUX_STUB_LOG")" 'capture-pane -p -J -t %2'
+assert_contains "tell: stale prompt enter" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %2 Enter'
 teardown
 
 # tell:对方疑似权限弹窗时拒绝发送,不写 buffer、不粘贴、不回车。

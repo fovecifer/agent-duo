@@ -67,16 +67,20 @@ latest_approval_id() {
   basename "$f" .json
 }
 
+assert_pretool_allow_output() {
+  assert_eq "$1" "$(cat "$OUT")" "{}"
+}
+
 # Provider hook environments may pass a broken PATH; the hook entrypoint must
 # repair it before resolving its own location or invoking the broker backend.
 assert_ok "hook: approval entrypoint works with broken PATH" run_hook_broken_path \
   '{"tool_name":"Bash","tool_input":{"command":"pwd"},"round":3}'
-assert_contains "hook: broken PATH allow decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: broken PATH allow output"
 
 # Bash allowlist: all command segments must be allowlisted, then audit only.
 assert_ok "hook: bash allowlisted segments pass" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"pwd && git diff --check"},"round":4}'
-assert_contains "hook: bash allow decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: bash allow output"
 assert_contains "hook: allow audit" "$(cat "$PROJECT/.agent-duo/logs/approvals.jsonl")" '"decision":"auto-allow"'
 assert_ok "hook: allow does not enqueue event" test ! -f "$PROJECT/.agent-duo/events/queue.jsonl"
 
@@ -135,11 +139,11 @@ assert_not_contains "hook: bash redirection not allowed" "$(cat "$OUT")" '"permi
 # Benign redirects on allowlisted commands stay auto-allowed (fd-dup, /dev/null, in-worktree).
 assert_ok "hook: redirect stderr-to-stdout allowed" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"npm test 2>&1"},"round":6}'
-assert_contains "hook: redirect 2>&1 decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: redirect 2>&1 allow output"
 
 assert_ok "hook: redirect to /dev/null allowed" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"npm test > /dev/null"},"round":6}'
-assert_contains "hook: redirect devnull decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: redirect devnull allow output"
 
 # File-target redirects escalate (regex can't safely resolve $VARS / ~ / >&file forms).
 assert_ok "hook: file-target redirect escalates" run_hook \
@@ -214,7 +218,7 @@ inside="$WORKTREE/src/app.txt"
 outside="$TMP/outside.txt"
 assert_ok "hook: write inside worktree allowed" run_hook \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$inside\"},\"round\":10}"
-assert_contains "hook: write inside decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: write inside allow output"
 
 assert_ok "hook: write outside worktree escalates" run_hook \
   "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$outside\"},\"round\":11}"
@@ -232,7 +236,7 @@ assert_contains "hook: secret path deny" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 # MCP policy: read/list/get/search style tools are allowlisted, mutating tools are denied.
 assert_ok "hook: mcp read allow" run_hook \
   '{"tool_name":"mcp__github__fetch_file","tool_input":{},"round":13}'
-assert_contains "hook: mcp read decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: mcp read allow output"
 
 assert_ok "hook: mcp write deny" run_hook \
   '{"tool_name":"mcp__github__merge_pull_request","tool_input":{},"round":14}'
@@ -241,7 +245,7 @@ assert_contains "hook: mcp write deny reason" "$(cat "$OUT")" 'DENIED-BY-POLICY'
 # Codex reports file edits through canonical apply_patch, not Claude-style Edit/Write.
 assert_ok "hook: apply_patch inside worktree allowed" run_hook \
   '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: src/new.txt\n+hello\n*** End Patch"},"round":15}'
-assert_contains "hook: apply_patch inside decision" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "hook: apply_patch inside allow output"
 assert_contains "hook: apply_patch audit keeps command" "$(cat "$PROJECT/.agent-duo/logs/approvals.jsonl")" 'src/new.txt'
 
 assert_ok "hook: apply_patch outside worktree escalates" run_hook \
@@ -327,18 +331,18 @@ assert_contains "selfcheck: whitespace-tolerant probe nonce" "$(broker_status)" 
 # A grep that merely mentions the sentinel is NOT a probe → normal policy (grep is allowlisted → allow).
 run_hook '{"tool_name":"Bash","tool_input":{"command":"grep AGENT_DUO_BROKER_SELFCHECK_zzz test/peer.test.sh"},"round":41}'
 assert_not_contains "selfcheck: grep mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
-assert_contains "selfcheck: grep mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "selfcheck: grep mention auto-allowed"
 assert_not_contains "selfcheck: grep mention no fake nonce" "$(broker_status)" '"nonce":"zzz"'
 
 # An echo that mentions the sentinel is NOT a probe.
 run_hook '{"tool_name":"Bash","tool_input":{"command":"echo AGENT_DUO_BROKER_SELFCHECK_yyy"},"round":42}'
 assert_not_contains "selfcheck: echo mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
-assert_contains "selfcheck: echo mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "selfcheck: echo mention auto-allowed"
 
 # A cat of a ..._.tmp file (not printf) is NOT a probe.
 run_hook '{"tool_name":"Bash","tool_input":{"command":"cat AGENT_DUO_BROKER_SELFCHECK_www.tmp"},"round":43}'
 assert_not_contains "selfcheck: cat mention not a probe" "$(cat "$OUT")" 'BROKER-SELFCHECK'
-assert_contains "selfcheck: cat mention auto-allowed" "$(cat "$OUT")" '"permissionDecision":"allow"'
+assert_pretool_allow_output "selfcheck: cat mention auto-allowed"
 
 # ⑦ Hook event name is recorded in the audit log and the marker (observability).
 AUDIT_LOG="$PROJECT/.agent-duo/logs/approvals.jsonl"

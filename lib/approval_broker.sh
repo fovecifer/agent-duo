@@ -598,8 +598,9 @@ ab_output() { # <decision:allow|deny> [reason] [approval_id]
     allow|deny) ;;
     *) decision="deny"; [[ -n "$reason" ]] || reason="$ESCALATE_REASON" ;;
   esac
-  # Schema differs per event (verified against developers.openai.com/codex/hooks):
-  #   PreToolUse  -> hookSpecificOutput.permissionDecision (+ permissionDecisionReason)
+  # Schema differs per event (verified against current Codex behavior):
+  #   PreToolUse  -> deny uses hookSpecificOutput.permissionDecision; allow must emit no
+  #                  decision override, because Codex rejects permissionDecision=allow.
   #   PermissionRequest -> hookSpecificOutput.decision.behavior (+ message); it does NOT
   #     honor permissionDecision, so emitting it there is a silent no-op (= fail-open on deny).
   inner="\"hookEventName\":\"$(ab_json_escape "$event")\""
@@ -608,6 +609,10 @@ ab_output() { # <decision:allow|deny> [reason] [approval_id]
     if [[ -n "$reason" ]]; then inner="${inner},\"message\":\"$(ab_json_escape "$reason")\""; fi
     inner="${inner}}"
   else
+    if [[ "$decision" == "allow" ]]; then
+      printf '{}\n'
+      return 0
+    fi
     inner="${inner},\"permissionDecision\":\"$(ab_json_escape "$decision")\""
     if [[ -n "$reason" ]]; then inner="${inner},\"permissionDecisionReason\":\"$(ab_json_escape "$reason")\""; fi
   fi

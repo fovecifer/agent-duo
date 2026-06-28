@@ -276,6 +276,13 @@ codex_hook_config() { # <event> <command> [matcher]
   fi
 }
 
+codex_shell_env_args() { # <agent_duo_bin_dir>
+  local bin_dir="$1" tool_path
+  tool_path="$bin_dir:${PATH:-}"
+  printf -- '-c shell_environment_policy.inherit=all -c %s' \
+    "$(shell_quote "shell_environment_policy.set.PATH=$(toml_string "$tool_path")")"
+}
+
 SESSION_Q="$(shell_quote "$SESSION")"
 BIN_DIR_Q="$(shell_quote "$BIN_DIR")"
 WORKDIR_Q="$(shell_quote "$WORKDIR")"
@@ -285,7 +292,8 @@ SUP_USER_CMD="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$SUP_SETTIN
 SUP_STOP_CMD="$(jq -r '.hooks.Stop[0].hooks[0].command' "$SUP_SETTINGS")"
 
 # 单 supervisor 窗口(默认 claude,可用 --supervisor 指定 codex)。
-# 身份走 tmux per-pane 用户选项 @agent_*,不再注入 AGENT_NAME。
+# 身份主路径走 tmux per-pane 用户选项 @agent_*;同时注入 AGENT_DUO_AGENT_ID,
+# 兜底 Codex/Claude 工具子进程丢失 TMUX_PANE 的场景。
 SUP_PANE="$(tmux new-session -d -s "$SESSION" -n supervisor -c "$WORKDIR" -P -F '#{pane_id}')"
 tmux set-option -p -t "$SUP_PANE" @agent_id supervisor
 tmux set-option -p -t "$SUP_PANE" @agent_role supervisor
@@ -294,10 +302,10 @@ tmux set-option -p -t "$SUP_PANE" @agent_provider "$SUPERVISOR_PROVIDER"
 if [[ "$SUPERVISOR_PROVIDER" == "claude" ]]; then
   SUP_LAUNCH="$CLAUDE_LAUNCH --settings $SUP_SETTINGS_Q"
 else
-  SUP_LAUNCH="codex -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
+  SUP_LAUNCH="codex $(codex_shell_env_args "$BIN_DIR") -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
 fi
 tmux send-keys -t "$SUP_PANE" \
-  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH" Enter
+  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=supervisor AGENT_DUO_AGENT_ROLE=supervisor AGENT_DUO_AGENT_PROVIDER=$SUPERVISOR_PROVIDER AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH" Enter
 
 # loopd 是可见 pane:负责 cursor 投递、liveness/tick 与看板。
 LOOPD_PANE="$(tmux new-window -t "$SESSION" -n loopd -c "$WORKDIR" -P -F '#{pane_id}')"
@@ -307,7 +315,7 @@ tmux set-option -p -t "$LOOPD_PANE" @agent_provider bash
 mkdir -p "$WORKDIR/.agent-duo/state"
 date +%s > "$WORKDIR/.agent-duo/state/daemon.expected"
 tmux send-keys -t "$LOOPD_PANE" \
-  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q PATH=$BIN_DIR_Q:\$PATH; peer loopd" Enter
+  "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=loopd AGENT_DUO_AGENT_ROLE=daemon AGENT_DUO_AGENT_PROVIDER=bash PATH=$BIN_DIR_Q:\$PATH; peer loopd" Enter
 
 # --with <provider>:<role> → 立即再起一个 worker(等价 peer agent add)。
 if [[ -n "$WITH_SPEC" ]]; then
@@ -337,6 +345,7 @@ if [[ -n "$WITH_SPEC" ]]; then
     W_LAUNCH="$W_LAUNCH --settings $(shell_quote "$W_SETTINGS")"
   else
     W_HOOK_CMD="$(jq -r '.codex.managed_hook_command' "$W_SETTINGS")"
+    W_LAUNCH="$W_LAUNCH $(codex_shell_env_args "$BIN_DIR")"
     W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PreToolUse "$W_HOOK_CMD" "*")")"
     W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PermissionRequest "$W_HOOK_CMD" "*")")"
   fi
@@ -344,7 +353,7 @@ if [[ -n "$WITH_SPEC" ]]; then
   APPROVAL_HOOK_Q="$(shell_quote "$APPROVAL_HOOK")"
   W_SETTINGS_Q="$(shell_quote "$W_SETTINGS")"
   tmux send-keys -t "$W_PANE" \
-    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
+    "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=$W_ID_Q AGENT_DUO_AGENT_ROLE=$W_ID_Q AGENT_DUO_AGENT_PROVIDER=$W_PROVIDER AGENT_DUO_WORKTREE=$W_WORKDIR_Q AGENT_DUO_APPROVAL_HOOK=$APPROVAL_HOOK_Q AGENT_DUO_APPROVAL_SETTINGS=$W_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $W_LAUNCH" Enter
   # broker 起始为 unverified:hook 未被 provider 实际调用前不得假设其生效(等价 peer agent add)。
   # 必须覆盖同一 workdir 旧 session 可能残留的 fresh ready marker,否则硬门会误放行未信任的新 worker。
   /bin/bash "$APPROVAL_BROKER" mark --agent-id "$W_ROLE" --status unverified --root "$WORKDIR" >/dev/null 2>&1 || true
