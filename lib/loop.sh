@@ -193,7 +193,11 @@ EOF
 }
 
 ad_loop_print_block_decision() { # <event_text>
-  jq -cn --arg reason "$1" '{decision:"block",reason:$reason}'
+  local reason="$1"
+  if [[ "${AD_LOOP_BLOCK_DECISION_STDERR:-0}" == "1" ]]; then
+    printf '%s\n' "$reason" >&2
+  fi
+  jq -cn --arg reason "$reason" '{decision:"block",reason:$reason}'
 }
 
 ad_loop_inject_event_text() { # <event_text>

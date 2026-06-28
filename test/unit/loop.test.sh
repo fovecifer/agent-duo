@@ -247,6 +247,7 @@ write_validation_result builder 2 fail '[]' '["tests pass"]' '["smoke"]'
 assert_exit_code "stop-hook gate: verify fail blocks" 2 run_stop_hook builder
 assert_contains "stop-hook gate: block decision" "$(cat "$OUT")" '"decision":"block"'
 assert_contains "stop-hook gate: continue directive" "$(cat "$OUT")" '继续'
+assert_contains "stop-hook gate: writes continuation to stderr" "$(cat "$ERR")" '继续修复'
 assert_ok "stop-hook gate: under budget opens no gate" test ! -d "$PROJECT/.agent-duo/gates"
 teardown
 

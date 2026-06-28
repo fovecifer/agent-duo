@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
 source "$ROOT/lib/loop.sh"
 
 AGENT_DUO_ROOT="${AGENT_DUO_ROOT:-$PWD}"
+export AD_LOOP_BLOCK_DECISION_STDERR=1
 
 stop_gate_report_has_evidence() { # <report_path>
   jq -e '
