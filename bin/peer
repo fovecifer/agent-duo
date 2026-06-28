@@ -2282,7 +2282,7 @@ case "$cmd" in
         elif agent_ids | grep -qx -- "$new_id"; then
           echo "错误: id '$new_id' 已被占用。" >&2; exit 1
         fi
-        agent_worktree="$PWD"
+        agent_worktree="${AGENT_DUO_WORKTREE:-$AGENT_DUO_ROOT}"
         if [[ "$use_worktree" == "1" ]]; then
           agent_worktree="$(reg_create_worktree "$new_id" "$AGENT_DUO_ROOT" "$SESSION")"
           reg_write_worktree_record "$AGENT_DUO_ROOT" "$new_id" "$agent_worktree" "$(reg_worktree_branch "$new_id")"
