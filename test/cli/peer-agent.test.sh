@@ -34,6 +34,9 @@ assert_contains "add: tags provider" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t
 assert_contains "add: default cwd is root" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window -t agents -n helper -c $PROJECT"
 assert_contains "add: new window uses launch script" "$(cat "$TMUX_STUB_LOG")" '.agent-duo/state/helper/launch.sh'
 assert_contains "add: launches codex" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" 'codex '
+assert_contains "add: codex uses workspace-write sandbox" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" '--sandbox workspace-write'
+assert_contains "add: codex allows tmux socket dir" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" '--add-dir'
+assert_contains "add: codex allows tmux unix socket" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" 'network.allow_unix_sockets'
 assert_contains "add: default worktree is root" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" "AGENT_DUO_WORKTREE=$PROJECT"
 assert_not_contains "add: codex hook command is not double-encoded" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains "add: prints id" "$(cat "$OUT")" 'helper'

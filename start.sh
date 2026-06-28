@@ -308,6 +308,22 @@ codex_shell_env_args() { # <agent_duo_bin_dir>
     "$(shell_quote "shell_environment_policy.set.PATH=$(toml_string "$tool_path")")"
 }
 
+codex_tmux_access_args() {
+  local sock_dir
+  if [[ -n "${TMUX:-}" ]]; then
+    sock_dir="${TMUX%%,*}"
+    sock_dir="${sock_dir%/*}"
+  else
+    sock_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+  fi
+  if [[ -d "$sock_dir" ]]; then
+    sock_dir="$(cd "$sock_dir" && pwd -P)"
+  fi
+  printf -- '--sandbox workspace-write --add-dir %s -c %s' \
+    "$(shell_quote "$sock_dir")" \
+    "$(shell_quote "network.allow_unix_sockets=[$(toml_string "$sock_dir")]")"
+}
+
 SESSION_Q="$(shell_quote "$SESSION")"
 BIN_DIR_Q="$(shell_quote "$BIN_DIR")"
 WORKDIR_Q="$(shell_quote "$WORKDIR")"
@@ -319,7 +335,7 @@ SUP_STOP_CMD="$(jq -r '.hooks.Stop[0].hooks[0].command' "$SUP_SETTINGS")"
 if [[ "$SUPERVISOR_PROVIDER" == "claude" ]]; then
   SUP_LAUNCH="$CLAUDE_LAUNCH --settings $SUP_SETTINGS_Q"
 else
-  SUP_LAUNCH="codex $(codex_shell_env_args "$BIN_DIR") -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
+  SUP_LAUNCH="codex $(codex_shell_env_args "$BIN_DIR") $(codex_tmux_access_args) -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
 fi
 SUP_LAUNCH_SCRIPT="$(write_launch_script "$WORKDIR" supervisor \
   "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=supervisor AGENT_DUO_AGENT_ROLE=supervisor AGENT_DUO_AGENT_PROVIDER=$SUPERVISOR_PROVIDER AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH")"
@@ -364,6 +380,7 @@ if [[ -n "$WITH_SPEC" ]]; then
   else
     W_HOOK_CMD="$(jq -r '.codex.managed_hook_command' "$W_SETTINGS")"
     W_LAUNCH="$W_LAUNCH $(codex_shell_env_args "$BIN_DIR")"
+    W_LAUNCH="$W_LAUNCH $(codex_tmux_access_args)"
     W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PreToolUse "$W_HOOK_CMD" "*")")"
     W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PermissionRequest "$W_HOOK_CMD" "*")")"
   fi

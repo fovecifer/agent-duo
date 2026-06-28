@@ -187,6 +187,9 @@ assert_contains "peer agent add: send exports worker role" "$(cat "$PROJECT/.age
 assert_contains "peer agent add: send exports worker provider" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'AGENT_DUO_AGENT_PROVIDER=codex'
 assert_contains "peer agent add: codex inherits shell env" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.inherit=all'
 assert_contains "peer agent add: codex pins tool PATH" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.set.PATH'
+assert_contains "peer agent add: codex uses workspace-write sandbox" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" '--sandbox workspace-write'
+assert_contains "peer agent add: codex allows tmux socket dir" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" '--add-dir'
+assert_contains "peer agent add: codex allows tmux unix socket" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'network.allow_unix_sockets'
 assert_contains "peer agent add: codex send has hook config" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'hooks.PreToolUse'
 assert_contains "peer agent add: codex send has permission hook config" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'hooks.PermissionRequest'
 

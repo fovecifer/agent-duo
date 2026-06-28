@@ -533,6 +533,22 @@ codex_shell_env_args() { # <agent_duo_bin_dir>
     "$(printf '%q' "shell_environment_policy.set.PATH=$(toml_string "$tool_path")")"
 }
 
+codex_tmux_access_args() {
+  local sock_dir
+  if [[ -n "${TMUX:-}" ]]; then
+    sock_dir="${TMUX%%,*}"
+    sock_dir="${sock_dir%/*}"
+  else
+    sock_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+  fi
+  if [[ -d "$sock_dir" ]]; then
+    sock_dir="$(cd "$sock_dir" && pwd -P)"
+  fi
+  printf -- '--sandbox workspace-write --add-dir %s -c %s' \
+    "$(printf '%q' "$sock_dir")" \
+    "$(printf '%q' "network.allow_unix_sockets=[$(toml_string "$sock_dir")]")"
+}
+
 json_escape() {
   local s="${1:-}"
   s="${s//\\/\\\\}"
@@ -2105,8 +2121,12 @@ screen_has_round_sentinel() { # <screen> <round> <agent_id> [codec_tag]
 }
 
 ensure_session() {
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
+  local err
+  if ! err="$(tmux list-panes -s -t "$SESSION" -F '#{pane_id}' 2>&1 >/dev/null)"; then
+    echo "错误: tmux 会话 '$SESSION' 不存在或不可访问。" >&2
+    if [[ -n "$err" ]]; then
+      echo "tmux: $err" >&2
+    fi
     exit 1
   fi
 }
@@ -2235,10 +2255,7 @@ case "$cmd" in
           usage_agent >&2
           exit 1
         fi
-        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-          echo "错误: tmux 会话 '$SESSION' 不存在。" >&2
-          exit 1
-        fi
+        ensure_session
         printf '%-3s %-16s %-12s %-10s %s\n' '' 'ID' 'ROLE' 'PROVIDER' 'PANE'
         while IFS=$'\t' read -r pane id role provider; do
           [[ -z "$pane" ]] && continue
@@ -2295,6 +2312,7 @@ case "$cmd" in
         else
           hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
           launch="$launch $(codex_shell_env_args "$bin_dir")"
+          launch="$launch $(codex_tmux_access_args)"
           launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
           launch="$launch -c $(printf '%q' "$(codex_hook_config PermissionRequest "$hook_command" "*")")"
         fi
