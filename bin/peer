@@ -2287,8 +2287,8 @@ case "$cmd" in
         worktree_q="$(printf '%q' "$agent_worktree")"
         hook_q="$(printf '%q' "$APPROVAL_HOOK")"
         settings_q="$(printf '%q' "$approval_settings")"
-        tmux send-keys -t "$new_pane" \
-          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_AGENT_ROLE=$role_q AGENT_DUO_AGENT_PROVIDER=$provider_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch" Enter
+        send_text_to_pane "$new_pane" "agent-duo-start-$new_id" \
+          "export AGENT_SESSION=$(printf '%q' "$SESSION") AGENT_DUO_ROOT=$root_q AGENT_DUO_AGENT_ID=$agent_q AGENT_DUO_AGENT_ROLE=$role_q AGENT_DUO_AGENT_PROVIDER=$provider_q AGENT_DUO_WORKTREE=$worktree_q AGENT_DUO_APPROVAL_HOOK=$hook_q AGENT_DUO_APPROVAL_SETTINGS=$settings_q PATH=$(printf '%q' "$bin_dir"):\$PATH; $launch"
         echo "已创建 agent '$new_id'(role=$role, provider=$provider, pane=$new_pane)。"
         run_approval_broker mark --agent-id "$new_id" --status unverified --root "$AGENT_DUO_ROOT" >/dev/null 2>&1 || true
         if role_is_gated "$role"; then

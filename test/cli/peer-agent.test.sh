@@ -24,15 +24,17 @@ assert_ok "ls: unregistered succeeds" run_peer agent ls
 assert_contains "ls: unregistered marked" "$(cat "$OUT")" '(unregistered)'
 teardown
 
-# add:新建 window、写三个 @agent_* 标签、send-keys 启动 provider、打印 id。
+# add:新建 window、写三个 @agent_* 标签、通过 tmux buffer 启动 provider、打印 id。
 setup
 TMUX_STUB_NEW_PANE="%5" assert_ok "add: succeeds" run_peer agent add --provider codex --role worker --id helper
 assert_contains "add: new window called" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window"
 assert_contains "add: tags id"       "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_id helper'
 assert_contains "add: tags role"     "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_role worker'
 assert_contains "add: tags provider" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t %5 @agent_provider codex'
-assert_contains "add: launches codex" "$(cat "$TMUX_STUB_LOG")" 'send-keys -t %5'
-assert_not_contains "add: codex hook command is not double-encoded" "$(cat "$TMUX_STUB_LOG")" 'command=\"\\\"AGENT_DUO_ROOT'
+assert_contains "add: loads launch buffer" "$(cat "$TMUX_STUB_LOG")" 'load-buffer -b agent-duo-start-helper -'
+assert_contains "add: pastes launch buffer" "$(cat "$TMUX_STUB_LOG")" 'paste-buffer -b agent-duo-start-helper -t %5 -d -p'
+assert_contains "add: launches codex" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-helper")" 'codex '
+assert_not_contains "add: codex hook command is not double-encoded" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-helper")" 'command=\"\\\"AGENT_DUO_ROOT'
 assert_contains "add: prints id" "$(cat "$OUT")" 'helper'
 teardown
 
@@ -102,8 +104,8 @@ assert_contains "add worktree: git registered path" "$(git -C "$PROJECT" worktre
 assert_contains "add worktree: git registered branch" "$(git -C "$PROJECT" worktree list --porcelain)" 'branch refs/heads/agent-duo/helper'
 assert_contains "add worktree: window cwd" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window -t agents -n helper -c $wt_path"
 assert_contains "add worktree: pane option" "$(cat "$TMUX_STUB_LOG")" "@agent_worktree $wt_path"
-assert_contains "add worktree: root stays main" "$(cat "$TMUX_STUB_LOG")" "AGENT_DUO_ROOT=$PROJECT"
-assert_contains "add worktree: worker worktree env" "$(cat "$TMUX_STUB_LOG")" "AGENT_DUO_WORKTREE=$wt_path"
+assert_contains "add worktree: root stays main" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-helper")" "AGENT_DUO_ROOT=$PROJECT"
+assert_contains "add worktree: worker worktree env" "$(cat "$TMUX_STUB_BUFFER_DIR/agent-duo-start-helper")" "AGENT_DUO_WORKTREE=$wt_path"
 assert_contains "add worktree: broker scoped to worktree" "$(cat "$PROJECT/.agent-duo/state/helper/session-settings.json")" "\"worktree\":\"$wt_path\""
 teardown
 
