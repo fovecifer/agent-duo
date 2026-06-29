@@ -2311,6 +2311,12 @@ case "$cmd" in
           launch="$launch --settings $(printf '%q' "$approval_settings")"
         else
           hook_command="$(jq -r '.codex.managed_hook_command' "$approval_settings")"
+          # Broker-as-single-gate: agent-duo's PreToolUse hook is the worker's only
+          # approval gate, so skip Codex's own hook-trust modal (we inject and vet our
+          # own hooks) and its native command-approval prompts. Without these, every
+          # worker pane deadlocks on "Hooks need review" and then drowns in native
+          # per-command modals that the supervisor cannot dismiss.
+          launch="$launch --dangerously-bypass-hook-trust --ask-for-approval untrusted"
           launch="$launch $(codex_shell_env_args "$bin_dir")"
           launch="$launch $(codex_tmux_access_args)"
           launch="$launch -c $(printf '%q' "$(codex_hook_config PreToolUse "$hook_command" "*")")"
@@ -2338,7 +2344,7 @@ case "$cmd" in
           echo "提示: '$new_id' 的 Approval Broker 起始为 unverified;派任务前先运行 'peer approval check $new_id' 验证 broker 生效,否则首次 'peer tell $new_id ...' 会被硬门 fail-closed 拒发。"
         fi
         if [[ "$provider" == "codex" ]]; then
-          echo "Codex hook 提示: 若该 pane 提示 hooks need review，请运行 /hooks 并信任 agent-duo hook(信任前 peer approval check 不会通过)。"
+          echo "Codex 已用 --dangerously-bypass-hook-trust --ask-for-approval untrusted 启动:agent-duo Approval Broker 是它唯一的门(不再弹 hooks need review / 原生审批)。"
         fi
         ;;
       rm)

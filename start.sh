@@ -335,7 +335,10 @@ SUP_STOP_CMD="$(jq -r '.hooks.Stop[0].hooks[0].command' "$SUP_SETTINGS")"
 if [[ "$SUPERVISOR_PROVIDER" == "claude" ]]; then
   SUP_LAUNCH="$CLAUDE_LAUNCH --settings $SUP_SETTINGS_Q"
 else
-  SUP_LAUNCH="codex $(codex_shell_env_args "$BIN_DIR") $(codex_tmux_access_args) -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
+  # supervisor 没有 PreToolUse broker hook(角色隔离:只有 UserPromptSubmit+Stop),
+  # 所以保留 Codex 原生审批作为它的门;只跳过 hooks-need-review 模态框(我们注入并已 vet
+  # 自己的 hook),否则 supervisor 开局就卡在该框、且无法替自己确认。
+  SUP_LAUNCH="codex --dangerously-bypass-hook-trust $(codex_shell_env_args "$BIN_DIR") $(codex_tmux_access_args) -c $(shell_quote "$(codex_hook_config UserPromptSubmit "$SUP_USER_CMD")") -c $(shell_quote "$(codex_hook_config Stop "$SUP_STOP_CMD")")"
 fi
 SUP_LAUNCH_SCRIPT="$(write_launch_script "$WORKDIR" supervisor \
   "export AGENT_SESSION=$SESSION_Q AGENT_DUO_ROOT=$WORKDIR_Q AGENT_DUO_AGENT_ID=supervisor AGENT_DUO_AGENT_ROLE=supervisor AGENT_DUO_AGENT_PROVIDER=$SUPERVISOR_PROVIDER AGENT_DUO_SUPERVISOR_SETTINGS=$SUP_SETTINGS_Q PATH=$BIN_DIR_Q:\$PATH; $SUP_LAUNCH")"
@@ -379,6 +382,9 @@ if [[ -n "$WITH_SPEC" ]]; then
     W_LAUNCH="$W_LAUNCH --settings $(shell_quote "$W_SETTINGS")"
   else
     W_HOOK_CMD="$(jq -r '.codex.managed_hook_command' "$W_SETTINGS")"
+    # Broker-as-single-gate(同 peer agent add):worker 的 PreToolUse broker hook 是唯一的门,
+    # 跳过 Codex 自己的 hook-trust 模态框与原生命令审批,否则 worker pane 会卡死/弹框风暴。
+    W_LAUNCH="$W_LAUNCH --dangerously-bypass-hook-trust --ask-for-approval untrusted"
     W_LAUNCH="$W_LAUNCH $(codex_shell_env_args "$BIN_DIR")"
     W_LAUNCH="$W_LAUNCH $(codex_tmux_access_args)"
     W_LAUNCH="$W_LAUNCH -c $(shell_quote "$(codex_hook_config PreToolUse "$W_HOOK_CMD" "*")")"
@@ -424,7 +430,13 @@ if [[ -n "$WITH_SPEC" ]]; then
   echo "否则首次 'peer tell $W_ROLE ...' 会被硬门 fail-closed 拒发。"
 fi
 
-if [[ "$SUPERVISOR_PROVIDER" == "codex" || "${WITH_PROVIDER:-}" == "codex" ]]; then
+if [[ "${WITH_PROVIDER:-}" == "codex" ]]; then
   echo
-  echo "Codex hook 提示: 若 Codex 启动时提示 hooks need review，请在该 Codex pane 内运行 /hooks 并信任 agent-duo hook；未信任前不要假设 Approval Broker 已生效。"
+  echo "Codex worker 已用 --dangerously-bypass-hook-trust --ask-for-approval untrusted 启动:"
+  echo "agent-duo Approval Broker 是它唯一的门,不再弹 hooks need review / 原生审批。"
+fi
+if [[ "$SUPERVISOR_PROVIDER" == "codex" ]]; then
+  echo
+  echo "Codex supervisor 保留原生审批作为它的门(角色隔离,无 PreToolUse broker hook);"
+  echo "已跳过 hooks need review 模态框。supervisor 的 peer 命令仍可能弹原生确认,可在该 pane 选择「不再询问 peer」一次性消除。"
 fi

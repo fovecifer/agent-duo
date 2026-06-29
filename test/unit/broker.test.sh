@@ -84,6 +84,31 @@ assert_pretool_allow_output "hook: bash allow output"
 assert_contains "hook: allow audit" "$(cat "$PROJECT/.agent-duo/logs/approvals.jsonl")" '"decision":"auto-allow"'
 assert_ok "hook: allow does not enqueue event" test ! -f "$PROJECT/.agent-duo/events/queue.jsonl"
 
+# peer: agent-duo's own loop control plane. A worker must be able to drive its own
+# loop participation (report/task/checkpoint/read) without per-command approval, or
+# the loop cannot self-advance. But cross-agent drive and self-approval must STILL
+# escalate — a worker auto-allowing `peer approval approve` would be a broker bypass.
+assert_ok "hook: peer report auto-allows" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"peer report --type result --status done"},"round":6}'
+assert_pretool_allow_output "hook: peer report allow output"
+assert_ok "hook: peer task next auto-allows" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"peer task next worker"},"round":6}'
+assert_pretool_allow_output "hook: peer task next allow output"
+assert_ok "hook: peer wait auto-allows" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"peer wait 30"},"round":6}'
+assert_pretool_allow_output "hook: peer wait allow output"
+
+# Self-approval and cross-agent drive must escalate (not auto-allow).
+assert_ok "hook: peer approval approve escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"peer approval approve abc123"},"round":6}'
+assert_contains "hook: peer approval approve pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_ok "hook: peer tell escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"peer tell reviewer hi"},"round":6}'
+assert_contains "hook: peer tell pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+assert_ok "hook: peer agent add escalates" run_hook \
+  '{"tool_name":"Bash","tool_input":{"command":"peer agent add --role helper"},"round":6}'
+assert_contains "hook: peer agent add pending" "$(cat "$OUT")" 'BLOCKED-PENDING-APPROVAL'
+
 # Bash deny priority: one denied segment makes the whole command hard-deny.
 assert_ok "hook: bash deny segment blocks" run_hook \
   '{"tool_name":"Bash","tool_input":{"command":"pwd && rm -rf .agent-duo"},"round":5}'

@@ -34,6 +34,10 @@ assert_contains "add: tags provider" "$(cat "$TMUX_STUB_LOG")" 'set-option -p -t
 assert_contains "add: default cwd is root" "$(cat "$TMUX_STUB_LOG")" "$tmux_new_window -t agents -n helper -c $PROJECT"
 assert_contains "add: new window uses launch script" "$(cat "$TMUX_STUB_LOG")" '.agent-duo/state/helper/launch.sh'
 assert_contains "add: launches codex" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" 'codex '
+# Broker-as-single-gate: worker codex must skip Codex's own hook-trust modal and native
+# command approval, leaving the agent-duo PreToolUse hook as the only gate.
+assert_contains "add: codex worker bypasses hook-trust modal" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" '--dangerously-bypass-hook-trust'
+assert_contains "add: codex worker uses untrusted approval (deny honored)" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" '--ask-for-approval untrusted'
 assert_contains "add: codex uses workspace-write sandbox" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" '--sandbox workspace-write'
 assert_contains "add: codex allows tmux socket dir" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" '--add-dir'
 assert_contains "add: codex allows tmux unix socket" "$(cat "$PROJECT/.agent-duo/state/helper/launch.sh")" 'network.allow_unix_sockets'
@@ -60,12 +64,12 @@ TMUX_STUB_NEW_PANE="%5" assert_ok "add: claude supervisor succeeds" run_peer age
 assert_not_contains "add: exempt role no approval check hint" "$(cat "$OUT")" 'approval check'
 teardown
 
-# add:Codex 工作型角色既给 approval check 提示,也给 /hooks 信任提示。
+# add:Codex 工作型角色既给 approval check 提示,也说明它走 broker 单门(bypass hook-trust + 原生审批)。
 setup
 TMUX_STUB_NEW_PANE="%5" assert_ok "add: codex worker succeeds" run_peer agent add --provider codex --role worker --id helper2
 add_out="$(cat "$OUT")"
 assert_contains "add: codex worker approval check hint" "$add_out" 'peer approval check helper2'
-assert_contains "add: codex worker hooks hint" "$add_out" '/hooks'
+assert_contains "add: codex worker single-gate hint" "$add_out" '--dangerously-bypass-hook-trust'
 teardown
 
 # add:非法 provider 报错。

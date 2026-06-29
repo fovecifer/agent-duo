@@ -382,6 +382,17 @@ ab_bash_segment_allowed() {
   # cannot be trusted to neutralize their embedded programs. Escalate them until worktree
   # isolation is a real FS sandbox (MVP 4). See approval-broker design §诚实定位.
   if ab_match "$text" '^git[[:space:]]+(status|diff|show|log|branch|rev-parse|ls-files|grep)([[:space:]]|$)'; then printf 'allow.git_read'; return 0; fi
+  # peer: agent-duo's own loop control plane (the injected bin/peer). A worker must
+  # run report/task/checkpoint/read to participate in the loop; blocking these makes
+  # the loop unable to self-advance. Auto-allow peer, EXCEPT the subcommands that would
+  # let a worker bypass the broker (approve/deny its own escalations) or steer other
+  # agents (tell/ask/agent add|rm) — those still escalate to supervisor/human.
+  if ab_match "$text" '^peer([[:space:]]|$)'; then
+    if ab_match "$text" '^peer[[:space:]]+approval[[:space:]]+(approve|deny)([[:space:]]|$)'; then return 1; fi
+    if ab_match "$text" '^peer[[:space:]]+(tell|ask)([[:space:]]|$)'; then return 1; fi
+    if ab_match "$text" '^peer[[:space:]]+agent[[:space:]]+(add|rm)([[:space:]]|$)'; then return 1; fi
+    printf 'allow.peer'; return 0
+  fi
   if ab_match "$text" '^(bash|sh)[[:space:]]+test/run\.sh([[:space:]]|$)'; then printf 'allow.test'; return 0; fi
   if ab_match "$text" '^\./test/run\.sh([[:space:]]|$)'; then printf 'allow.test'; return 0; fi
   if ab_match "$text" '^(npm|pnpm|yarn|bun)[[:space:]]+(test|run[[:space:]]+test)([[:space:]]|$)'; then printf 'allow.test'; return 0; fi

@@ -205,6 +205,10 @@ assert_contains     "G: codex supervisor exports agent id" "$(cat "$PROJECT/.age
 assert_contains     "G: codex supervisor inherits shell env" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'shell_environment_policy.inherit=all'
 assert_contains     "G: codex supervisor pins tool PATH" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'shell_environment_policy.set.PATH'
 assert_contains     "G: codex supervisor uses workspace-write sandbox" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--sandbox workspace-write'
+# supervisor skips the hook-trust modal but KEEPS Codex native approval as its gate
+# (no PreToolUse broker hook on supervisor — role isolation).
+assert_contains     "G: codex supervisor bypasses hook-trust modal" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--dangerously-bypass-hook-trust'
+assert_not_contains "G: codex supervisor keeps native approval (no -a override)" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--ask-for-approval'
 assert_contains     "G: codex supervisor allows tmux socket dir" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" '--add-dir'
 assert_contains     "G: codex supervisor allows tmux unix socket" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'network.allow_unix_sockets'
 assert_contains     "G: codex supervisor gets settings env" "$(cat "$PROJECT/.agent-duo/state/supervisor/launch.sh")" 'AGENT_DUO_SUPERVISOR_SETTINGS='
@@ -233,6 +237,9 @@ assert_contains  "H: worker exports provider" "$(cat "$PROJECT/.agent-duo/state/
 assert_contains  "H: codex worker inherits shell env" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.inherit=all'
 assert_contains  "H: codex worker pins tool PATH" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'shell_environment_policy.set.PATH'
 assert_contains  "H: codex worker uses workspace-write sandbox" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" '--sandbox workspace-write'
+# worker is broker-single-gate: skip hook-trust modal AND native approval.
+assert_contains  "H: codex worker bypasses hook-trust modal" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" '--dangerously-bypass-hook-trust'
+assert_contains  "H: codex worker uses untrusted approval (deny honored)"  "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" '--ask-for-approval untrusted'
 assert_contains  "H: codex worker allows tmux socket dir" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" '--add-dir'
 assert_contains  "H: codex worker allows tmux unix socket" "$(cat "$PROJECT/.agent-duo/state/worker/launch.sh")" 'network.allow_unix_sockets'
 assert_ok        "H: worker settings created" test -f "$PROJECT/.agent-duo/state/worker/session-settings.json"
